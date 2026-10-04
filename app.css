@@ -29,3 +29,5 @@ textarea{font:inherit;border-radius:10px;border:1px solid var(--bd);background:v
 .badge[hidden]{display:none}
 a.file{text-decoration:none}
 .card>button{margin-top:8px}
+.busy .file,.busy select{opacity:.5;pointer-events:none}
+progress[hidden]{display:none}

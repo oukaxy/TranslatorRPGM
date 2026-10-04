@@ -20,6 +20,8 @@ export const UI = {
   tooMany: 'Tiga batch gagal berturut-turut. Periksa Pengaturan atau koneksi, lalu lanjutkan',
   exportEmpty: 'Belum ada terjemahan yang bisa diekspor. Terjemahkan dulu di tab Translate',
   urlBad: 'Base URL harus memakai https. Untuk lokal pakai localhost',
+  nothing: 'Tidak ada teks yang perlu diterjemahkan. Semua sudah selesai, atau impor tidak menemukan teks',
+  emptyImp: 'Impor selesai tapi tidak ada teks yang ditemukan. Sumber Jepang hanya mengambil teks berhuruf Jepang. Bila game berbahasa Inggris, hapus proyek ini lalu impor ulang dengan sumber Inggris',
 };
 
 // ===== 2. STORAGE (wrapper IndexedDB, hash, hapus data) =====
@@ -413,12 +415,15 @@ export async function exportProject(project, model = '') {
   return { ...r, blob: await writeZip([...r.files, { name: 'patch-report.txt', data: new TextEncoder().encode(r.report) }]) };
 }
 /** Impor folder/zip: simpan JSON asli dan entries ke IndexedDB. */
-export async function importProject(files, src = 'ja') {
+export async function importProject(files, src = 'ja', onProgress = () => {}) {
+  onProgress('Membaca daftar file…', 0, 0);
   const { engine: eng, data } = await collectSources(files);
   if (!data.size) throw new Error(UI.noData);
   const id = 'p' + Date.now().toString(36), orig = [], entries = [], broken = [], counts = {};
-  let sys = null;
+  let sys = null, i = 0;
   for (const [path, item] of data) {
+    onProgress(`Membaca ${path.split('/').pop()} (${i + 1} dari ${data.size})`, i, data.size);
+    if (i++ % 10 === 0) await new Promise((r) => setTimeout(r));
     let text, json;
     try { text = await item.read(); json = JSON.parse(text); } catch { broken.push(path); continue; }
     if (path.endsWith('System.json')) sys = json;
@@ -430,6 +435,7 @@ export async function importProject(files, src = 'ja') {
   }
   const engine = eng || (sys && (sys.advanced || sys.itemCategories) ? 'MZ' : 'MV');
   const project = { id, engine, src, tgt: 'id', files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
+  onProgress(`Menyimpan ${entries.length} teks…`, data.size, data.size);
   await dbPutMany('origFiles', orig);
   await dbPutMany('entries', entries);
   await dbPut('projects', project);
@@ -669,23 +675,35 @@ async function currentProject() {
   const cur = await dbGet('settings', 'current');
   return cur ? dbGet('projects', cur.value) : null;
 }
+let importNote = null;
 async function viewProyek() {
-  const msg = h('p', { class: 'mut' });
-  let src = 'ja';
+  const msg = h('p', { class: 'mut' }), bar = h('progress', { value: '0', max: '1', hidden: '' });
+  const box = card(h('h2', {}, 'Impor game'));
+  let src = 'ja', busy = false;
+  if (importNote) { msg.className = importNote.bad ? 'err' : 'mut'; msg.textContent = importNote.text; importNote = null; }
+  const lock = (on) => { busy = on; box.classList.toggle('busy', on); bar.hidden = !on; };
   const run = async (ev) => {
-    const files = [...ev.target.files]; if (!files.length) return;
-    msg.className = 'mut'; msg.textContent = 'Mengimpor…';
-    try { await importProject(files, src); await render(); }
-    catch (e) { msg.className = 'err'; msg.textContent = e.message; }
+    const files = [...ev.target.files]; ev.target.value = '';
+    if (!files.length || busy) return;
+    lock(true); bar.removeAttribute('value'); msg.className = 'mut'; msg.textContent = 'Mengimpor…';
+    try {
+      const p = await importProject(files, src, (t, d, n) => { msg.textContent = t; if (n) { bar.max = n; bar.value = d; } else bar.removeAttribute('value'); });
+      importNote = p.total
+        ? { text: `Impor selesai. ${p.total} teks dari ${p.files} file${p.broken.length ? `, ${p.broken.length} file rusak dilewati` : ''}. Lanjut ke tab Translate` }
+        : { bad: true, text: UI.emptyImp };
+      await render();
+    } catch (e) { lock(false); msg.className = 'err'; msg.textContent = e.message; }
   };
   const sel = h('select', { onchange: (e) => { src = e.target.value; } },
     h('option', { value: 'ja' }, 'Jepang'), h('option', { value: 'en' }, 'Inggris'));
   const pick = (label, attrs) => h('label', { class: 'file' }, label, h('input', { type: 'file', onchange: run, ...attrs }));
-  const out = [card(h('h2', {}, 'Impor game'), h('label', {}, 'Bahasa sumber'), sel,
-    pick('Pilih folder data', { webkitdirectory: '', multiple: '' }), pick('Pilih zip game', { accept: '.zip' }), msg)];
+  box.append(h('label', {}, 'Bahasa sumber'), sel,
+    pick('Pilih folder data', { webkitdirectory: '', multiple: '' }), pick('Pilih zip game', { accept: '.zip' }), bar, msg);
+  const out = [box];
   const p = await currentProject();
   if (p) out.push(card(h('h2', {}, 'Ringkasan'),
-    h('p', { class: 'mut' }, `Engine: ${p.engine}\nFile JSON: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}`),
+    h('p', { class: 'mut' }, `Engine: ${p.engine}\nSumber: ${p.src === 'ja' ? 'Jepang' : 'Inggris'}\nFile JSON: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}`),
+    p.total ? '' : h('p', { class: 'err' }, UI.emptyImp),
     Object.entries(p.counts).map(([k, v]) => h('span', { class: 'badge' }, `${k} ${v}`)),
     h('button', { onclick: async () => { if (confirm('Hapus proyek ini beserta semua terjemahannya?')) { await deleteProject(p.id); await render(); } } }, 'Hapus proyek')));
   return out;
@@ -704,7 +722,8 @@ async function startJob() {
   job.running = true; job.ctl = new AbortController(); job.value = 0; job.text = 'Memulai…'; paintJob();
   try {
     const r = await runTranslation(p, cfg, { signal: job.ctl.signal, onProgress: (d, t, txt) => { job.value = d; job.max = t || 1; job.text = txt; paintJob(); } });
-    job.text = `${r.stopped ? 'Dihentikan' : 'Selesai'}. ${r.done} berhasil (${r.cached} dari cache), ${r.error} error`;
+    job.text = !r.done && !r.error && !r.stopped ? UI.nothing
+      : `${r.stopped ? 'Dihentikan' : 'Selesai'}. ${r.done} berhasil (${r.cached} dari cache), ${r.error} error${r.error ? '. Lihat di tab Review, filter Error' : ''}`;
   } catch (e) { job.err = true; job.text = e.message; }
   job.running = false; paintJob();
   if (/^#\/translate/.test(location.hash)) render();
@@ -721,6 +740,7 @@ async function viewTranslate() {
   const start = h('button', { class: 'pri', onclick: startJob }, cnt('done') || cnt('error') ? 'Lanjutkan' : 'Mulai translate');
   const stop = h('button', { onclick: () => job.ctl?.abort() }, 'Hentikan');
   job.ui = { bar, txt, start, stop };
+  if (!p.total) job.text = UI.emptyImp, job.err = true;
   const money = est.cost === null ? 'isi harga token di Pengaturan' : `sekitar ${est.cost.toFixed(4)} (satuan mengikuti harga di Pengaturan)`;
   const out = [
     card(h('h2', {}, 'Bahasa'), h('label', {}, 'Sumber'), h('p', { class: 'mut' }, p.src === 'ja' ? 'Jepang' : 'Inggris'), h('label', {}, 'Target'), tgt),
