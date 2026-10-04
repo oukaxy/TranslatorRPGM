@@ -96,7 +96,18 @@ export const DB_FIELDS = {
   Items: ['name', 'description'], Weapons: ['name', 'description'], Armors: ['name', 'description'],
   Enemies: ['name'], States: ['name', 'message1', 'message2', 'message3', 'message4'],
 };
-const ESC = /\\(?:[A-Za-z]+\[\d+\]|[A-Za-z]|[{}.|!^$<>\\])/g;
+// Kode escape (\C[2], \!, ...) dan tag plugin ASCII seperti <br>, <WordWrap>, <left>. Tag berisi huruf Jepang tidak ikut.
+const ESC = /\\(?:[A-Za-z]+\[\d+\]|[A-Za-z]|[{}.|!^$<>\\])|<\/?[A-Za-z][ -;=?-~]{0,40}>/g;
+// Plugin message yang punya word-wrap sendiri. Bila aktif, pemecahan baris manual dimatikan.
+const MSG_PLUGIN = /^(YEP_MessageCore|VisuMZ_1_MessageCore)$|word.?wrap|line.?wrap|auto.?wrap|text.?wrap|message.?wrap/i;
+/** Daftar nama plugin message aktif dari isi js/plugins.js. */
+export function detectMessagePlugins(text) {
+  const out = [];
+  for (const m of String(text).matchAll(/"name"\s*:\s*"([^"]*)"\s*,\s*"status"\s*:\s*(true|false)/g)) if (m[2] === 'true' && MSG_PLUGIN.test(m[1])) out.push(m[1]);
+  return out;
+}
+/** Config efektif: bila proyek memakai plugin message, batas baris manual dimatikan. */
+export const effCfg = (project, cfg) => (project?.msgPlugins?.length ? { ...cfg, wrapWidth: 0, wrapFace: 0 } : cfg);
 const JA = /[\u3040-\u30ff\u3400-\u9fff]/;
 /** Ganti kode escape dengan token ⟦n⟧. */
 export function maskText(text) {
@@ -111,6 +122,34 @@ export function unmaskText(text, tokens) {
 }
 /** Teks tanpa kode escape (untuk mengukur panjang baris yang terlihat). */
 export const stripEscapes = (s) => s.replace(ESC, '');
+/** Lebar tampil satu baris: huruf CJK dihitung 2, \\N/\\V/\\P kira-kira 4, \\I kira-kira 2, kode lain 0. */
+export function visWidth(line) {
+  let w = 0;
+  for (const ch of line.replace(ESC, (m) => (/^\\[NnVvPp]\[/.test(m) ? '0000' : /^\\[Ii]\[/.test(m) ? '00' : ''))) w += ch.charCodeAt(0) >= 0x2e80 ? 2 : 1;
+  return w;
+}
+/** Pecah teks dialog agar tiap baris <= width. Bila semua baris sudah muat, teks tidak diubah (null). */
+export function wrapLines(text, width) {
+  const lines = text.replace(/^\n+|\n+$/g, '').split('\n');
+  if (!width || lines.every((l) => visWidth(l) <= width)) return null;
+  const out = []; let cur = '';
+  for (const w of lines.join(' ').split(/\s+(?![^<>]*>)/).filter(Boolean)) {
+    if (cur && visWidth(cur) + 1 + visWidth(w) > width) { out.push(cur); cur = w; } else cur = cur ? cur + ' ' + w : w;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+const WRAP_KEYS = /^(description|profile)$/;
+/** Batas tampil untuk satu entry: {line: maks karakter per baris, lines: maks baris} atau null. */
+export function limitFor(e, cfg) {
+  let key = ''; try { key = String(JSON.parse(e.path).at(-1)); } catch { /* path tidak ada */ }
+  cfg ||= {};
+  let line = 0, lines = 0;
+  if (e.kind === 'block' && e.category === 'dialog') { line = e.meta?.face ? cfg.wrapFace : cfg.wrapWidth; lines = 4; }
+  else if (e.kind === 'field' && e.category !== 'plugin' && WRAP_KEYS.test(key)) { line = cfg.wrapWidth; lines = 2; }
+  else if (e.kind === 'field' && e.category !== 'plugin' && /^message\d$/.test(key)) { line = cfg.wrapWidth; lines = 1; }
+  return line ? { line, lines } : null;
+}
 /** Apakah string layak diterjemahkan (bukan kosong/hanya escape; sumber ja harus ada kana/kanji). */
 export function isTranslatable(s, src = 'ja') {
   if (typeof s !== 'string') return false;
@@ -188,13 +227,42 @@ async function collectSources(files) {
   const engine = has(/(^|\/)js\/rmmz_core\.js$/) ? 'MZ' : has(/(^|\/)js\/rpg_core\.js$/) ? 'MV' : null;
   const data = new Map();
   for (const i of list) { const k = normalizeDataPath(i.path); if (k) data.set(k, i); }
-  return { engine, data };
+  return { engine, data, plugins: list.find((i) => /(^|\/)js\/plugins\.js$/.test(i.path)) || null };
 }
 /**
  * Ekstrak unit teks dari satu file JSON sesuai whitelist.
  * @returns {Array} entry tanpa id/projectId/hash
  */
-export function extractFile(path, json, { src = 'ja' } = {}) {
+/**
+ * Daftar aman plugin (opsional, satu entri per baris):
+ *   mz Plugin.command.arg  -> argumen perintah plugin MZ (kode 357)
+ *   mv Command             -> teks setelah nama perintah plugin MV (kode 356), dianggap satu string
+ *   param Plugin.key       -> parameter plugin di js/plugins.js (hanya string biasa)
+ */
+export function parseAllow(text = '') {
+  const o = { mz: [], mv: [], param: [] };
+  for (const line of String(text).split('\n')) {
+    const m = line.trim().match(/^(mz|mv|param)\s+(\S.*)$/i);
+    if (m) o[m[1].toLowerCase()].push(m[2].trim());
+  }
+  return o;
+}
+const allowSets = (a) => ({ mz: new Set(a?.mz), mv: new Set(a?.mv), param: new Set(a?.param) });
+const looksStruct = (v) => /^\s*[\[{]/.test(v);
+/** Pecah js/plugins.js menjadi {pre, arr, post}; null bila bukan array JSON murni. */
+export function parsePluginsJs(text) {
+  const a = text.indexOf('['), b = text.lastIndexOf(']');
+  if (a < 0 || b < a) return null;
+  try { const arr = JSON.parse(text.slice(a, b + 1)); return Array.isArray(arr) ? { pre: text.slice(0, a), post: text.slice(b + 1), arr } : null; } catch { return null; }
+}
+export const buildPluginsJs = (pj, arr) => pj.pre + '[\n' + arr.map((x) => JSON.stringify(x)).join(',\n') + '\n]' + pj.post;
+const normPluginsPath = (p) => ((p.replace(/\\/g, '/').match(/(?:^|\/)(www\/)?js\/plugins\.js$/) || [])[1] || '') + 'js/plugins.js';
+// Event: 320 ganti nama, 324 ganti nickname, 325 ganti profil aktor (parameters[1] = teks).
+const NAME_CODES = new Set([320, 324, 325]);
+// System: daftar tipe berupa array string.
+const SYS_LISTS = ['skillTypes', 'weaponTypes', 'armorTypes', 'equipTypes', 'elements'];
+export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
+  const A = allowSets(allow);
   const base = path.split('/').pop().replace(/\.json$/i, ''), out = [];
   const add = (p, kind, category, original, meta = {}, lineCount = 1) => {
     if (!isTranslatable(original, src)) return;
@@ -208,9 +276,16 @@ export function extractFile(path, json, { src = 'ja' } = {}) {
         const body = c.code === 101 ? 401 : 405, lines = []; let j = i + 1;
         if (c.code === 101 && typeof P[4] === 'string') add([...p, i, 'parameters', 4], 'speaker', 'speaker', P[4]);
         while (list[j]?.code === body) { lines.push(list[j].parameters[0]); j++; }
-        if (lines.length) add([...p, i], 'block', body === 401 ? 'dialog' : 'scroll', lines.join('\n'), { speaker: P[4] || '' }, lines.length);
+        if (lines.length) add([...p, i], 'block', body === 401 ? 'dialog' : 'scroll', lines.join('\n'), { speaker: P[4] || '', face: !!P[0] }, lines.length);
         i = j - 1;
       } else if (c.code === 102 && Array.isArray(P[0])) P[0].forEach((t, k) => add([...p, i, 'parameters', 0, k], 'choice', 'choice', t));
+      else if (NAME_CODES.has(c.code) && typeof P[1] === 'string') add([...p, i, 'parameters', 1], 'field', 'actorname', P[1]);
+      else if (c.code === 357 && A.mz.size && P[3] && typeof P[3] === 'object') {
+        for (const k of Object.keys(P[3])) if (typeof P[3][k] === 'string' && !looksStruct(P[3][k]) && A.mz.has(`${P[0]}.${P[1]}.${k}`)) add([...p, i, 'parameters', 3, k], 'field', 'plugin', P[3][k]);
+      } else if (c.code === 356 && A.mv.size && typeof P[0] === 'string') {
+        const m = P[0].match(/^(\S+)\s+(\S[\s\S]*)$/);
+        if (m && A.mv.has(m[1])) add([...p, i, 'parameters', 0], 'field', 'plugin', m[2], { prefix: P[0].slice(0, P[0].length - m[2].length) });
+      }
     }
   };
   const walk = (v, p) => {
@@ -222,11 +297,16 @@ export function extractFile(path, json, { src = 'ja' } = {}) {
   if (base === 'System') {
     ['gameTitle', 'currencyUnit'].forEach((k) => add([k], 'field', 'system', json[k]));
     walk(json.terms, ['terms']);
+    SYS_LISTS.forEach((k) => Array.isArray(json[k]) && walk(json[k], [k]));
   } else if (/^Map\d+$/.test(base)) {
     add(['displayName'], 'field', 'map', json.displayName);
     (json.events || []).forEach((ev, ei) => ev && pages(ev.pages, ['events', ei]));
   } else if (base === 'CommonEvents') (json || []).forEach((ev, i) => ev && scanList(ev.list, [i, 'list']));
   else if (base === 'Troops') (json || []).forEach((t, i) => t && pages(t.pages, [i]));
+  else if (base === 'plugins.js' && Array.isArray(json)) json.forEach((pl, i) => {
+    if (!pl || pl.status === false || !pl.parameters) return;
+    for (const k of Object.keys(pl.parameters)) if (typeof pl.parameters[k] === 'string' && !looksStruct(pl.parameters[k]) && A.param.has(`${pl.name}.${k}`)) add([i, 'parameters', k], 'field', 'plugin', pl.parameters[k]);
+  });
   else if (DB_FIELDS[base]) (json || []).forEach((it, i) => it && DB_FIELDS[base].forEach((f) => add([i, f], 'field', base.toLowerCase(), it[f])));
   return out;
 }
@@ -294,7 +374,7 @@ function sync402(list, i, k, oldText, newText) {
  * @param {Array} entries entri milik file ini (yang tidak done/edited dilewati)
  * @param {string[]} problems diisi bila path tidak cocok
  */
-export function applyTranslations(json, entries, problems = []) {
+export function applyTranslations(json, entries, problems = [], opts = {}) {
   const blocks = new Map();
   for (const e of entries.filter(isApplicable)) {
     const p = JSON.parse(e.path);
@@ -302,7 +382,12 @@ export function applyTranslations(json, entries, problems = []) {
     const parent = getAt(json, p.slice(0, -1)), key = p.at(-1);
     if (typeof parent?.[key] !== 'string') { problems.push(`${e.file} ${e.path}: path tidak cocok dengan file asli`); continue; }
     const old = parent[key];
-    parent[key] = e.kind === 'choice' ? e.translation.replace(/\s*\n\s*/g, ' ') : e.translation;
+    parent[key] = e.kind === 'choice' ? e.translation.replace(/\s*\n\s*/g, ' ') : e.category === 'plugin' ? (e.meta?.prefix || '') + e.translation.replace(/\s*\n\s*/g, ' ').trim() : e.translation;
+    if (e.kind === 'field' && e.category !== 'plugin' && opts.wrap && WRAP_KEYS.test(String(key))) {
+      const w = wrapLines(parent[key], opts.wrap.width);
+      if (w) { parent[key] = w.join('\n'); if (opts.stats) opts.stats.wrapped++; }
+      if (opts.stats && parent[key].split('\n').length > 2) opts.stats.long++;
+    }
     if (e.kind === 'choice') sync402(getAt(json, p.slice(0, -4)), p.at(-4), p.at(-1), old, parent[key]);
   }
   for (const [k, arr] of blocks) {
@@ -312,7 +397,12 @@ export function applyTranslations(json, entries, problems = []) {
       const i = p.at(-1), head = Array.isArray(list) ? list[i] : null, body = head?.code === 101 ? 401 : head?.code === 105 ? 405 : 0;
       if (!body) { problems.push(`${e.file} ${e.path}: header blok tidak cocok dengan file asli`); continue; }
       let j = i + 1; while (list[j]?.code === body) j++;
-      const lines = e.translation.replace(/^\n+|\n+$/g, '').split('\n');
+      let lines = e.translation.replace(/^\n+|\n+$/g, '').split('\n');
+      if (body === 401 && opts.wrap) {
+        const face = typeof head.parameters?.[0] === 'string' && head.parameters[0] !== '';
+        const w = wrapLines(e.translation, face ? opts.wrap.face : opts.wrap.width);
+        if (w) { lines = w; if (opts.stats) opts.stats.wrapped++; }
+      }
       list.splice(i + 1, j - i - 1, ...lines.map((t) => ({ code: body, indent: head.indent, parameters: [t] })));
     }
   }
@@ -342,11 +432,11 @@ function splitList(list) {
  * penyisipan/penghapusan baris 401/405 pada blok 101/105 yang boleh berbeda.
  * @returns {string[]} daftar masalah (kosong bila lolos), maksimal 20
  */
-export function diffGuard(orig, next, file = 'data/X.json') {
+export function diffGuard(orig, next, file = 'data/X.json', allow = null) {
   const probs = [], allowS = new Set(), allowB = new Set();
   // Proyek lama menyimpan indeks array System.terms sebagai string; samakan jadi angka.
   const norm = (path) => JSON.stringify(JSON.parse(path).map((k) => (typeof k === 'string' && /^\d+$/.test(k) ? Number(k) : k)));
-  for (const e of extractFile(file, orig, { src: 'en' })) (e.kind === 'block' ? allowB : allowS).add(norm(e.path));
+  for (const e of extractFile(file, orig, { src: 'en', allow })) (e.kind === 'block' ? allowB : allowS).add(norm(e.path));
   const bad = (p, why) => { if (probs.length < 20) probs.push(`${file} ${JSON.stringify(p)}: ${why}`); };
   const cmpList = (a, b, p) => {
     const A = splitList(a), B = splitList(b);
@@ -386,8 +476,8 @@ export function diffGuard(orig, next, file = 'data/X.json') {
  * @param {{path:string,text:string}[]} files origFiles
  * @returns {{ok:boolean, empty?:boolean, problems:string[], files:{name:string,data:Uint8Array}[], report:string, stat:object}}
  */
-export function buildPatch(files, entries, { model = '', date = new Date() } = {}) {
-  const byFile = new Map(), out = [], problems = [], stat = { files: 0, applied: 0, pending: 0, error: 0, skipped: 0 };
+export function buildPatch(files, entries, { model = '', date = new Date(), wrap = null, notes = [], allow = null } = {}) {
+  const byFile = new Map(), out = [], problems = [], stat = { files: 0, applied: 0, pending: 0, error: 0, skipped: 0, wrapped: 0, long: 0 };
   for (const e of entries) {
     if (!byFile.has(e.file)) byFile.set(e.file, []); byFile.get(e.file).push(e);
     if (e.status === 'pending' || e.status === 'translating') stat.pending++; else if (e.status === 'error') stat.error++; else if (e.status === 'skipped') stat.skipped++;
@@ -395,46 +485,63 @@ export function buildPatch(files, entries, { model = '', date = new Date() } = {
   for (const f of files) {
     const es = (byFile.get(f.path) || []).filter(isApplicable);
     if (!es.length) continue;
-    let orig, work; try { orig = JSON.parse(f.text); work = JSON.parse(f.text); } catch { problems.push(`${f.path}: JSON asli rusak`); continue; }
-    const pr = []; applyTranslations(work, es, pr);
-    const text = JSON.stringify(work); let re = null;
-    try { re = JSON.parse(text); } catch { pr.push(`${f.path}: hasil tidak bisa dibaca ulang`); }
-    if (!pr.length) pr.push(...diffGuard(orig, re, f.path));
+    const isPl = /(^|\/)js\/plugins\.js$/.test(f.path); let orig, work, pj = null;
+    try {
+      if (isPl) { pj = parsePluginsJs(f.text); if (!pj) throw new Error('x'); orig = pj.arr; work = JSON.parse(JSON.stringify(pj.arr)); }
+      else { orig = JSON.parse(f.text); work = JSON.parse(f.text); }
+    } catch { problems.push(`${f.path}: file asli tidak bisa dibaca`); continue; }
+    const pr = []; applyTranslations(work, es, pr, { wrap, stats: stat });
+    const text = isPl ? buildPluginsJs(pj, work) : JSON.stringify(work); let re = null;
+    try { re = isPl ? parsePluginsJs(text)?.arr : JSON.parse(text); if (!re) throw new Error('x'); } catch { pr.push(`${f.path}: hasil tidak bisa dibaca ulang`); }
+    if (!pr.length) pr.push(...diffGuard(orig, re, f.path, allow));
     if (pr.length) { problems.push(...pr); continue; }
     out.push({ name: f.path, data: new TextEncoder().encode(text) }); stat.files++; stat.applied += es.length;
   }
-  const report = ['RPG Maker Translator - patch-report', `Tanggal: ${date.toISOString()}`, `Model: ${model}`, `File diubah: ${stat.files}`, `Teks diterapkan: ${stat.applied}`,
+  const report = ['RPG Maker Translator - patch-report', `Tanggal: ${date.toISOString()}`, `Model: ${model}`, ...notes, `File diubah: ${stat.files}`, `Teks diterapkan: ${stat.applied}`, `Teks dipecah ulang agar muat: ${stat.wrapped}`, `Deskripsi/profil lebih dari 2 baris (mungkin terpotong di game): ${stat.long}`,
     `Belum diterjemahkan (tetap asli): ${stat.pending}`, `Error (tetap asli): ${stat.error}`, `Dilewati: ${stat.skipped}`, '', ...out.map((x) => x.name)].join('\n');
   return { ok: !problems.length && out.length > 0, empty: !problems.length && !out.length, problems, files: out, report, stat };
 }
 /** Ekspor proyek: JSON asli + terjemahan, lolos diff guard, lalu zip. Bila gagal, tidak ada zip. */
-export async function exportProject(project, model = '') {
+export async function exportProject(project, model = '', wrap = null) {
+  const plug = project.msgPlugins?.length ? project.msgPlugins : null;
+  if (plug) wrap = null;
   const files = await dbPrefix('origFiles', project.id + ':'), entries = await dbQuery('entries', 'projectId', project.id);
-  const r = buildPatch(files, entries, { model });
+  const r = buildPatch(files, entries, { model, wrap, allow: project.allow, notes: plug ? [`Plugin message terdeteksi (${plug.join(', ')}): pemecahan baris otomatis dimatikan. Cek hasil di game.`] : [] });
   if (!r.ok) return r;
   return { ...r, blob: await writeZip([...r.files, { name: 'patch-report.txt', data: new TextEncoder().encode(r.report) }]) };
 }
 /** Impor folder/zip: simpan JSON asli dan entries ke IndexedDB. */
-export async function importProject(files, src = 'ja', onProgress = () => {}) {
+export async function importProject(files, src = 'ja', onProgress = () => {}, { allow: allowText = '' } = {}) {
+  const allow = parseAllow(allowText);
   onProgress('Membaca daftar file…', 0, 0);
-  const { engine: eng, data } = await collectSources(files);
+  const { engine: eng, data, plugins } = await collectSources(files);
   if (!data.size) throw new Error(UI.noData);
   const id = 'p' + Date.now().toString(36), orig = [], entries = [], broken = [], counts = {};
-  let sys = null, i = 0;
+  let sys = null, i = 0, msgPlugins = [], pluginsSeen = false, pluginsText = '';
+  if (plugins) try { pluginsText = await plugins.read(); msgPlugins = detectMessagePlugins(pluginsText); pluginsSeen = true; } catch { /* plugins.js tidak terbaca */ }
+  const ingest = async (path, json, text) => {
+    orig.push({ key: `${id}:${path}`, projectId: id, path, text });
+    for (const e of extractFile(path, json, { src, allow })) {
+      e.projectId = id; e.hash = await sha256(e.original); entries.push(e);
+      counts[e.category] = (counts[e.category] || 0) + 1;
+    }
+  };
   for (const [path, item] of data) {
     onProgress(`Membaca ${path.split('/').pop()} (${i + 1} dari ${data.size})`, i, data.size);
     if (i++ % 10 === 0) await new Promise((r) => setTimeout(r));
     let text, json;
     try { text = await item.read(); json = JSON.parse(text); } catch { broken.push(path); continue; }
     if (path.endsWith('System.json')) sys = json;
-    orig.push({ key: `${id}:${path}`, projectId: id, path, text });
-    for (const e of extractFile(path, json, { src })) {
-      e.projectId = id; e.hash = await sha256(e.original); entries.push(e);
-      counts[e.category] = (counts[e.category] || 0) + 1;
-    }
+    await ingest(path, json, text);
+  }
+  let paramNote = '';
+  if (allow.param.length) {
+    const pj = pluginsText ? parsePluginsJs(pluginsText) : null;
+    if (pj) await ingest(normPluginsPath(plugins.path), pj.arr, pluginsText);
+    else paramNote = pluginsText ? 'js/plugins.js tidak bisa dibaca (bukan array JSON murni), parameter plugin dilewati' : 'js/plugins.js tidak ikut dipilih, parameter plugin dilewati';
   }
   const engine = eng || (sys && (sys.advanced || sys.itemCategories) ? 'MZ' : 'MV');
-  const project = { id, engine, src, tgt: 'id', files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
+  const project = { id, engine, src, tgt: 'id', msgPlugins, pluginsSeen, allow, paramNote, files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
   onProgress(`Menyimpan ${entries.length} teks…`, data.size, data.size);
   await dbPutMany('origFiles', orig);
   await dbPutMany('entries', entries);
@@ -443,10 +550,80 @@ export async function importProject(files, src = 'ja', onProgress = () => {}) {
   return project;
 }
 
+// ===== 4b. GLOSARIUM & EDIT MANUAL (CSV/JSON) =====
+/** Glosarium: satu baris "sumber = terjemahan". Baris berawalan # diabaikan. Diurut dari istilah terpanjang. */
+export function parseGlossary(text = '') {
+  const out = [];
+  for (const line of String(text).split('\n')) {
+    const t = line.trim(); if (!t || t.startsWith('#')) continue;
+    const i = t.indexOf('='); if (i < 1) continue;
+    const a = t.slice(0, i).trim(), b = t.slice(i + 1).trim(); if (a && b) out.push([a, b]);
+  }
+  return out.sort((x, y) => y[0].length - x[0].length);
+}
+/** Istilah glosarium yang muncul di teks. */
+export const termsFor = (gl, text) => gl.filter(([a]) => text.includes(a));
+/** Catatan karakter: satu baris "nama pembicara: catatan gaya bicara". */
+export function parseNotes(text = '') {
+  const out = [];
+  for (const line of String(text).split('\n')) {
+    const m = line.trim().match(/^([^:=#][^:=]*)[:=]\s*(\S.*)$/);
+    if (m) out.push([m[1].trim(), m[2].trim()]);
+  }
+  return out;
+}
+/** Catatan untuk pembicara ini (nama pembicara memuat nama di catatan). */
+export const notesFor = (notes, speaker) => (speaker ? notes.filter(([n]) => speaker.includes(n)) : []);
+export const DEFAULT_STYLE = 'Pakai bahasa Indonesia santai sehari-hari seperti dialog game atau subtitle anime: aku/kamu, nggak/tidak, sudah/udah sesuai karakter. Hindari kata baku yang kaku (saya/Anda, merupakan, sedang, tidak dapat) kecuali karakternya memang formal (bangsawan, pelayan, narator, sistem). Ikuti register sumber: bila aslinya kasar, vulgar, mesum, atau gaul, terjemahkan dengan tingkat yang setara. Jangan dihaluskan, disensor, atau diberi komentar tambahan. Teks UI, menu, item, dan skill tetap ringkas dan netral.';
+const cacheKey = (project, cfg, original, terms = [], notes = []) => sha256(`${project.src}|${project.tgt}|${cfg.model}|${original}${terms.length ? `|g:${terms.map((t) => t.join('=')).join(';')}` : ''}${(cfg.style || '').trim() ? `|s:${cfg.style.trim()}` : ''}${notes.length ? `|n:${notes.map((t) => t.join('=')).join(';')}` : ''}`);
+export const CSV_COLS = ['id', 'file', 'category', 'speaker', 'status', 'original', 'translation'];
+export const entriesToRows = (entries) => entries.map((e) => ({ id: e.id, file: e.file, category: e.category, speaker: e.meta?.speaker || '', status: e.status, original: e.original, translation: e.translation || '' }));
+/** CSV UTF-8 dengan BOM (agar Excel membaca huruf Jepang). Semua field dikutip. */
+export const toCsv = (rows) => '\uFEFF' + [CSV_COLS.join(','), ...rows.map((r) => CSV_COLS.map((k) => `"${String(r[k] ?? '').replace(/"/g, '""')}"`).join(','))].join('\r\n') + '\r\n';
+/** Baca CSV (kutip ganda, baris baru di dalam kutip, pemisah koma atau titik koma ala Excel regional). */
+export function parseCsv(text) {
+  text = String(text).replace(/^\uFEFF/, '');
+  const first = text.split(/\r?\n/, 1)[0], d = first.split(';').length > first.split(',').length ? ';' : ',';
+  const rows = []; let row = [], f = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
+    else if (c === '"') q = true;
+    else if (c === d) { row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(f); f = ''; rows.push(row); row = []; }
+    else f += c;
+  }
+  if (f !== '' || row.length) { row.push(f); rows.push(row); }
+  const [head, ...body] = rows; if (!head) return [];
+  return body.filter((r) => r.some((x) => x !== '')).map((r) => Object.fromEntries(head.map((k, j) => [k.trim(), r[j] ?? ''])));
+}
+/**
+ * Terapkan hasil edit manual. Baris dicocokkan lewat id dan harus punya teks asli yang sama dengan proyek ini.
+ * Baris ditolak bila id asing, teks asli beda, atau kode escape/tag tidak sama dengan aslinya.
+ * @returns {{updates:object[], same:number, empty:number, unknown:any[], mismatch:any[], badEsc:any[]}}
+ */
+export function applyImport(entries, rows) {
+  const byId = new Map(entries.map((e) => [String(e.id), e])), nl = (s) => String(s ?? '').replace(/\r\n/g, '\n').trim();
+  const sig = (s) => (s.match(ESC) || []).sort().join('\u0001');
+  const out = { updates: [], same: 0, empty: 0, unknown: [], mismatch: [], badEsc: [] };
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const e = byId.get(String(r?.id ?? '').trim());
+    if (!e) { out.unknown.push(r?.id); continue; }
+    if (nl(r.original) !== nl(e.original)) { out.mismatch.push(e.id); continue; }
+    const t = String(r.translation ?? '').replace(/\r\n/g, '\n');
+    if (!t.trim()) { out.empty++; continue; }
+    if (t === e.translation) { out.same++; continue; }
+    if (sig(t) !== sig(e.original)) { out.badEsc.push(e.id); continue; }
+    out.updates.push({ ...e, translation: t, status: 'edited', error: '' });
+  }
+  return out;
+}
+
 // ===== 5. TRANSLATE (batch, cache, retry, resume, klien LLM, biaya) =====
 export const DEFAULT_CONFIG = {
   baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', remember: false, model: 'google/gemini-2.5-flash',
-  temperature: 0.3, batchSize: 20, maxChars: 3000, concurrency: 2, delay: 300, priceIn: 0, priceOut: 0,
+  temperature: 0.3, batchSize: 30, maxChars: 4000, concurrency: 4, delay: 100, priceIn: 0, priceOut: 0,
+  fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '',
 };
 const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian' };
 const TODO = new Set(['pending', 'error', 'translating']);
@@ -481,7 +658,7 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
   try {
     res = await fetchFn(cfg.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
       method: 'POST', signal, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
-      body: JSON.stringify({ model: cfg.model, temperature: cfg.temperature, messages }),
+      body: JSON.stringify({ model: cfg.model, temperature: cfg.temperature, messages, ...(cfg.fast && /(^|\.)openrouter\.ai$/.test(new URL(cfg.baseUrl).hostname) ? { reasoning: { enabled: false } } : {}) }),
     });
   } catch (e) { if (e.name === 'AbortError') throw e; throw new LlmError(UI.net); }
   if (!res.ok) {
@@ -515,15 +692,20 @@ export function parseJsonLoose(s) {
 }
 const toArray = (p) => Array.isArray(p) ? p : p && typeof p === 'object' ? Object.values(p).find(Array.isArray) || null : null;
 /** Susun pesan untuk LLM. units: [{id, text, speaker?}], context: array string. */
-export function buildMessages({ src, tgt, units, context = [] }) {
+export function buildMessages({ src, tgt, units, context = [], style = '' }) {
   const system = `You translate RPG game text from ${LANG[src]} to ${LANG[tgt]}.
 Rules:
 - Keep every ⟦n⟧ token exactly as given: same count, same form. Never translate, add, or remove them.
 - Keep line breaks as line breaks and keep the same number of lines when possible.
 - Translate as natural game dialogue. Keep names consistent. Keep short UI terms short.
+- If "glossary" is given, translate those terms exactly as listed (from -> to).${style.trim() ? `\n- Style guide for all text: ${style.trim().replace(/\s+/g, ' ')}` : ''}
+- If "character_notes" is given, follow each note for lines spoken by that speaker; it overrides the general style guide.
+- If an item has max_chars_per_line and max_lines, the translation must fit: break lines with \\n, never exceed max_chars_per_line characters per line (not counting ⟦n⟧ tokens) or max_lines lines. Indonesian and English run longer than Japanese, so shorten the wording when needed and keep the meaning.
 - "context" holds earlier lines for reference only. Do not translate or return them.
 - Reply with a JSON array only, no code fence, no commentary: [{"id":0,"text":"..."}]. One object per item, same ids.`;
-  const user = JSON.stringify({ context, items: units.map((u) => ({ id: u.id, ...(u.speaker ? { speaker: u.speaker } : {}), text: u.text })) });
+  const gls = new Map(); units.forEach((u) => (u.terms || []).forEach(([a, b]) => gls.set(a, b)));
+  const cns = new Map(); units.forEach((u) => (u.notes || []).forEach(([a, b]) => cns.set(a, b)));
+  const user = JSON.stringify({ context, ...(cns.size ? { character_notes: [...cns].map(([name, note]) => ({ name, note })) } : {}), ...(gls.size ? { glossary: [...gls].map(([from, to]) => ({ from, to })) } : {}), items: units.map((u) => ({ id: u.id, ...(u.speaker ? { speaker: u.speaker } : {}), ...(u.limit ? { max_chars_per_line: u.limit.line, max_lines: u.limit.lines } : {}), text: u.text })) });
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
 /**
@@ -536,7 +718,7 @@ export async function translateBatch(units, o, why = new Map()) {
   const ok = new Map(), fail = new Map(), ids = new Set(units.map((u) => u.id));
   let arr;
   try {
-    const r = await withRetry(() => o.chat(buildMessages({ src: o.src, tgt: o.tgt, units, context: o.context })), o.retry);
+    const r = await withRetry(() => o.chat(buildMessages({ src: o.src, tgt: o.tgt, units, context: o.context, style: o.style })), o.retry);
     o.onUsage?.(r.usage); arr = toArray(parseJsonLoose(r.text));
   } catch (e) {
     if (e.fatal || e.name === 'AbortError') throw e;
@@ -609,13 +791,18 @@ export async function runTranslation(project, cfg, o = {}) {
   let n = 0; const tick = (t) => onProgress(n, todo.length, t);
   const groups = new Map();
   for (const e of todo) { if (!groups.has(e.original)) groups.set(e.original, []); groups.get(e.original).push(e); }
-  const units = [], hits = []; let uid = 0;
+  const units = [], hits = [], gl = parseGlossary(cfg.glossary), cn = parseNotes(cfg.charNotes); let uid = 0;
   for (const [original, entries] of groups) {
-    const key = await sha256(`${project.src}|${project.tgt}|${cfg.model}|${original}`), c = await dbGet('cache', key);
+    const exact = gl.find(([a]) => a === original.trim());
+    if (exact) { entries.forEach((e) => hits.push({ ...e, translation: exact[1], status: 'done', error: '' })); continue; }
+    const terms = termsFor(gl, `${original}\n${entries[0].meta?.speaker || ''}`);
+    const notes = notesFor(cn, entries[0].meta?.speaker || '');
+    const key = await cacheKey(project, cfg, original, terms, notes), c = await dbGet('cache', key);
     if (c) { entries.forEach((e) => hits.push({ ...e, translation: c.text, status: 'done', error: '' })); continue; }
     const m = maskText(original), e0 = entries[0], p = pos.get(e0.id);
     units.push({
-      id: uid++, key, text: m.text, tokens: m.tokens, speaker: e0.meta?.speaker || '', entries,
+      id: uid++, key, text: m.text, tokens: m.tokens, speaker: e0.meta?.speaker || '', entries, terms, notes,
+      limit: entries.map((x) => limitFor(x, effCfg(project, cfg))).filter(Boolean).reduce((a, b) => (a ? { line: Math.min(a.line, b.line), lines: Math.min(a.lines, b.lines) } : b), null),
       ctx: all.slice(Math.max(0, p - 3), p).filter((x) => x.file === e0.file).map((x) => maskText(x.original).text.slice(0, 200)),
     });
   }
@@ -624,7 +811,7 @@ export async function runTranslation(project, cfg, o = {}) {
   const byId = new Map(units.map((u) => [u.id, u])); let streak = 0;
   const work = async (batch) => {
     const r = await translateBatch(batch, {
-      chat: (m) => chat(m, signal), src: project.src, tgt: project.tgt, context: batch[0].ctx,
+      chat: (m) => chat(m, signal), src: project.src, tgt: project.tgt, context: batch[0].ctx, style: cfg.style,
       check: (id, t) => (t.trim() ? (unmaskText(t, byId.get(id).tokens).ok ? '' : UI.tokenBad) : UI.emptyTr),
       onUsage: (u) => { stat.tokensIn += u?.prompt_tokens || 0; stat.tokensOut += u?.completion_tokens || 0; },
     });
@@ -652,14 +839,15 @@ export async function runTranslation(project, cfg, o = {}) {
  */
 export async function retranslateEntry(project, cfg, e, chat) {
   const m = maskText(e.original), call = chat || ((msgs) => llmChat(cfg, msgs));
-  const r = await translateBatch([{ id: 0, text: m.text, speaker: e.meta?.speaker || '' }], {
-    chat: call, src: project.src, tgt: project.tgt, context: [],
+  const terms = termsFor(parseGlossary(cfg.glossary), `${e.original}\n${e.meta?.speaker || ''}`), notes = notesFor(parseNotes(cfg.charNotes), e.meta?.speaker || '');
+  const r = await translateBatch([{ id: 0, text: m.text, speaker: e.meta?.speaker || '', limit: limitFor(e, effCfg(project, cfg)), terms, notes }], {
+    chat: call, src: project.src, tgt: project.tgt, context: [], style: cfg.style,
     check: (id, t) => (t.trim() ? (unmaskText(t, m.tokens).ok ? '' : UI.tokenBad) : UI.emptyTr),
   });
   if (!r.ok.size) throw new LlmError(r.fail.get(0) || UI.badJson);
   const text = unmaskText(r.ok.get(0), m.tokens).text, u = { ...e, translation: text, status: 'done', error: '' };
   await dbPut('entries', u);
-  await dbPut('cache', { key: await sha256(`${project.src}|${project.tgt}|${cfg.model}|${e.original}`), text, at: Date.now() });
+  await dbPut('cache', { key: await cacheKey(project, cfg, e.original, terms, notes), text, at: Date.now() });
   return u;
 }
 
@@ -687,7 +875,7 @@ async function viewProyek() {
     if (!files.length || busy) return;
     lock(true); bar.removeAttribute('value'); msg.className = 'mut'; msg.textContent = 'Mengimpor…';
     try {
-      const p = await importProject(files, src, (t, d, n) => { msg.textContent = t; if (n) { bar.max = n; bar.value = d; } else bar.removeAttribute('value'); });
+      const p = await importProject(files, src, (t, d, n) => { msg.textContent = t; if (n) { bar.max = n; bar.value = d; } else bar.removeAttribute('value'); }, { allow: (await loadConfig()).pluginAllow });
       importNote = p.total
         ? { text: `Impor selesai. ${p.total} teks dari ${p.files} file${p.broken.length ? `, ${p.broken.length} file rusak dilewati` : ''}. Lanjut ke tab Translate` }
         : { bad: true, text: UI.emptyImp };
@@ -702,7 +890,8 @@ async function viewProyek() {
   const out = [box];
   const p = await currentProject();
   if (p) out.push(card(h('h2', {}, 'Ringkasan'),
-    h('p', { class: 'mut' }, `Engine: ${p.engine}\nSumber: ${p.src === 'ja' ? 'Jepang' : 'Inggris'}\nFile JSON: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}`),
+    h('p', { class: 'mut' }, `Engine: ${p.engine}\nSumber: ${p.src === 'ja' ? 'Jepang' : 'Inggris'}\nFile JSON: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\nPlugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan)` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`),
+    p.paramNote ? h('p', { class: 'err' }, p.paramNote) : '',
     p.total ? '' : h('p', { class: 'err' }, UI.emptyImp),
     Object.entries(p.counts).map(([k, v]) => h('span', { class: 'badge' }, `${k} ${v}`)),
     h('button', { onclick: async () => { if (confirm('Hapus proyek ini beserta semua terjemahannya?')) { await deleteProject(p.id); await render(); } } }, 'Hapus proyek')));
@@ -721,7 +910,13 @@ async function startJob() {
   if (!cfg.apiKey) { job.err = true; job.text = UI.noKey; return paintJob(); }
   job.running = true; job.ctl = new AbortController(); job.value = 0; job.text = 'Memulai…'; paintJob();
   try {
-    const r = await runTranslation(p, cfg, { signal: job.ctl.signal, onProgress: (d, t, txt) => { job.value = d; job.max = t || 1; job.text = txt; paintJob(); } });
+    let t0 = Date.now(), d0 = null;
+    const r = await runTranslation(p, cfg, { signal: job.ctl.signal, onProgress: (d, t, txt) => {
+      if (d0 === null) { d0 = d; t0 = Date.now(); }
+      let eta = '';
+      if (d > d0 && d < t) { const sec = ((t - d) * (Date.now() - t0)) / 1000 / (d - d0); eta = ` · sisa ±${sec >= 90 ? Math.round(sec / 60) + ' menit' : Math.round(sec) + ' detik'}`; }
+      job.value = d; job.max = t || 1; job.text = txt + eta; paintJob();
+    } });
     job.text = !r.done && !r.error && !r.stopped ? UI.nothing
       : `${r.stopped ? 'Dihentikan' : 'Selesai'}. ${r.done} berhasil (${r.cached} dari cache), ${r.error} error${r.error ? '. Lihat di tab Review, filter Error' : ''}`;
   } catch (e) { job.err = true; job.text = e.message; }
@@ -754,7 +949,7 @@ async function viewTranslate() {
 const FIELDS = [
   ['baseUrl', 'Base URL', 'url'], ['apiKey', 'API key', 'password'], ['model', 'Model', 'text'], ['temperature', 'Temperature (0 sampai 2)', 'number'],
   ['batchSize', 'Ukuran batch (teks)', 'number'], ['maxChars', 'Batas karakter per batch', 'number'], ['concurrency', 'Konkurensi (1 sampai 5)', 'number'],
-  ['delay', 'Jeda antar request (ms)', 'number'], ['priceIn', 'Harga token masuk per 1 juta', 'number'], ['priceOut', 'Harga token keluar per 1 juta', 'number'],
+  ['delay', 'Jeda antar request (ms)', 'number'], ['wrapWidth', 'Lebar baris maks tanpa face (0 = mati)', 'number'], ['wrapFace', 'Lebar baris maks dengan face', 'number'], ['priceIn', 'Harga token masuk per 1 juta', 'number'], ['priceOut', 'Harga token keluar per 1 juta', 'number'],
 ];
 async function viewSettings() {
   const c = await loadConfig(), msg = h('p', { class: 'mut' }), inp = {};
@@ -762,12 +957,16 @@ async function viewSettings() {
     inp[k] = h('input', { type, value: String(c[k]), autocomplete: 'off', ...(type === 'number' ? { step: 'any', inputmode: 'decimal' } : {}) });
     return [h('label', {}, label), inp[k]];
   });
+  const allowTa = h('textarea', { rows: '6', spellcheck: 'false', autocomplete: 'off', placeholder: 'mz NamaPlugin.namaPerintah.namaArgumen\nmv NamaPerintah\nparam NamaPlugin.namaParameter' }, c.pluginAllow || '');
+  const styleTa = h('textarea', { rows: '8', spellcheck: 'false' }, c.style ?? DEFAULT_STYLE), notesTa = h('textarea', { rows: '5', spellcheck: 'false', autocomplete: 'off', placeholder: 'アリス: sopan, pakai saya/Anda\nバルト: preman, pakai gue/lo, kasar' }, c.charNotes || '');
+  const glossTa = h('textarea', { rows: '6', spellcheck: 'false', autocomplete: 'off', placeholder: 'アリス = Alice\nポーション = Ramuan' }, c.glossary || '');
   const remember = h('input', { type: 'checkbox', ...(c.remember ? { checked: '' } : {}) });
+  const fast = h('input', { type: 'checkbox', ...(c.fast ? { checked: '' } : {}) });
   const num = (k, lo, hi) => Math.min(hi, Math.max(lo, Number(inp[k].value) || lo));
   const gather = () => ({
     baseUrl: inp.baseUrl.value.trim(), apiKey: inp.apiKey.value.trim(), remember: remember.checked, model: inp.model.value.trim() || DEFAULT_CONFIG.model,
     temperature: num('temperature', 0, 2), batchSize: Math.round(num('batchSize', 1, 100)), maxChars: Math.round(num('maxChars', 500, 12000)),
-    concurrency: Math.round(num('concurrency', 1, 5)), delay: Math.round(num('delay', 0, 10000)), priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
+    concurrency: Math.round(num('concurrency', 1, 5)), delay: Math.round(num('delay', 0, 10000)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), fast: fast.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
   });
   const wipeBtn = h('button', { disabled: '', onclick: async () => { try { await resetAll((m) => say(m, true)); location.hash = '#/proyek'; location.reload(); } catch (e) { say(e.message, true); } } }, 'Hapus semua data');
   const wipe = h('input', { type: 'text', placeholder: 'HAPUS', autocomplete: 'off', oninput: (e) => { wipeBtn.disabled = e.target.value !== 'HAPUS'; } });
@@ -785,7 +984,14 @@ async function viewSettings() {
       say(t ? `Terhubung. Contoh hasil: ${t}` : 'Terhubung, tetapi format respons tidak sesuai. Coba model lain', !t);
     } catch (e) { say(e.message, true); }
   };
-  return [card(h('h2', {}, 'Pengaturan LLM'), ...form,
+  const saveStyle = async () => { const n = gather(); if (!urlOk(n.baseUrl)) return say(UI.urlBad, true); await saveConfig(n); say('Tersimpan'); };
+  return [card(h('h2', {}, 'Gaya bahasa'), h('p', { class: 'mut' }, 'Dikirim ke model di setiap batch. Kosongkan untuk memakai gaya bawaan model. Berlaku untuk terjemahan berikutnya; teks yang sudah selesai tidak berubah.'), styleTa,
+    h('label', {}, 'Catatan per karakter (nama pembicara: gaya bicara)'), notesTa,
+    h('div', { class: 'row' }, h('button', { class: 'pri', onclick: saveStyle }, 'Simpan gaya'), h('button', { onclick: () => { styleTa.value = DEFAULT_STYLE; } }, 'Pulihkan bawaan'))),
+  card(h('h2', {}, 'Glosarium (opsional)'), h('p', { class: 'mut' }, 'Satu baris per istilah: sumber = terjemahan. Istilah yang muncul di sebuah teks dikirim ke model sebagai acuan. Teks yang isinya persis satu istilah diterjemahkan langsung tanpa model. Berlaku untuk terjemahan berikutnya; teks yang sudah selesai tidak diubah.'), glossTa, h('button', { class: 'pri', onclick: async () => { const n = gather(); if (!urlOk(n.baseUrl)) return say(UI.urlBad, true); await saveConfig(n); say(`Tersimpan. ${parseGlossary(n.glossary).length} istilah`); } }, 'Simpan glosarium')),
+  card(h('h2', {}, 'Daftar aman plugin (opsional)'), h('p', { class: 'mut' }, 'Kosong = perintah dan parameter plugin tidak disentuh. Isi hanya entri yang kamu yakin berisi teks tampil. Berlaku saat impor, jadi impor ulang proyek setelah mengubahnya.'), allowTa, h('button', { class: 'pri', onclick: async () => { const n = gather(); if (!urlOk(n.baseUrl)) return say(UI.urlBad, true); await saveConfig(n); say('Tersimpan'); } }, 'Simpan daftar')),
+  card(h('h2', {}, 'Pengaturan LLM'), ...form,
+    h('label', { class: 'chk' }, fast, 'Matikan mode berpikir model (khusus OpenRouter, lebih cepat)'),
     h('label', { class: 'chk' }, remember, 'Ingat key di perangkat ini'),
     h('p', { class: 'mut' }, 'Key hanya dikirim ke base URL di atas. Jangan aktifkan di perangkat bersama.'),
     h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')), msg),
@@ -832,7 +1038,7 @@ async function viewReview() {
   fill();
   return [card(sel, find, info), box];
 }
-let exportUrl = '';
+let exportUrl = '', editUrl = '';
 async function viewEkspor() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
@@ -842,7 +1048,7 @@ async function viewEkspor() {
   const btn = h('button', { class: 'pri', onclick: async () => {
     btn.disabled = true; out.replaceChildren(h('p', { class: 'mut' }, 'Memeriksa dengan diff guard…'));
     try {
-      const r = await exportProject(p, cfg.model);
+      const r = await exportProject(p, cfg.model, cfg.wrapWidth || cfg.wrapFace ? { width: cfg.wrapWidth, face: cfg.wrapFace } : null);
       if (!r.ok) out.replaceChildren(card(h('h2', {}, 'Ekspor dibatalkan'),
         h('p', { class: 'err' }, r.empty ? UI.exportEmpty : 'Diff guard menolak hasil. Tidak ada file dibuat. Perbaiki lalu coba lagi'), r.problems.map((x) => h('p', { class: 'mut' }, x))));
       else {
@@ -855,7 +1061,33 @@ async function viewEkspor() {
     } catch (e) { out.replaceChildren(card(h('p', { class: 'err' }, e.message))); }
     btn.disabled = false;
   } }, 'Buat patch');
-  return [card(h('h2', {}, 'Ekspor'), h('p', { class: 'mut' }, `Siap diekspor: ${ready}\nBelum diterjemahkan (tetap asli): ${pend}\nError (tetap asli): ${err}`), btn), out];
+  const editOut = h('div'), editMsg = h('p', { class: 'mut' });
+  const link = (name, mime, text) => {
+    if (editUrl) URL.revokeObjectURL(editUrl);
+    editUrl = URL.createObjectURL(new Blob([text], { type: mime }));
+    editOut.replaceChildren(h('a', { class: 'file', href: editUrl, download: name }, `Unduh ${name}`));
+  };
+  const dump = async (kind) => {
+    const rws = entriesToRows((await dbQuery('entries', 'projectId', p.id)).sort((a, b) => a.id - b.id));
+    if (kind === 'csv') link(`rpgtl-${p.id}.csv`, 'text/csv', toCsv(rws)); else link(`rpgtl-${p.id}.json`, 'application/json', JSON.stringify(rws, null, 1));
+  };
+  const importEdit = async (ev) => {
+    const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
+    editMsg.className = 'mut'; editMsg.textContent = 'Membaca…';
+    try {
+      const txt = await f.text(), rws = /\.json$/i.test(f.name) ? JSON.parse(txt) : parseCsv(txt);
+      if (!Array.isArray(rws)) throw new Error('Isi file bukan daftar baris');
+      const r = applyImport(await dbQuery('entries', 'projectId', p.id), rws);
+      if (r.updates.length) await dbPutMany('entries', r.updates);
+      const ids = (a) => (a.length ? ` (id ${a.slice(0, 8).join(', ')}${a.length > 8 ? ', …' : ''})` : '');
+      editMsg.textContent = [`Diperbarui: ${r.updates.length}`, `Sama dengan sebelumnya: ${r.same}`, `Terjemahan kosong (dilewati): ${r.empty}`,
+        `Teks asli tidak cocok dengan proyek ini: ${r.mismatch.length}${ids(r.mismatch)}`, `Kode escape/tag berubah (ditolak): ${r.badEsc.length}${ids(r.badEsc)}`, `id tidak dikenal: ${r.unknown.length}`].join('\n');
+    } catch (e) { editMsg.className = 'err'; editMsg.textContent = e.message; }
+  };
+  return [card(h('h2', {}, 'Ekspor'), h('p', { class: 'mut' }, `Siap diekspor: ${ready}\nBelum diterjemahkan (tetap asli): ${pend}\nError (tetap asli): ${err}`), btn), out,
+    card(h('h2', {}, 'Edit manual'), h('p', { class: 'mut' }, 'Unduh semua teks sebagai CSV atau JSON, edit kolom translation, lalu impor lagi. Jangan ubah kolom id dan original. Kode escape dan tag harus tetap sama.'),
+      h('div', { class: 'row' }, h('button', { onclick: () => dump('csv') }, 'Siapkan CSV'), h('button', { onclick: () => dump('json') }, 'Siapkan JSON')), editOut,
+      h('label', { class: 'file' }, 'Impor hasil edit (.csv / .json)', h('input', { type: 'file', accept: '.csv,.json', onchange: importEdit })), editMsg)];
 }
 
 // ===== 7. BOOTSTRAP (router hash, state, mulai aplikasi) =====
