@@ -17,6 +17,7 @@ export const UI = {
   badJson: 'Respons model tidak valid. Coba terjemahkan ulang',
   emptyTr: 'Terjemahan kosong. Coba terjemahkan ulang',
   tokenBad: 'Kode escape berubah. Coba terjemahkan ulang',
+  timeout: 'Provider terlalu lama menjawab. Coba lagi atau naikkan batas waktu di Pengaturan',
   tooMany: 'Tiga batch gagal berturut-turut. Periksa Pengaturan atau koneksi, lalu lanjutkan',
   exportEmpty: 'Belum ada terjemahan yang bisa diekspor. Terjemahkan dulu di tab Translate',
   urlBad: 'Base URL harus memakai https. Untuk lokal pakai localhost',
@@ -623,16 +624,23 @@ export function applyImport(entries, rows) {
 export const DEFAULT_CONFIG = {
   baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', remember: false, model: 'google/gemini-2.5-flash',
   temperature: 0.3, batchSize: 30, maxChars: 4000, concurrency: 4, delay: 100, priceIn: 0, priceOut: 0,
-  fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '',
+  fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '', timeout: 120,
 };
 const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian' };
 const TODO = new Set(['pending', 'error', 'translating']);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const abortErr = () => Object.assign(new Error('Aborted'), { name: 'AbortError' });
+/** Tidur yang langsung berhenti bila signal dibatalkan (tombol Berhenti tidak menunggu jeda). */
+const sleepSig = (ms, signal) => new Promise((res, rej) => {
+  if (signal?.aborted) return rej(abortErr());
+  const t = setTimeout(res, ms);
+  signal?.addEventListener('abort', () => { clearTimeout(t); rej(abortErr()); }, { once: true });
+});
 let memKey = '';
 
 /** Galat dari klien LLM. fatal=true berarti retry tidak berguna. */
 export class LlmError extends Error {
-  constructor(msg, { status = 0, fatal = false } = {}) { super(msg); this.name = 'LlmError'; this.status = status; this.fatal = fatal; }
+  constructor(msg, { status = 0, fatal = false, retryAfter = null, split = false, noRetry = false } = {}) { super(msg); this.name = 'LlmError'; this.status = status; this.fatal = fatal; this.retryAfter = retryAfter; this.split = split; this.noRetry = noRetry; }
 }
 /** Baca pengaturan. Bila "ingat key" mati, key hanya ada di memori tab ini. */
 export async function loadConfig() {
@@ -651,33 +659,55 @@ export function urlOk(u) {
   try { const x = new URL(u); return x.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(x.hostname); } catch { return false; }
 }
 /** Satu panggilan chat completions (OpenAI-compatible). Key hanya dikirim ke baseUrl. */
+/** Header Retry-After (detik atau tanggal HTTP) menjadi milidetik, atau null. */
+export function parseRetryAfter(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v); if (Number.isFinite(n)) return Math.max(0, n * 1000);
+  const t = Date.parse(v); return Number.isFinite(t) ? Math.max(0, t - Date.now()) : null;
+}
 export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
   if (!cfg.apiKey) throw new LlmError(UI.noKey, { fatal: true });
   if (!urlOk(cfg.baseUrl)) throw new LlmError(UI.urlBad, { fatal: true });
-  let res;
+  // Batas waktu per request; pembatalan dari pengguna tetap diteruskan.
+  const ctl = new AbortController(); let timedOut = false;
+  const onAbort = () => ctl.abort();
+  if (signal?.aborted) ctl.abort(); else signal?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, Math.max(10, Number(cfg.timeout) || 120) * 1000);
   try {
-    res = await fetchFn(cfg.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
-      method: 'POST', signal, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
-      body: JSON.stringify({ model: cfg.model, temperature: cfg.temperature, messages, ...(cfg.fast && /(^|\.)openrouter\.ai$/.test(new URL(cfg.baseUrl).hostname) ? { reasoning: { enabled: false } } : {}) }),
-    });
-  } catch (e) { if (e.name === 'AbortError') throw e; throw new LlmError(UI.net); }
-  if (!res.ok) {
-    const s = res.status;
-    if (s === 401 || s === 403) throw new LlmError(UI.keyBad, { status: s, fatal: true });
-    if (s === 402) throw new LlmError(UI.credit, { status: s, fatal: true });
-    let d = ''; try { d = (await res.json())?.error?.message || ''; } catch { /* abaikan */ }
-    const fatal = s !== 429 && s < 500;
-    throw new LlmError(`Provider menolak permintaan (${s}). ${d || (fatal ? 'Periksa model di Pengaturan' : 'Coba lagi nanti')}`.trim(), { status: s, fatal });
-  }
-  const j = await res.json().catch(() => null), text = j?.choices?.[0]?.message?.content;
-  if (typeof text !== 'string' || !text.trim()) throw new LlmError(UI.badResp);
-  return { text, usage: j.usage || null };
+    let res;
+    try {
+      res = await fetchFn(cfg.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
+        method: 'POST', signal: ctl.signal, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
+        body: JSON.stringify({ model: cfg.model, temperature: cfg.temperature, messages, ...(cfg.fast && /(^|\.)openrouter\.ai$/.test(new URL(cfg.baseUrl).hostname) ? { reasoning: { enabled: false } } : {}) }),
+      });
+    } catch (e) {
+      if (e.name === 'AbortError') { if (timedOut) throw new LlmError(UI.timeout); throw e; }
+      throw new LlmError(UI.net);
+    }
+    if (!res.ok) {
+      const s = res.status, retryAfter = parseRetryAfter(res.headers?.get?.('retry-after'));
+      if (s === 401 || s === 403) throw new LlmError(UI.keyBad, { status: s, fatal: true });
+      if (s === 402) throw new LlmError(UI.credit, { status: s, fatal: true });
+      let d = ''; try { d = (await res.json())?.error?.message || ''; } catch { /* abaikan */ }
+      // 400/413/422: biasanya satu teks bermasalah (filter konten, terlalu panjang). Batch dipecah untuk mencari yang bermasalah.
+      // Pesan soal model/key/kuota tetap fatal agar tidak memboroskan request.
+      const split = [400, 413, 422].includes(s) && !/model|api.?key|auth|credit|quota|billing|permission/i.test(d);
+      const fatal = s !== 429 && s < 500 && !split;
+      throw new LlmError(`Provider menolak permintaan (${s}). ${d || (fatal ? 'Periksa model di Pengaturan' : 'Coba lagi nanti')}`.trim(), { status: s, fatal, retryAfter, split, noRetry: split });
+    }
+    const j = await res.json().catch((e) => { if (timedOut) throw new LlmError(UI.timeout); return null; }), text = j?.choices?.[0]?.message?.content;
+    if (typeof text !== 'string' || !text.trim()) throw new LlmError(UI.badResp);
+    return { text, usage: j.usage || null };
+  } finally { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); }
 }
-/** Jalankan fn dengan retry dan backoff eksponensial. Galat fatal dan AbortError tidak diulang. */
-export async function withRetry(fn, { tries = 3, base = 800, wait = sleep } = {}) {
+export async function withRetry(fn, { tries = 4, base = 1000, cap = 60000, signal, wait = (ms) => sleepSig(ms, signal) } = {}) {
   for (let i = 0; ; i++) {
     try { return await fn(); }
-    catch (e) { if (e.name === 'AbortError' || e.fatal || i >= tries - 1) throw e; await wait(base * 2 ** i); }
+    catch (e) {
+      if (e.name === 'AbortError' || e.fatal || e.noRetry || i >= tries - 1) throw e;
+      // Hormati Retry-After dari provider; bila tidak ada, backoff eksponensial dengan jitter.
+      await wait(Math.min(cap, e.retryAfter != null ? e.retryAfter : base * 2 ** i * (0.75 + Math.random() * 0.5)));
+    }
   }
 }
 /** Parser JSON toleran: pagar kode ```json dan teks di sekitar array/objek. null bila gagal. */
@@ -722,6 +752,15 @@ export async function translateBatch(units, o, why = new Map()) {
     o.onUsage?.(r.usage); arr = toArray(parseJsonLoose(r.text));
   } catch (e) {
     if (e.fatal || e.name === 'AbortError') throw e;
+    // Error karena isi batch (400/413/422): pecah dua untuk mengisolasi teks bermasalah, dengan batas jumlah pecahan per batch.
+    if (e.split && units.length > 1 && (o.budget ??= { left: 12 }).left-- > 0) {
+      const h2 = units.length >> 1;
+      for (const p of [units.slice(0, h2), units.slice(h2)]) {
+        const r = await translateBatch(p, o, why);
+        r.ok.forEach((v, k) => ok.set(k, v)); r.fail.forEach((v, k) => fail.set(k, v));
+      }
+      return { ok, fail };
+    }
     units.forEach((u) => fail.set(u.id, e.message)); return { ok, fail };
   }
   for (const r of arr || []) {
@@ -809,9 +848,19 @@ export async function runTranslation(project, cfg, o = {}) {
   if (hits.length) { await dbPutMany('entries', hits); n += hits.length; stat.done = stat.cached = hits.length; }
   tick(`${n} dari ${todo.length} teks`);
   const byId = new Map(units.map((u) => [u.id, u])); let streak = 0;
+  // Gerbang bersama: bila provider membatasi (429/5xx), semua worker menunggu dan lajunya diperlambat bertahap, lalu pulih saat sukses.
+  const gate = { until: 0, pace: 0 };
+  const guarded = async (m) => {
+    const w = Math.max(gate.until - Date.now(), gate.pace); if (w > 0) await sleepSig(w, signal);
+    try { const r = await chat(m, signal); gate.pace = gate.pace < 200 ? 0 : gate.pace / 2; return r; }
+    catch (e) {
+      if (e.status === 429 || e.status >= 500) { gate.until = Math.max(gate.until, Date.now() + Math.min(60000, e.retryAfter ?? 2000)); gate.pace = Math.min(5000, gate.pace ? gate.pace * 2 : 500); }
+      throw e;
+    }
+  };
   const work = async (batch) => {
     const r = await translateBatch(batch, {
-      chat: (m) => chat(m, signal), src: project.src, tgt: project.tgt, context: batch[0].ctx, style: cfg.style,
+      chat: guarded, retry: { signal }, src: project.src, tgt: project.tgt, context: batch[0].ctx, style: cfg.style,
       check: (id, t) => (t.trim() ? (unmaskText(t, byId.get(id).tokens).ok ? '' : UI.tokenBad) : UI.emptyTr),
       onUsage: (u) => { stat.tokensIn += u?.prompt_tokens || 0; stat.tokensOut += u?.completion_tokens || 0; },
     });
@@ -949,7 +998,7 @@ async function viewTranslate() {
 const FIELDS = [
   ['baseUrl', 'Base URL', 'url'], ['apiKey', 'API key', 'password'], ['model', 'Model', 'text'], ['temperature', 'Temperature (0 sampai 2)', 'number'],
   ['batchSize', 'Ukuran batch (teks)', 'number'], ['maxChars', 'Batas karakter per batch', 'number'], ['concurrency', 'Konkurensi (1 sampai 5)', 'number'],
-  ['delay', 'Jeda antar request (ms)', 'number'], ['wrapWidth', 'Lebar baris maks tanpa face (0 = mati)', 'number'], ['wrapFace', 'Lebar baris maks dengan face', 'number'], ['priceIn', 'Harga token masuk per 1 juta', 'number'], ['priceOut', 'Harga token keluar per 1 juta', 'number'],
+  ['delay', 'Jeda antar request (ms)', 'number'], ['timeout', 'Batas waktu per request (detik)', 'number'], ['wrapWidth', 'Lebar baris maks tanpa face (0 = mati)', 'number'], ['wrapFace', 'Lebar baris maks dengan face', 'number'], ['priceIn', 'Harga token masuk per 1 juta', 'number'], ['priceOut', 'Harga token keluar per 1 juta', 'number'],
 ];
 async function viewSettings() {
   const c = await loadConfig(), msg = h('p', { class: 'mut' }), inp = {};
@@ -966,7 +1015,7 @@ async function viewSettings() {
   const gather = () => ({
     baseUrl: inp.baseUrl.value.trim(), apiKey: inp.apiKey.value.trim(), remember: remember.checked, model: inp.model.value.trim() || DEFAULT_CONFIG.model,
     temperature: num('temperature', 0, 2), batchSize: Math.round(num('batchSize', 1, 100)), maxChars: Math.round(num('maxChars', 500, 12000)),
-    concurrency: Math.round(num('concurrency', 1, 5)), delay: Math.round(num('delay', 0, 10000)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), fast: fast.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
+    concurrency: Math.round(num('concurrency', 1, 5)), delay: Math.round(num('delay', 0, 10000)), timeout: Math.round(num('timeout', 10, 600)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), fast: fast.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
   });
   const wipeBtn = h('button', { disabled: '', onclick: async () => { try { await resetAll((m) => say(m, true)); location.hash = '#/proyek'; location.reload(); } catch (e) { say(e.message, true); } } }, 'Hapus semua data');
   const wipe = h('input', { type: 'text', placeholder: 'HAPUS', autocomplete: 'off', oninput: (e) => { wipeBtn.disabled = e.target.value !== 'HAPUS'; } });
