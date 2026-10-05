@@ -575,8 +575,8 @@ export function parseNotes(text = '') {
 }
 /** Catatan untuk pembicara ini (nama pembicara memuat nama di catatan). */
 export const notesFor = (notes, speaker) => (speaker ? notes.filter(([n]) => speaker.includes(n)) : []);
-export const DEFAULT_STYLE = 'Pakai bahasa Indonesia santai sehari-hari seperti dialog game atau subtitle anime: aku/kamu, nggak/tidak, sudah/udah sesuai karakter. Hindari kata baku yang kaku (saya/Anda, merupakan, sedang, tidak dapat) kecuali karakternya memang formal (bangsawan, pelayan, narator, sistem). Ikuti register sumber: bila aslinya kasar, vulgar, mesum, atau gaul, terjemahkan dengan tingkat yang setara. Jangan dihaluskan, disensor, atau diberi komentar tambahan. Teks UI, menu, item, dan skill tetap ringkas dan netral.';
-const cacheKey = (project, cfg, original, terms = [], notes = []) => sha256(`${project.src}|${project.tgt}|${cfg.model}|${original}${terms.length ? `|g:${terms.map((t) => t.join('=')).join(';')}` : ''}${(cfg.style || '').trim() ? `|s:${cfg.style.trim()}` : ''}${notes.length ? `|n:${notes.map((t) => t.join('=')).join(';')}` : ''}`);
+export const DEFAULT_STYLE = 'Indonesia santai ala dialog game atau subtitle anime (aku/kamu, nggak). Karakter formal (bangsawan, pelayan, narator, sistem) boleh baku. Ikuti register sumber: bila kasar, vulgar, atau mesum, terjemahkan setara; jangan dihaluskan, disensor, atau dikomentari. Teks UI ringkas dan netral.';
+const cacheKey = (project, cfg, original, terms = [], notes = []) => sha256(`${project.src}|${project.tgt}|${cfg.model}|${original}${terms.length ? `|g:${terms.map((t) => t.join('=')).join(';')}` : ''}${notes.length ? `|n:${notes.map((t) => t.join('=')).join(';')}` : ''}`);
 export const CSV_COLS = ['id', 'file', 'category', 'speaker', 'status', 'original', 'translation'];
 export const entriesToRows = (entries) => entries.map((e) => ({ id: e.id, file: e.file, category: e.category, speaker: e.meta?.speaker || '', status: e.status, original: e.original, translation: e.translation || '' }));
 /** CSV UTF-8 dengan BOM (agar Excel membaca huruf Jepang). Semua field dikutip. */
@@ -624,7 +624,7 @@ export function applyImport(entries, rows) {
 export const DEFAULT_CONFIG = {
   baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', remember: false, model: 'google/gemini-2.5-flash',
   temperature: 0.3, batchSize: 30, maxChars: 4000, concurrency: 4, delay: 100, priceIn: 0, priceOut: 0,
-  fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '', timeout: 120,
+  fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '', timeout: 120, extraBody: '', auto: true,
 };
 const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian' };
 const TODO = new Set(['pending', 'error', 'translating']);
@@ -668,6 +668,12 @@ export function parseRetryAfter(v) {
 export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
   if (!cfg.apiKey) throw new LlmError(UI.noKey, { fatal: true });
   if (!urlOk(cfg.baseUrl)) throw new LlmError(UI.urlBad, { fatal: true });
+  let extra = {};
+  if (String(cfg.extraBody || '').trim()) {
+    try { extra = JSON.parse(cfg.extraBody); if (!extra || typeof extra !== 'object' || Array.isArray(extra)) throw new Error('x'); }
+    catch { throw new LlmError('Body tambahan di Pengaturan bukan objek JSON yang valid', { fatal: true }); }
+    delete extra.model; delete extra.messages;
+  }
   // Batas waktu per request; pembatalan dari pengguna tetap diteruskan.
   const ctl = new AbortController(); let timedOut = false;
   const onAbort = () => ctl.abort();
@@ -678,7 +684,7 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
     try {
       res = await fetchFn(cfg.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
         method: 'POST', signal: ctl.signal, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
-        body: JSON.stringify({ model: cfg.model, temperature: cfg.temperature, messages, ...(cfg.fast && /(^|\.)openrouter\.ai$/.test(new URL(cfg.baseUrl).hostname) ? { reasoning: { enabled: false } } : {}) }),
+        body: JSON.stringify({ model: cfg.model, temperature: cfg.temperature, messages, ...(cfg.fast && /(^|\.)openrouter\.ai$/.test(new URL(cfg.baseUrl).hostname) ? { reasoning: { enabled: false } } : {}), ...extra }),
       });
     } catch (e) {
       if (e.name === 'AbortError') { if (timedOut) throw new LlmError(UI.timeout); throw e; }
@@ -802,8 +808,19 @@ export async function runPool(batches, conc, delay, signal, worker) {
   await Promise.all(Array.from({ length: Math.max(1, conc) }, w));
   if (err) throw err;
 }
+/**
+ * Mode otomatis: ukuran batch menyesuaikan panjang rata-rata teks (target sekitar 2400 karakter per batch, 10 sampai 60 teks).
+ * concurrency di sini adalah batas atas; jumlah yang berjalan menyesuaikan saat proses (lihat runTranslation).
+ */
+export function autoTune(todo, cfg) {
+  const seen = new Set(); let chars = 0;
+  for (const e of todo) { if (seen.has(e.original)) continue; seen.add(e.original); chars += maskText(e.original).text.length; }
+  const avg = seen.size ? chars / seen.size : 50;
+  return { ...cfg, batchSize: Math.max(10, Math.min(60, Math.floor(2400 / (avg + 15)))), maxChars: 4000, concurrency: 5, delay: 0 };
+}
 /** Perkiraan kasar token dan biaya untuk entri yang belum selesai (belum menghitung cache). */
-export function estimateCost(entries, cfg, src = 'ja') {
+export function estimateCost(entries, cfg0, src = 'ja') {
+  const cfg = cfg0.auto !== false ? autoTune(entries.filter((e) => TODO.has(e.status)), cfg0) : cfg0;
   const seen = new Set(); let chars = 0;
   for (const e of entries) {
     if (!TODO.has(e.status) || seen.has(e.original)) continue;
@@ -811,9 +828,9 @@ export function estimateCost(entries, cfg, src = 'ja') {
   }
   const items = seen.size, batches = items ? Math.max(Math.ceil(items / cfg.batchSize), Math.ceil(chars / cfg.maxChars)) : 0;
   const body = chars * (src === 'ja' ? 1 : 0.3);
-  const inTok = Math.round(body + items * 15 + batches * 400), outTok = Math.round(body * (src === 'ja' ? 1 : 1.2) + items * 12);
+  const inTok = Math.round(body + items * 15 + batches * (400 + Math.ceil((cfg.style || '').length / 3.5))), outTok = Math.round(body * (src === 'ja' ? 1 : 1.2) + items * 12);
   const cost = cfg.priceIn || cfg.priceOut ? (inTok * cfg.priceIn + outTok * cfg.priceOut) / 1e6 : null;
-  return { items, batches, inTok, outTok, cost };
+  return { items, batches, inTok, outTok, cost, batchSize: cfg.batchSize, auto: cfg0.auto !== false };
 }
 /**
  * Terjemahkan semua entri proyek yang pending/error. Aman dilanjutkan: hasil tiap batch langsung disimpan.
@@ -823,11 +840,14 @@ export function estimateCost(entries, cfg, src = 'ja') {
  * @returns {Promise<{done:number, error:number, cached:number, tokensIn:number, tokensOut:number, stopped:boolean}>}
  */
 export async function runTranslation(project, cfg, o = {}) {
-  const { signal, onProgress = () => {} } = o, chat = o.chat || ((m, s) => llmChat(cfg, m, s));
+  const { signal, onProgress = () => {}, base = 0 } = o, chat = o.chat || ((m, s) => llmChat(cfg, m, s));
   const all = (await dbQuery('entries', 'projectId', project.id)).sort((a, b) => a.id - b.id);
   const pos = new Map(all.map((e, i) => [e.id, i])), todo = all.filter((e) => TODO.has(e.status));
-  const stat = { done: 0, error: 0, cached: 0, tokensIn: 0, tokensOut: 0, stopped: false };
-  let n = 0; const tick = (t) => onProgress(n, todo.length, t);
+  const stat = { done: 0, error: 0, cached: 0, tokensIn: 0, tokensOut: 0, stopped: false, expOut: 0, nb: 0 };
+  const auto = cfg.auto !== false, eff = auto ? autoTune(todo, cfg) : cfg;
+  // Jumlah batch yang berjalan bersamaan: mulai 3, turun saat provider membatasi, naik pelan saat lancar (maks 5).
+  const lim = { cur: auto ? 3 : eff.concurrency, max: eff.concurrency, active: 0, okRun: 0 };
+  let n = 0; const tick = (t) => onProgress(n + base, todo.length + base, (stat.tokensIn ? `${t} · token masuk ${stat.tokensIn}, keluar ${stat.tokensOut}` : t) + (stat.nb >= 3 && stat.tokensOut > stat.expOut * 2.5 ? ' · Token keluar jauh di atas wajar: model mungkin memakai mode berpikir (lihat Body tambahan di Pengaturan)' : ''));
   const groups = new Map();
   for (const e of todo) { if (!groups.has(e.original)) groups.set(e.original, []); groups.get(e.original).push(e); }
   const units = [], hits = [], gl = parseGlossary(cfg.glossary), cn = parseNotes(cfg.charNotes); let uid = 0;
@@ -846,24 +866,27 @@ export async function runTranslation(project, cfg, o = {}) {
     });
   }
   if (hits.length) { await dbPutMany('entries', hits); n += hits.length; stat.done = stat.cached = hits.length; }
-  tick(`${n} dari ${todo.length} teks`);
+  tick(`${n + base} dari ${todo.length + base} teks`);
   const byId = new Map(units.map((u) => [u.id, u])); let streak = 0;
   // Gerbang bersama: bila provider membatasi (429/5xx), semua worker menunggu dan lajunya diperlambat bertahap, lalu pulih saat sukses.
   const gate = { until: 0, pace: 0 };
   const guarded = async (m) => {
-    const w = Math.max(gate.until - Date.now(), gate.pace); if (w > 0) await sleepSig(w, signal);
-    try { const r = await chat(m, signal); gate.pace = gate.pace < 200 ? 0 : gate.pace / 2; return r; }
+    const w = Math.max(gate.until - Date.now(), gate.pace);
+    if (w > 1500) tick(`Menunggu limit provider (${Math.round(w / 1000)} dtk) · ${n + base} dari ${todo.length + base} teks`);
+    if (w > 0) await sleepSig(w, signal);
+    try { const r = await chat(m, signal); gate.pace = gate.pace < 200 ? 0 : gate.pace / 2; if (auto && ++lim.okRun >= 8 && lim.cur < lim.max) { lim.cur++; lim.okRun = 0; } return r; }
     catch (e) {
-      if (e.status === 429 || e.status >= 500) { gate.until = Math.max(gate.until, Date.now() + Math.min(60000, e.retryAfter ?? 2000)); gate.pace = Math.min(5000, gate.pace ? gate.pace * 2 : 500); }
+      if (e.status === 429 || e.status >= 500) { if (auto) { lim.cur = Math.max(1, lim.cur - 1); lim.okRun = 0; } gate.until = Math.max(gate.until, Date.now() + Math.min(60000, e.retryAfter ?? 2000)); gate.pace = Math.min(5000, gate.pace ? gate.pace * 2 : 500); }
       throw e;
     }
   };
-  const work = async (batch) => {
+  const run = async (batch) => {
     const r = await translateBatch(batch, {
       chat: guarded, retry: { signal }, src: project.src, tgt: project.tgt, context: batch[0].ctx, style: cfg.style,
       check: (id, t) => (t.trim() ? (unmaskText(t, byId.get(id).tokens).ok ? '' : UI.tokenBad) : UI.emptyTr),
       onUsage: (u) => { stat.tokensIn += u?.prompt_tokens || 0; stat.tokensOut += u?.completion_tokens || 0; },
     });
+    stat.expOut += batch.reduce((a, u) => a + u.text.length + 12, 0); stat.nb++;
     const upd = [], cache = [];
     r.ok.forEach((t, id) => {
       const u = byId.get(id), text = unmaskText(t, u.tokens).text;
@@ -872,11 +895,16 @@ export async function runTranslation(project, cfg, o = {}) {
     });
     r.fail.forEach((msg, id) => { byId.get(id).entries.forEach((e) => upd.push({ ...e, status: 'error', error: msg })); stat.error += byId.get(id).entries.length; });
     await dbPutMany('cache', cache); await dbPutMany('entries', upd);
-    n += upd.length; tick(`${n} dari ${todo.length} teks`);
+    n += upd.length; tick(`${n + base} dari ${todo.length + base} teks`);
     streak = r.ok.size ? 0 : streak + 1;
     if (streak >= 3) throw new LlmError(UI.tooMany, { fatal: true });
   };
-  try { await runPool(makeBatches(units, cfg.batchSize, cfg.maxChars), cfg.concurrency, cfg.delay, signal, work); }
+  const work = async (batch) => {
+    while (lim.active >= lim.cur) await sleepSig(150, signal);
+    lim.active++;
+    try { await run(batch); } finally { lim.active--; }
+  };
+  try { await runPool(makeBatches(units, eff.batchSize, eff.maxChars), eff.concurrency, eff.delay, signal, work); }
   catch (e) { if (e.name !== 'AbortError') throw e; }
   stat.stopped = !!signal?.aborted;
   return stat;
@@ -957,10 +985,12 @@ async function startJob() {
   const cfg = await loadConfig(), p = await currentProject();
   job.err = false;
   if (!cfg.apiKey) { job.err = true; job.text = UI.noKey; return paintJob(); }
-  job.running = true; job.ctl = new AbortController(); job.value = 0; job.text = 'Memulai…'; paintJob();
+  const before = await dbQuery('entries', 'projectId', p.id), base = before.filter((e) => e.status === 'done' || e.status === 'edited').length;
+  job.running = true; job.ctl = new AbortController(); job.value = base; job.max = base + before.filter((e) => TODO.has(e.status)).length || 1; job.text = 'Memulai…'; paintJob();
+  let lock = null; try { lock = await navigator.wakeLock?.request('screen'); } catch { /* layar tetap boleh mati */ }
   try {
     let t0 = Date.now(), d0 = null;
-    const r = await runTranslation(p, cfg, { signal: job.ctl.signal, onProgress: (d, t, txt) => {
+    const r = await runTranslation(p, cfg, { signal: job.ctl.signal, base, onProgress: (d, t, txt) => {
       if (d0 === null) { d0 = d; t0 = Date.now(); }
       let eta = '';
       if (d > d0 && d < t) { const sec = ((t - d) * (Date.now() - t0)) / 1000 / (d - d0); eta = ` · sisa ±${sec >= 90 ? Math.round(sec / 60) + ' menit' : Math.round(sec) + ' detik'}`; }
@@ -969,6 +999,7 @@ async function startJob() {
     job.text = !r.done && !r.error && !r.stopped ? UI.nothing
       : `${r.stopped ? 'Dihentikan' : 'Selesai'}. ${r.done} berhasil (${r.cached} dari cache), ${r.error} error${r.error ? '. Lihat di tab Review, filter Error' : ''}`;
   } catch (e) { job.err = true; job.text = e.message; }
+  try { await lock?.release(); } catch { /* abaikan */ }
   job.running = false; paintJob();
   if (/^#\/translate/.test(location.hash)) render();
 }
@@ -985,18 +1016,23 @@ async function viewTranslate() {
   const stop = h('button', { onclick: () => job.ctl?.abort() }, 'Hentikan');
   job.ui = { bar, txt, start, stop };
   if (!p.total) job.text = UI.emptyImp, job.err = true;
+  else if (!job.running && !job.text) {
+    const fin = cnt('done') + cnt('edited'), todoN = cnt('pending') + cnt('translating') + cnt('error');
+    job.value = fin; job.max = fin + todoN || 1;
+    job.text = fin ? `${fin} dari ${fin + todoN} teks sudah tersimpan${todoN ? '. Tekan Lanjutkan untuk meneruskan' : ''}` : '';
+  }
   const money = est.cost === null ? 'isi harga token di Pengaturan' : `sekitar ${est.cost.toFixed(4)} (satuan mengikuti harga di Pengaturan)`;
   const out = [
     card(h('h2', {}, 'Bahasa'), h('label', {}, 'Sumber'), h('p', { class: 'mut' }, p.src === 'ja' ? 'Jepang' : 'Inggris'), h('label', {}, 'Target'), tgt),
     card(h('h2', {}, 'Status'), ['pending', 'translating', 'done', 'edited', 'error', 'skipped'].filter(cnt).map((s) => h('span', { class: 'badge' }, `${s} ${cnt(s)}`)),
-      h('p', { class: 'mut' }, `Perkiraan kasar: ${est.items} teks unik, ${est.batches} batch\nToken masuk ${est.inTok}, keluar ${est.outTok}\nBiaya: ${money}\nBelum menghitung cache.`)),
+      h('p', { class: 'mut' }, `${est.auto ? `Mode otomatis: ${est.batchSize} teks per batch, konkurensi menyesuaikan\n` : ''}Perkiraan kasar: ${est.items} teks unik, ${est.batches} batch\nToken masuk ${est.inTok}, keluar ${est.outTok}\nBiaya: ${money}\nBelum menghitung cache.`)),
     card(h('p', { class: 'mut' }, `Teks dikirim ke provider yang dipilih (${cfg.baseUrl}) dengan model ${cfg.model}.`), bar, txt, h('div', { class: 'row' }, start, stop)),
   ];
   paintJob(true);
   return out;
 }
 const FIELDS = [
-  ['baseUrl', 'Base URL', 'url'], ['apiKey', 'API key', 'password'], ['model', 'Model', 'text'], ['temperature', 'Temperature (0 sampai 2)', 'number'],
+  ['baseUrl', 'Base URL', 'url'], ['apiKey', 'API key', 'password'], ['model', 'Model', 'text'], ['extraBody', 'Body tambahan JSON (opsional)', 'text'], ['temperature', 'Temperature (0 sampai 2)', 'number'],
   ['batchSize', 'Ukuran batch (teks)', 'number'], ['maxChars', 'Batas karakter per batch', 'number'], ['concurrency', 'Konkurensi (1 sampai 5)', 'number'],
   ['delay', 'Jeda antar request (ms)', 'number'], ['timeout', 'Batas waktu per request (detik)', 'number'], ['wrapWidth', 'Lebar baris maks tanpa face (0 = mati)', 'number'], ['wrapFace', 'Lebar baris maks dengan face', 'number'], ['priceIn', 'Harga token masuk per 1 juta', 'number'], ['priceOut', 'Harga token keluar per 1 juta', 'number'],
 ];
@@ -1010,12 +1046,13 @@ async function viewSettings() {
   const styleTa = h('textarea', { rows: '8', spellcheck: 'false' }, c.style ?? DEFAULT_STYLE), notesTa = h('textarea', { rows: '5', spellcheck: 'false', autocomplete: 'off', placeholder: 'アリス: sopan, pakai saya/Anda\nバルト: preman, pakai gue/lo, kasar' }, c.charNotes || '');
   const glossTa = h('textarea', { rows: '6', spellcheck: 'false', autocomplete: 'off', placeholder: 'アリス = Alice\nポーション = Ramuan' }, c.glossary || '');
   const remember = h('input', { type: 'checkbox', ...(c.remember ? { checked: '' } : {}) });
+  const autoCb = h('input', { type: 'checkbox', ...(c.auto !== false ? { checked: '' } : {}) });
   const fast = h('input', { type: 'checkbox', ...(c.fast ? { checked: '' } : {}) });
   const num = (k, lo, hi) => Math.min(hi, Math.max(lo, Number(inp[k].value) || lo));
   const gather = () => ({
-    baseUrl: inp.baseUrl.value.trim(), apiKey: inp.apiKey.value.trim(), remember: remember.checked, model: inp.model.value.trim() || DEFAULT_CONFIG.model,
+    baseUrl: inp.baseUrl.value.trim(), apiKey: inp.apiKey.value.trim(), remember: remember.checked, model: inp.model.value.trim() || DEFAULT_CONFIG.model, extraBody: inp.extraBody.value.trim(),
     temperature: num('temperature', 0, 2), batchSize: Math.round(num('batchSize', 1, 100)), maxChars: Math.round(num('maxChars', 500, 12000)),
-    concurrency: Math.round(num('concurrency', 1, 5)), delay: Math.round(num('delay', 0, 10000)), timeout: Math.round(num('timeout', 10, 600)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), fast: fast.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
+    concurrency: Math.round(num('concurrency', 1, 5)), delay: Math.round(num('delay', 0, 10000)), timeout: Math.round(num('timeout', 10, 600)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), fast: fast.checked, auto: autoCb.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
   });
   const wipeBtn = h('button', { disabled: '', onclick: async () => { try { await resetAll((m) => say(m, true)); location.hash = '#/proyek'; location.reload(); } catch (e) { say(e.message, true); } } }, 'Hapus semua data');
   const wipe = h('input', { type: 'text', placeholder: 'HAPUS', autocomplete: 'off', oninput: (e) => { wipeBtn.disabled = e.target.value !== 'HAPUS'; } });
@@ -1028,9 +1065,10 @@ async function viewSettings() {
     const n = await save(); if (!n) return;
     say('Menguji koneksi…');
     try {
-      const r = await llmChat(n, buildMessages({ src: 'ja', tgt: 'id', units: [{ id: 0, text: 'こんにちは' }], context: [] }));
-      const t = toArray(parseJsonLoose(r.text))?.[0]?.text;
-      say(t ? `Terhubung. Contoh hasil: ${t}` : 'Terhubung, tetapi format respons tidak sesuai. Coba model lain', !t);
+      const t0 = Date.now(), r = await llmChat(n, buildMessages({ src: 'ja', tgt: 'id', units: [{ id: 0, text: 'こんにちは' }], context: [] }));
+      const t = toArray(parseJsonLoose(r.text))?.[0]?.text, tok = r.usage?.completion_tokens;
+      // Jawaban sependek ini wajarnya di bawah sekitar 40 token keluar; jauh di atas itu berarti model memakai mode berpikir.
+      say(t ? `Terhubung. Contoh hasil: ${t}\nWaktu ${((Date.now() - t0) / 1000).toFixed(1)} dtk, token keluar ${tok ?? 'tidak dilaporkan'}${tok > 120 ? ' (tinggi: model kemungkinan memakai mode berpikir)' : ''}` : 'Terhubung, tetapi format respons tidak sesuai. Coba model lain', !t);
     } catch (e) { say(e.message, true); }
   };
   const saveStyle = async () => { const n = gather(); if (!urlOk(n.baseUrl)) return say(UI.urlBad, true); await saveConfig(n); say('Tersimpan'); };
@@ -1039,7 +1077,10 @@ async function viewSettings() {
     h('div', { class: 'row' }, h('button', { class: 'pri', onclick: saveStyle }, 'Simpan gaya'), h('button', { onclick: () => { styleTa.value = DEFAULT_STYLE; } }, 'Pulihkan bawaan'))),
   card(h('h2', {}, 'Glosarium (opsional)'), h('p', { class: 'mut' }, 'Satu baris per istilah: sumber = terjemahan. Istilah yang muncul di sebuah teks dikirim ke model sebagai acuan. Teks yang isinya persis satu istilah diterjemahkan langsung tanpa model. Berlaku untuk terjemahan berikutnya; teks yang sudah selesai tidak diubah.'), glossTa, h('button', { class: 'pri', onclick: async () => { const n = gather(); if (!urlOk(n.baseUrl)) return say(UI.urlBad, true); await saveConfig(n); say(`Tersimpan. ${parseGlossary(n.glossary).length} istilah`); } }, 'Simpan glosarium')),
   card(h('h2', {}, 'Daftar aman plugin (opsional)'), h('p', { class: 'mut' }, 'Kosong = perintah dan parameter plugin tidak disentuh. Isi hanya entri yang kamu yakin berisi teks tampil. Berlaku saat impor, jadi impor ulang proyek setelah mengubahnya.'), allowTa, h('button', { class: 'pri', onclick: async () => { const n = gather(); if (!urlOk(n.baseUrl)) return say(UI.urlBad, true); await saveConfig(n); say('Tersimpan'); } }, 'Simpan daftar')),
-  card(h('h2', {}, 'Pengaturan LLM'), ...form,
+  card(h('h2', {}, 'Pengaturan LLM'),
+    h('label', { class: 'chk' }, autoCb, 'Atur kecepatan otomatis (disarankan)'),
+    h('p', { class: 'mut' }, 'Ukuran batch dan konkurensi diatur sendiri mengikuti panjang teks dan respons provider. Isian ukuran batch, batas karakter, konkurensi, dan jeda di bawah baru dipakai kalau ini dimatikan.'),
+    ...form,
     h('label', { class: 'chk' }, fast, 'Matikan mode berpikir model (khusus OpenRouter, lebih cepat)'),
     h('label', { class: 'chk' }, remember, 'Ingat key di perangkat ini'),
     h('p', { class: 'mut' }, 'Key hanya dikirim ke base URL di atas. Jangan aktifkan di perangkat bersama.'),
