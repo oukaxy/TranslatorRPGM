@@ -620,6 +620,72 @@ export function applyImport(entries, rows) {
   return out;
 }
 
+// ===== 4c. TERJEMAH LEWAT CHAT AI =====
+const NL = '⏎', LANG_NAME = { ja: 'Jepang', en: 'Inggris', id: 'Indonesia' };
+const plainName = (t) => String(t || '').replace(ESC, '').replace(/[\[\]|\n]/g, ' ').trim();
+/**
+ * Pecah teks yang belum selesai menjadi bagian-bagian untuk ditempel ke aplikasi AI.
+ * Satu baris per teks unik: "[id] teks" (kode game dimasker, baris baru ditulis ⏎), diawali instruksi, gaya, catatan karakter, dan glosarium.
+ */
+export function buildChatParts(project, entries, cfg, perPart = 150, maxChars = 6000) {
+  const groups = new Map();
+  for (const e of entries.filter((x) => TODO.has(x.status)).sort((a, b) => a.id - b.id)) { if (!groups.has(e.original)) groups.set(e.original, e); }
+  const gl = parseGlossary(cfg.glossary), cn = parseNotes(cfg.charNotes);
+  const units = [...groups].map(([original, e0]) => ({ id: e0.id, original, speaker: e0.meta?.speaker || '', text: maskText(original).text.replace(/\r?\n/g, NL) }));
+  const batches = makeBatches(units, Math.max(10, perPart), maxChars);
+  return batches.map((us, i) => {
+    const terms = new Map(), notes = new Map();
+    us.forEach((u) => { termsFor(gl, `${u.original}\n${u.speaker}`).forEach(([a, b]) => terms.set(a, b)); notesFor(cn, u.speaker).forEach(([a, b]) => notes.set(a, b)); });
+    const lines = us.map((u) => { const sp = plainName(u.speaker); return `[${u.id}${sp ? '|' + sp : ''}] ${u.text}`; });
+    const head = [
+      `# TUGAS`,
+      `Terjemahkan teks game RPG dari bahasa ${LANG_NAME[project.src] || project.src} ke bahasa ${LANG_NAME[project.tgt] || project.tgt}. Ini bagian ${i + 1} dari ${batches.length}, berisi ${us.length} baris.`,
+      ``, `# ATURAN FORMAT (WAJIB)`,
+      `1. Balas HANYA dengan baris terjemahan, satu baris untuk tiap baris sumber, dengan format: [id] terjemahan`,
+      `2. Salin nomor id persis. Jangan melewatkan, menggabung, mengurutkan ulang, atau menambah baris. Jumlah baris balasan harus ${us.length}.`,
+      `3. Token seperti ⟦0⟧ dan ⟦1⟧ adalah kode game. Salin persis, jangan diterjemahkan atau dihapus. Posisinya boleh dipindah mengikuti tata bahasa, tapi tiap token harus muncul tepat satu kali.`,
+      `4. Tanda ${NL} berarti pindah baris di dalam satu teks. Pertahankan tanda itu (jangan diganti baris baru sungguhan) dan taruh di tempat yang wajar.`,
+      `5. Bagian "|nama" setelah id hanyalah konteks pembicara. Jangan ikut ditulis di balasan dan jangan diterjemahkan sebagai teks.`,
+      `6. Tanpa komentar, pembuka, penutup, atau blok kode.`,
+      ...((cfg.style || '').trim() ? [``, `# GAYA BAHASA`, cfg.style.trim().replace(/\s+/g, ' ')] : []),
+      ...(notes.size ? [``, `# CATATAN KARAKTER (nama pembicara: gaya bicara)`, ...[...notes].map(([a, b]) => `${a}: ${b}`)] : []),
+      ...(terms.size ? [``, `# GLOSARIUM (pakai terjemahan ini persis)`, ...[...terms].map(([a, b]) => `${a} = ${b}`)] : []),
+      ``, `# TEKS`,
+    ];
+    const foot = [``, `# AKHIR. Balas sekarang dengan ${us.length} baris berformat [id] terjemahan, tanpa teks lain.`];
+    return { index: i + 1, total: batches.length, count: us.length, ids: us.map((u) => u.id), text: [...head, ...lines, ...foot].join('\n') + '\n' };
+  });
+}
+/** Baca balasan AI. Baris tanpa nomor di antara dua baris bernomor dianggap lanjutan baris sebelumnya; yang di awal atau akhir dibuang. */
+export function parseChatReply(text) {
+  const rows = []; let pending = [], ignored = 0;
+  for (const raw of String(text).replace(/\r\n/g, '\n').split('\n')) {
+    const line = raw.trim(); if (!line || /^```/.test(line)) continue;
+    const m = line.match(/^(?:[-*•]\s*)?\[(\d+)(?:\|[^\]]*)?\]\s*(.*)$/);
+    if (m) { if (pending.length) { if (rows.length) rows[rows.length - 1].text += NL + pending.join(NL); else ignored += pending.length; pending = []; } rows.push({ id: Number(m[1]), text: m[2] }); }
+    else pending.push(line);
+  }
+  ignored += pending.length;
+  return { rows, ignored };
+}
+/** Terapkan balasan ke entry. Satu terjemahan berlaku untuk semua entry dengan teks asli yang sama. Entry hasil edit manual tidak ditimpa. */
+export function applyChatRows(entries, rows) {
+  const byId = new Map(entries.map((e) => [e.id, e])), byOrig = new Map();
+  for (const e of entries) { if (!byOrig.has(e.original)) byOrig.set(e.original, []); byOrig.get(e.original).push(e); }
+  const out = { updates: [], texts: 0, empty: [], badToken: [], unknown: [], dup: 0 }, seen = new Set();
+  for (const r of rows) {
+    const e0 = byId.get(r.id); if (!e0) { out.unknown.push(r.id); continue; }
+    if (seen.has(e0.original)) { out.dup++; continue; }
+    const t = String(r.text).replace(new RegExp(`\\s*${NL}\\s*`, 'g'), '\n').trim();
+    if (!t) { out.empty.push(r.id); continue; }
+    const u = unmaskText(t, maskText(e0.original).tokens);
+    if (!u.ok) { out.badToken.push(r.id); continue; }
+    seen.add(e0.original); out.texts++;
+    for (const e of byOrig.get(e0.original)) if (e.status !== 'edited' && e.status !== 'skipped') out.updates.push({ ...e, translation: u.text, status: 'done', error: '' });
+  }
+  return out;
+}
+
 // ===== 5. TRANSLATE (batch, cache, retry, resume, klien LLM, biaya) =====
 export const DEFAULT_CONFIG = {
   baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', remember: false, model: 'google/gemini-2.5-flash',
@@ -1174,10 +1240,44 @@ async function viewEkspor() {
         `Teks asli tidak cocok dengan proyek ini: ${r.mismatch.length}${ids(r.mismatch)}`, `Kode escape/tag berubah (ditolak): ${r.badEsc.length}${ids(r.badEsc)}`, `id tidak dikenal: ${r.unknown.length}`].join('\n');
     } catch (e) { editMsg.className = 'err'; editMsg.textContent = e.message; }
   };
+  let chatUrls = [];
+  const chatOut = h('div'), chatMsg = h('p', { class: 'mut' }), perPart = h('input', { type: 'number', value: '150', min: '10', max: '500' });
+  const paste = h('textarea', { rows: '5', spellcheck: 'false', placeholder: 'Tempel balasan AI di sini…' });
+  const fmtIds = (a) => (a.length ? ` (id ${a.slice(0, 8).join(', ')}${a.length > 8 ? ', …' : ''})` : '');
+  const prepare = async () => {
+    chatUrls.forEach((u) => URL.revokeObjectURL(u)); chatUrls = [];
+    const parts = buildChatParts(p, await dbQuery('entries', 'projectId', p.id), await loadConfig(), Number(perPart.value) || 150);
+    chatMsg.className = 'mut'; chatMsg.textContent = '';
+    if (!parts.length) { chatOut.replaceChildren(h('p', { class: 'mut' }, 'Tidak ada teks yang belum selesai.')); return; }
+    chatOut.replaceChildren(...parts.map((pt) => {
+      const url = URL.createObjectURL(new Blob([pt.text], { type: 'text/plain;charset=utf-8' })); chatUrls.push(url);
+      return h('div', { class: 'row' }, h('span', {}, `Bagian ${pt.index} dari ${pt.total} · ${pt.count} teks`),
+        h('button', { onclick: async () => { try { await navigator.clipboard.writeText(pt.text); chatMsg.className = 'mut'; chatMsg.textContent = `Bagian ${pt.index} disalin`; } catch { chatMsg.className = 'err'; chatMsg.textContent = 'Gagal menyalin. Pakai Unduh'; } } }, 'Salin'),
+        h('a', { class: 'file', href: url, download: `rpgtl-${p.id}-bagian-${pt.index}.txt` }, 'Unduh'));
+    }));
+  };
+  const doImport = async (txt) => {
+    chatMsg.className = 'mut'; chatMsg.textContent = 'Membaca…';
+    try {
+      const es = await dbQuery('entries', 'projectId', p.id), { rows, ignored } = parseChatReply(txt);
+      if (!rows.length) { chatMsg.className = 'err'; chatMsg.textContent = 'Tidak ada baris berformat [id] terjemahan'; return false; }
+      const r = applyChatRows(es, rows);
+      if (r.updates.length) await dbPutMany('entries', r.updates);
+      const upd = new Set(r.updates.map((u) => u.id)), left = new Set(es.filter((e) => TODO.has(e.status) && !upd.has(e.id)).map((e) => e.original)).size;
+      chatMsg.textContent = [`Teks diterjemahkan: ${r.texts} (${r.updates.length} entri)`, `Sisa belum diterjemahkan: ${left} teks`, `Kode game rusak atau hilang (ditolak): ${r.badToken.length}${fmtIds(r.badToken)}`,
+        `Terjemahan kosong: ${r.empty.length}${fmtIds(r.empty)}`, `id tidak dikenal: ${r.unknown.length}${fmtIds(r.unknown)}`, `Duplikat diabaikan: ${r.dup}`, `Baris tanpa nomor di awal atau akhir diabaikan: ${ignored}`].join('\n');
+      return r.updates.length > 0;
+    } catch (e) { chatMsg.className = 'err'; chatMsg.textContent = e.message; return false; }
+  };
   return [card(h('h2', {}, 'Ekspor'), h('p', { class: 'mut' }, `Siap diekspor: ${ready}\nBelum diterjemahkan (tetap asli): ${pend}\nError (tetap asli): ${err}`), btn), out,
     card(h('h2', {}, 'Edit manual'), h('p', { class: 'mut' }, 'Unduh semua teks sebagai CSV atau JSON, edit kolom translation, lalu impor lagi. Jangan ubah kolom id dan original. Kode escape dan tag harus tetap sama.'),
       h('div', { class: 'row' }, h('button', { onclick: () => dump('csv') }, 'Siapkan CSV'), h('button', { onclick: () => dump('json') }, 'Siapkan JSON')), editOut,
-      h('label', { class: 'file' }, 'Impor hasil edit (.csv / .json)', h('input', { type: 'file', accept: '.csv,.json', onchange: importEdit })), editMsg)];
+      h('label', { class: 'file' }, 'Impor hasil edit (.csv / .json)', h('input', { type: 'file', accept: '.csv,.json', onchange: importEdit })), editMsg),
+    card(h('h2', {}, 'Terjemah lewat chat AI'), h('p', { class: 'mut' }, 'Untuk menerjemahkan di aplikasi AI lain tanpa API. Teks yang belum selesai dipecah jadi bagian-bagian berisi instruksi, gaya, dan glosarium. Kirim satu bagian ke AI (tempel atau unggah file), lalu tempel balasannya di bawah. Bagian dihitung ulang dari teks yang belum selesai tiap kali kamu menyiapkannya.'),
+      h('label', {}, 'Teks per bagian'), perPart, h('button', { class: 'pri', onclick: prepare }, 'Siapkan bagian'), chatOut,
+      h('label', {}, 'Balasan AI'), paste,
+      h('div', { class: 'row' }, h('button', { class: 'pri', onclick: async () => { if (await doImport(paste.value)) paste.value = ''; } }, 'Impor tempelan'),
+        h('label', { class: 'file' }, 'Impor file (.txt)', h('input', { type: 'file', accept: '.txt,text/plain', multiple: '', onchange: async (ev) => { const fs = [...ev.target.files]; ev.target.value = ''; if (fs.length) await doImport((await Promise.all(fs.map((f) => f.text()))).join('\n')); } }))), chatMsg)];
 }
 
 // ===== 7. BOOTSTRAP (router hash, state, mulai aplikasi) =====
