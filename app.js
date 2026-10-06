@@ -657,9 +657,13 @@ export function buildChatParts(project, entries, cfg, perPart = 150, maxChars = 
   });
 }
 /** Baca balasan AI. Baris tanpa nomor di antara dua baris bernomor dianggap lanjutan baris sebelumnya; yang di awal atau akhir dibuang. */
-export function parseChatReply(text) {
-  const rows = []; let pending = [], ignored = 0;
-  for (const raw of String(text).replace(/\r\n/g, '\n').split('\n')) {
+export function parseChatReply(text, ids = null) {
+  const rows = []; let pending = [], ignored = 0, src = String(text).replace(/\r\n/g, '\n');
+  // Bila baris baru hilang saat disalin (semua baris tergabung jadi satu), pecah di setiap penanda [id] yang id-nya dikenal.
+  if (ids && (src.match(/^\s*(?:[-*•]\s*)?\[\d+(?:\|[^\]]*)?\]/gm) || []).length <= 1) {
+    src = src.replace(/(\S)[ \t]*(\[(\d+)(?:\|[^\]]*)?\])/g, (m, pre, mark, id) => (ids.has(Number(id)) ? `${pre}\n${mark}` : m));
+  }
+  for (const raw of src.split('\n')) {
     const line = raw.trim(); if (!line || /^```/.test(line)) continue;
     const m = line.match(/^(?:[-*•]\s*)?\[(\d+)(?:\|[^\]]*)?\]\s*(.*)$/);
     if (m) { if (pending.length) { if (rows.length) rows[rows.length - 1].text += NL + pending.join(NL); else ignored += pending.length; pending = []; } rows.push({ id: Number(m[1]), text: m[2] }); }
@@ -1259,12 +1263,12 @@ async function viewEkspor() {
   const doImport = async (txt) => {
     chatMsg.className = 'mut'; chatMsg.textContent = 'Membaca…';
     try {
-      const es = await dbQuery('entries', 'projectId', p.id), { rows, ignored } = parseChatReply(txt);
+      const es = await dbQuery('entries', 'projectId', p.id), { rows, ignored } = parseChatReply(txt, new Set(es.map((e) => e.id)));
       if (!rows.length) { chatMsg.className = 'err'; chatMsg.textContent = 'Tidak ada baris berformat [id] terjemahan'; return false; }
       const r = applyChatRows(es, rows);
       if (r.updates.length) await dbPutMany('entries', r.updates);
       const upd = new Set(r.updates.map((u) => u.id)), left = new Set(es.filter((e) => TODO.has(e.status) && !upd.has(e.id)).map((e) => e.original)).size;
-      chatMsg.textContent = [`Teks diterjemahkan: ${r.texts} (${r.updates.length} entri)`, `Sisa belum diterjemahkan: ${left} teks`, `Kode game rusak atau hilang (ditolak): ${r.badToken.length}${fmtIds(r.badToken)}`,
+      chatMsg.textContent = [`Baris terbaca: ${rows.length}`, `Teks diterjemahkan: ${r.texts} (${r.updates.length} entri)`, `Sisa belum diterjemahkan: ${left} teks`, `Kode game rusak atau hilang (ditolak): ${r.badToken.length}${fmtIds(r.badToken)}`,
         `Terjemahan kosong: ${r.empty.length}${fmtIds(r.empty)}`, `id tidak dikenal: ${r.unknown.length}${fmtIds(r.unknown)}`, `Duplikat diabaikan: ${r.dup}`, `Baris tanpa nomor di awal atau akhir diabaikan: ${ignored}`].join('\n');
       return r.updates.length > 0;
     } catch (e) { chatMsg.className = 'err'; chatMsg.textContent = e.message; return false; }
