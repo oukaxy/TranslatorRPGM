@@ -660,12 +660,12 @@ export function buildChatParts(project, entries, cfg, perPart = 150, maxChars = 
 export function parseChatReply(text, ids = null) {
   const rows = []; let pending = [], ignored = 0, src = String(text).replace(/\r\n/g, '\n');
   // Bila baris baru hilang saat disalin (semua baris tergabung jadi satu), pecah di setiap penanda [id] yang id-nya dikenal.
-  if (ids && (src.match(/^\s*(?:[-*•]\s*)?\[\d+(?:\|[^\]]*)?\]/gm) || []).length <= 1) {
+  if (ids && (src.match(/^\s*(?:(?:[-*•]|\d+[.)])\s*)?\[\d+(?:\|[^\]]*)?\]/gm) || []).length <= 1) {
     src = src.replace(/(\S)[ \t]*(\[(\d+)(?:\|[^\]]*)?\])/g, (m, pre, mark, id) => (ids.has(Number(id)) ? `${pre}\n${mark}` : m));
   }
   for (const raw of src.split('\n')) {
     const line = raw.trim(); if (!line || /^```/.test(line)) continue;
-    const m = line.match(/^(?:[-*•]\s*)?\[(\d+)(?:\|[^\]]*)?\]\s*(.*)$/);
+    const m = line.match(/^(?:(?:[-*•]|\d+[.)])\s*)?\[(\d+)(?:\|[^\]]*)?\]\s*(.*)$/);
     if (m) { if (pending.length) { if (rows.length) rows[rows.length - 1].text += NL + pending.join(NL); else ignored += pending.length; pending = []; } rows.push({ id: Number(m[1]), text: m[2] }); }
     else pending.push(line);
   }
@@ -681,11 +681,12 @@ export function applyChatRows(entries, rows) {
     const e0 = byId.get(r.id); if (!e0) { out.unknown.push(r.id); continue; }
     if (seen.has(e0.original)) { out.dup++; continue; }
     const t = String(r.text).replace(new RegExp(`\\s*${NL}\\s*`, 'g'), '\n').trim();
+    const lead = (e0.original.match(/^\s*/) || [''])[0].replace(/\r/g, ''), trail = (e0.original.match(/\s*$/) || [''])[0].replace(/\r/g, '');
     if (!t) { out.empty.push(r.id); continue; }
     const u = unmaskText(t, maskText(e0.original).tokens);
     if (!u.ok) { out.badToken.push(r.id); continue; }
     seen.add(e0.original); out.texts++;
-    for (const e of byOrig.get(e0.original)) if (e.status !== 'edited' && e.status !== 'skipped') out.updates.push({ ...e, translation: u.text, status: 'done', error: '' });
+    for (const e of byOrig.get(e0.original)) if (TODO.has(e.status)) out.updates.push({ ...e, translation: lead + u.text + trail, status: 'done', error: '' });
   }
   return out;
 }
