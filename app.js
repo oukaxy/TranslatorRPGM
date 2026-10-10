@@ -212,9 +212,221 @@ export async function readZip(blob) {
     },
   };
 }
+// ===== 4c. RUBY MARSHAL <-> JSON VIEW (RPG Maker VX Ace .rvdata2) =====
+const B64 = {
+  enc: (u8) => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); },
+  dec: (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0)),
+};
+const isAscii = (b) => { for (let i = 0; i < b.length; i++) if (b[i] > 127) return false; return true; };
+/**
+ * Baca Ruby Marshal 4.8 (.rvdata2) menjadi JSON "view" tanpa kehilangan data:
+ * objek -> {__c:Kelas, field:...} (ivar tanpa @), String UTF-8 -> string JS, Hash -> {__h:'i'|'s', ...}, tipe lain -> {__x:...}.
+ */
+export function marshalToView(u8) {
+  if (u8[0] !== 4 || u8[1] !== 8) throw new Error('bukan data Marshal 4.8');
+  let p = 2;
+  const syms = [], objs = [], utf = new TextDecoder('utf-8'), strict = new TextDecoder('utf-8', { fatal: true });
+  const byte = () => { if (p >= u8.length) throw new Error('data terpotong'); return u8[p++]; };
+  const long = () => {
+    const c = (byte() << 24) >> 24;
+    if (c === 0) return 0;
+    if (c > 4) return c - 5;
+    if (c < -4) return c + 5;
+    const n = Math.abs(c); let v = 0;
+    for (let i = 0; i < n; i++) v += byte() * 2 ** (8 * i);
+    return c > 0 ? v : v - 2 ** (8 * n);
+  };
+  const raw = (n) => { if (n < 0 || p + n > u8.length) throw new Error('data terpotong'); const b = u8.subarray(p, p + n); p += n; return b; };
+  const bytes = () => raw(long());
+  const symName = () => {
+    let t = byte(), iv = false;
+    if (t === 0x49) { iv = true; t = byte(); }
+    if (t === 0x3b) { const s = syms[long()]; if (s === undefined) throw new Error('simbol tidak dikenal'); return s; }
+    if (t !== 0x3a) throw new Error('simbol tidak valid');
+    const name = utf.decode(bytes()); syms.push(name);
+    if (iv) for (let n = long(); n-- > 0;) { symName(); r(); }
+    return name;
+  };
+  const strView = (b, iv) => {
+    if (iv.length === 1 && iv[0][0] === 'E') {
+      if (iv[0][1] === true) { try { return strict.decode(b); } catch { /* bukan UTF-8 valid */ } }
+      else if (iv[0][1] === false && isAscii(b)) return { __a: String.fromCharCode(...b) };
+    }
+    const v = { __s: B64.enc(b) }; if (iv.length) v.__iv = iv; return v;
+  };
+  const hashView = (pairs, def, withDef) => {
+    let v;
+    if (pairs.every(([k]) => typeof k === 'number')) { v = { __h: 'i' }; pairs.forEach(([k, x]) => { v[k] = x; }); }
+    else if (pairs.every(([k]) => typeof k === 'string' && !k.startsWith('__'))) { v = { __h: 's' }; pairs.forEach(([k, x]) => { v[k] = x; }); }
+    else v = { __hp: pairs };
+    if (v.__h) {
+      const want = pairs.map(([k]) => String(k)), got = Object.keys(v).filter((k) => !k.startsWith('__'));
+      if (want.length !== got.length || want.some((k, i) => k !== got[i])) v.__ord = want;
+    }
+    if (withDef) v.__hd = def;
+    return v;
+  };
+  function body(t, ivp) {
+    switch (t) {
+      case 0x22: { const b = bytes(); if (ivp) return { str: b, idx: objs.push(null) - 1 }; const v = { __s: B64.enc(b) }; objs.push(v); return v; }
+      case 0x66: { const v = { __f: utf.decode(bytes()) }; objs.push(v); return v; }
+      case 0x6c: {
+        const sign = byte(), n = long() * 2, b = raw(n); let x = 0n;
+        for (let i = n - 1; i >= 0; i--) x = (x << 8n) | BigInt(b[i]);
+        const v = { __big: (sign === 0x2d ? '-' : '') + x.toString() }; objs.push(v); return v;
+      }
+      case 0x5b: { const a = []; objs.push(a); for (let n = long(); n-- > 0;) a.push(r()); return a; }
+      case 0x7b: case 0x7d: {
+        const idx = objs.push(null) - 1, n = long(), pairs = [];
+        for (let i = 0; i < n; i++) { const k = r(); pairs.push([k, r()]); }
+        const def = t === 0x7d ? r() : null, v = hashView(pairs, def, t === 0x7d); objs[idx] = v; return v;
+      }
+      case 0x6f: {
+        const o = { __c: symName() }; objs.push(o);
+        for (let n = long(); n-- > 0;) { const k = symName(); o[k.startsWith('@') ? k.slice(1) : '~' + k] = r(); }
+        return o;
+      }
+      case 0x75: { const cls = symName(), b = bytes(); if (ivp) return { u: cls, b }; const v = { __u: cls, b64: B64.enc(b) }; objs.push(v); return v; }
+      case 0x55: { const o = { __U: symName() }; objs.push(o); o.v = r(); return o; }
+      case 0x63: case 0x6d: case 0x4d: { const v = { __k: String.fromCharCode(t), n: utf.decode(bytes()) }; objs.push(v); return v; }
+      case 0x2f: { const src = bytes(), o = byte(); if (ivp) return { re: src, o }; const v = { __re: B64.enc(src), o }; objs.push(v); return v; }
+      default: throw new Error(`tipe Marshal belum didukung: ${String.fromCharCode(t)}`);
+    }
+  }
+  function finish(inner, iv) {
+    if (inner && inner.str) { const v = strView(inner.str, iv); objs[inner.idx] = v; return v; }
+    if (inner && inner.u) { const v = { __u: inner.u, b64: B64.enc(inner.b) }; if (iv.length) v.__iv = iv; objs.push(v); return v; }
+    if (inner && inner.re) { const v = { __re: B64.enc(inner.re), o: inner.o }; if (iv.length) v.__iv = iv; objs.push(v); return v; }
+    if (iv.length) { if (inner && typeof inner === 'object' && !Array.isArray(inner)) inner.__iv = iv; else throw new Error('ivar pada tipe ini belum didukung'); }
+    return inner;
+  }
+  function r() {
+    const t = byte();
+    switch (t) {
+      case 0x30: return null;
+      case 0x54: return true;
+      case 0x46: return false;
+      case 0x69: return long();
+      case 0x3a: case 0x3b: p--; return { __y: symName() };
+      case 0x40: { const i = long(); if (!(i in objs) || objs[i] === null) throw new Error('tautan objek tidak valid'); return objs[i]; }
+      case 0x49: {
+        if (u8[p] === 0x3a) { p--; return { __y: symName() }; }
+        const inner = body(byte(), true), iv = [];
+        for (let n = long(); n-- > 0;) { const k = symName(); iv.push([k, r()]); }
+        return finish(inner, iv);
+      }
+      default: return body(t, false);
+    }
+  }
+  return r();
+}
+const FLO = new DataView(new ArrayBuffer(8));
+const isFlonum = (text) => {
+  const x = Number(text);
+  if (!Number.isFinite(x) || /inf|nan/i.test(text)) return false;
+  FLO.setFloat64(0, x); const hi = FLO.getUint32(0), lo = FLO.getUint32(4);
+  if (hi === 0 && lo === 0) return true;
+  const t = (hi >>> 28) & 7;
+  return (t === 3 || t === 4) && !(hi === 0x30000000 && lo === 0);
+};
+/** Kebalikan marshalToView. Objek tanpa __c yang berbentuk {code,indent,parameters} dianggap RPG::EventCommand. */
+export function viewToMarshal(root) {
+  let buf = new Uint8Array(1 << 16), n = 0, nObj = 0;
+  const symTab = new Map(), floatIdx = new Map(), enc = new TextEncoder();
+  const need = (k) => { if (n + k > buf.length) { const nb = new Uint8Array(Math.max(buf.length * 2, n + k)); nb.set(buf.subarray(0, n)); buf = nb; } };
+  const w8 = (b) => { need(1); buf[n++] = b; };
+  const wRaw = (u) => { need(u.length); buf.set(u, n); n += u.length; };
+  const wLong = (x) => {
+    if (x === 0) return w8(0);
+    if (x > 0 && x < 123) return w8(x + 5);
+    if (x < 0 && x > -124) return w8((x - 5) & 255);
+    const tmp = []; let v = x;
+    for (let i = 1; i <= 4; i++) {
+      tmp.push(((v % 256) + 256) % 256); v = Math.floor(v / 256);
+      if (v === 0) { w8(i); break; }
+      if (v === -1) { w8((-i) & 255); break; }
+    }
+    tmp.forEach(w8);
+  };
+  const wSym = (name) => {
+    if (symTab.has(name)) { w8(0x3b); return wLong(symTab.get(name)); }
+    const b = enc.encode(name), ascii = isAscii(b);
+    if (!ascii) w8(0x49);
+    w8(0x3a); wLong(b.length); wRaw(b); symTab.set(name, symTab.size);
+    if (!ascii) { wLong(1); wSym('E'); w8(0x54); }
+  };
+  const wStr = (b, iv) => {
+    if (iv.length) w8(0x49);
+    w8(0x22); wLong(b.length); wRaw(b); nObj++;
+    if (iv.length) { wLong(iv.length); for (const [k, x] of iv) { wSym(k); w(x); } }
+  };
+  const CMD_KEYS = 'code,indent,parameters';
+  function wObj(v) {
+    if ('__y' in v) return wSym(v.__y);
+    if ('__f' in v) {
+      const flo = isFlonum(v.__f);
+      if (flo && floatIdx.has(v.__f)) { w8(0x40); return wLong(floatIdx.get(v.__f)); }
+      if (flo) floatIdx.set(v.__f, nObj);
+      nObj++; const b = enc.encode(v.__f); w8(0x66); wLong(b.length); return wRaw(b);
+    }
+    if ('__big' in v) {
+      let x = BigInt(v.__big); const neg = x < 0n, bs = []; if (neg) x = -x;
+      while (x > 0n) { bs.push(Number(x & 255n)); x >>= 8n; }
+      if (bs.length % 2) bs.push(0);
+      nObj++; w8(0x6c); w8(neg ? 0x2d : 0x2b); wLong(bs.length / 2); return bs.forEach(w8);
+    }
+    if ('__s' in v) return wStr(B64.dec(v.__s), v.__iv || []);
+    if ('__a' in v) return wStr(Uint8Array.from(v.__a, (c) => c.charCodeAt(0)), [['E', false]]);
+    if ('__u' in v || '__re' in v) {
+      const u = '__u' in v, b = B64.dec(u ? v.b64 : v.__re), iv = v.__iv || [];
+      if (iv.length) w8(0x49);
+      if (u) { w8(0x75); wSym(v.__u); } else w8(0x2f);
+      wLong(b.length); wRaw(b); if (!u) w8(v.o);
+      if (iv.length) { wLong(iv.length); for (const [k, x] of iv) { wSym(k); w(x); } }
+      nObj++; return undefined;
+    }
+    if ('__U' in v) { w8(0x55); wSym(v.__U); nObj++; return w(v.v); }
+    if ('__k' in v) { const b = enc.encode(v.n); nObj++; w8(v.__k.charCodeAt(0)); wLong(b.length); return wRaw(b); }
+    if ('__h' in v || '__hp' in v) {
+      const def = '__hd' in v; nObj++; w8(def ? 0x7d : 0x7b);
+      if (v.__hp) { wLong(v.__hp.length); for (const [k, x] of v.__hp) { w(k); w(x); } }
+      else {
+        const keys = v.__ord || Object.keys(v).filter((k) => !k.startsWith('__'));
+        wLong(keys.length); for (const k of keys) { w(v.__h === 'i' ? Number(k) : k); w(v[k]); }
+      }
+      return def ? w(v.__hd) : undefined;
+    }
+    let cls = v.__c; const keys = Object.keys(v).filter((k) => k !== '__c');
+    if (!cls && [...keys].sort().join() === CMD_KEYS) cls = 'RPG::EventCommand';
+    if (!cls) throw new Error('objek tanpa kelas (__c)');
+    if (v.__iv) throw new Error('ivar pada objek belum didukung');
+    nObj++; w8(0x6f); wSym(cls); wLong(keys.length);
+    for (const k of keys) { wSym(k.startsWith('~') ? k.slice(1) : '@' + k); w(v[k]); }
+    return undefined;
+  }
+  function w(v) {
+    if (v === null || v === undefined) return w8(0x30);
+    if (v === true) return w8(0x54);
+    if (v === false) return w8(0x46);
+    if (typeof v === 'number') {
+      if (!Number.isInteger(v)) throw new Error('angka desimal harus berbentuk {__f}');
+      if (v >= -(2 ** 30) && v < 2 ** 30) { w8(0x69); return wLong(v); }
+      return wObj({ __big: String(v) });
+    }
+    if (typeof v === 'string') return wStr(enc.encode(v), [['E', true]]);
+    if (Array.isArray(v)) { nObj++; w8(0x5b); wLong(v.length); return v.forEach(w); }
+    return wObj(v);
+  }
+  w8(4); w8(8); w(root);
+  return buf.slice(0, n);
+}
+
 /** Path file -> 'data/X.json' atau 'www/data/X.json'; null bila bukan JSON langsung di folder data. */
+const ACE_FILES = /^(System|Map\d+|CommonEvents|Troops|Actors|Classes|Skills|Items|Weapons|Armors|Enemies|States)\.rvdata2$/i;
 export function normalizeDataPath(p) {
-  const a = p.replace(/\\/g, '/').split('/'), i = a.lastIndexOf('data');
+  const a = p.replace(/\\/g, '/').split('/');
+  if (a.length >= 2 && /^data$/i.test(a.at(-2)) && ACE_FILES.test(a.at(-1))) return 'Data/' + a.at(-1);
+  const i = a.lastIndexOf('data');
   if (i < 0 || i !== a.length - 2 || !/\.json$/i.test(a[i + 1])) return null;
   return (a[i - 1] === 'www' ? 'www/' : '') + 'data/' + a[i + 1];
 }
@@ -222,12 +434,12 @@ async function collectSources(files) {
   const list = [];
   if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
     const z = await readZip(files[0]);
-    z.entries.forEach((e) => list.push({ path: e.name, read: async () => new TextDecoder().decode(await z.read(e)) }));
-  } else for (const f of files) list.push({ path: f.webkitRelativePath || f.name, read: () => f.text() });
+    z.entries.forEach((e) => list.push({ path: e.name, read: async () => new TextDecoder().decode(await z.read(e)), readBin: () => z.read(e) }));
+  } else for (const f of files) list.push({ path: f.webkitRelativePath || f.name, read: () => f.text(), readBin: async () => new Uint8Array(await f.arrayBuffer()) });
   const has = (re) => list.some((i) => re.test(i.path));
-  const engine = has(/(^|\/)js\/rmmz_core\.js$/) ? 'MZ' : has(/(^|\/)js\/rpg_core\.js$/) ? 'MV' : null;
   const data = new Map();
   for (const i of list) { const k = normalizeDataPath(i.path); if (k) data.set(k, i); }
+  const engine = has(/(^|\/)js\/rmmz_core\.js$/) ? 'MZ' : has(/(^|\/)js\/rpg_core\.js$/) ? 'MV' : [...data.keys()].some((k) => /\.rvdata2$/i.test(k)) ? 'VX Ace' : null;
   return { engine, data, plugins: list.find((i) => /(^|\/)js\/plugins\.js$/.test(i.path)) || null };
 }
 /**
@@ -262,9 +474,10 @@ const normPluginsPath = (p) => ((p.replace(/\\/g, '/').match(/(?:^|\/)(www\/)?js
 const NAME_CODES = new Set([320, 324, 325]);
 // System: daftar tipe berupa array string.
 const SYS_LISTS = ['skillTypes', 'weaponTypes', 'armorTypes', 'equipTypes', 'elements'];
+const SYS_LISTS_ACE = ['skill_types', 'weapon_types', 'armor_types', 'elements'];
 export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
   const A = allowSets(allow);
-  const base = path.split('/').pop().replace(/\.json$/i, ''), out = [];
+  const base = path.split('/').pop().replace(/\.(json|rvdata2)$/i, ''), ace = /\.rvdata2$/i.test(path), out = [];
   const add = (p, kind, category, original, meta = {}, lineCount = 1) => {
     if (!isTranslatable(original, src)) return;
     out.push({ file: path, path: JSON.stringify(p), kind, category, original, translation: '', status: 'pending', order: out.length, lineCount, meta, source: src, error: '' });
@@ -292,16 +505,17 @@ export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
   const walk = (v, p) => {
     if (typeof v === 'string') add(p, 'field', 'system', v);
     else if (Array.isArray(v)) v.forEach((x, i) => walk(x, [...p, i]));
-    else if (v && typeof v === 'object') Object.keys(v).forEach((k) => walk(v[k], [...p, k]));
+    else if (v && typeof v === 'object') Object.keys(v).filter((k) => !k.startsWith('__')).forEach((k) => walk(v[k], [...p, k]));
   };
   const pages = (pg, p) => (pg || []).forEach((pa, pi) => scanList(pa?.list, [...p, 'pages', pi, 'list']));
   if (base === 'System') {
-    ['gameTitle', 'currencyUnit'].forEach((k) => add([k], 'field', 'system', json[k]));
+    ['gameTitle', 'currencyUnit', 'game_title', 'currency_unit'].forEach((k) => add([k], 'field', 'system', json[k]));
     walk(json.terms, ['terms']);
-    SYS_LISTS.forEach((k) => Array.isArray(json[k]) && walk(json[k], [k]));
+    (ace ? SYS_LISTS_ACE : SYS_LISTS).forEach((k) => Array.isArray(json[k]) && walk(json[k], [k]));
   } else if (/^Map\d+$/.test(base)) {
-    add(['displayName'], 'field', 'map', json.displayName);
-    (json.events || []).forEach((ev, ei) => ev && pages(ev.pages, ['events', ei]));
+    add([ace ? 'display_name' : 'displayName'], 'field', 'map', ace ? json.display_name : json.displayName);
+    if (ace) Object.keys(json.events || {}).filter((k) => !k.startsWith('__')).forEach((k) => json.events[k] && pages(json.events[k].pages, ['events', k]));
+    else (json.events || []).forEach((ev, ei) => ev && pages(ev.pages, ['events', ei]));
   } else if (base === 'CommonEvents') (json || []).forEach((ev, i) => ev && scanList(ev.list, [i, 'list']));
   else if (base === 'Troops') (json || []).forEach((t, i) => t && pages(t.pages, [i]));
   else if (base === 'plugins.js' && Array.isArray(json)) json.forEach((pl, i) => {
@@ -465,12 +679,17 @@ export function diffGuard(orig, next, file = 'data/X.json', allow = null) {
       const ka = Object.keys(a).sort();
       if (!sameDeep(ka, Object.keys(b).sort())) return bad(p, 'key berubah');
       if (a.code === 402 && typeof a.parameters?.[1] === 'string') allowS.add(JSON.stringify([...p, 'parameters', 1]));
-      return ka.forEach((k) => cmp(a[k], b[k], [...p, k], k));
+      return ka.forEach((k) => cmp(a[k], b[k], [...p, /^\d+$/.test(k) ? Number(k) : k], k));
     }
     if (a !== b) bad(p, 'nilai berubah');
   };
   cmp(orig, next, []);
   return probs;
+}
+/** Perintah event baru (baris 401/405 hasil pemecahan) diberi kelas RPG::EventCommand agar bisa ditulis ke rvdata2. */
+function fixAceCmds(v) {
+  if (Array.isArray(v)) { v.forEach((x, i) => { if (isCmd(x) && !x.__c && Object.keys(x).length === 3) v[i] = { __c: 'RPG::EventCommand', ...x }; fixAceCmds(v[i]); }); }
+  else if (v && typeof v === 'object') Object.values(v).forEach(fixAceCmds);
 }
 /**
  * Bangun patch dari JSON asli dan entries (tanpa IndexedDB). Entry pending/error dilewati.
@@ -495,8 +714,15 @@ export function buildPatch(files, entries, { model = '', date = new Date(), wrap
     const text = isPl ? buildPluginsJs(pj, work) : JSON.stringify(work); let re = null;
     try { re = isPl ? parsePluginsJs(text)?.arr : JSON.parse(text); if (!re) throw new Error('x'); } catch { pr.push(`${f.path}: hasil tidak bisa dibaca ulang`); }
     if (!pr.length) pr.push(...diffGuard(orig, re, f.path, allow));
+    let data = null;
+    if (!pr.length && /\.rvdata2$/i.test(f.path)) {
+      try {
+        const w2 = JSON.parse(text); fixAceCmds(w2); data = viewToMarshal(w2);
+        if (JSON.stringify(marshalToView(data)) !== JSON.stringify(w2)) pr.push(`${f.path}: hasil rvdata2 tidak sama dengan data yang diterjemahkan`);
+      } catch (e) { pr.push(`${f.path}: gagal menulis rvdata2 (${e.message})`); }
+    }
     if (pr.length) { problems.push(...pr); continue; }
-    out.push({ name: f.path, data: new TextEncoder().encode(text) }); stat.files++; stat.applied += es.length;
+    out.push({ name: f.path, data: data || new TextEncoder().encode(text) }); stat.files++; stat.applied += es.length;
   }
   const report = ['RPG Maker Translator - patch-report', `Tanggal: ${date.toISOString()}`, `Model: ${model}`, ...notes, `File diubah: ${stat.files}`, `Teks diterapkan: ${stat.applied}`, `Teks dipecah ulang agar muat: ${stat.wrapped}`, `Deskripsi/profil lebih dari 2 baris (mungkin terpotong di game): ${stat.long}`,
     `Belum diterjemahkan (tetap asli): ${stat.pending}`, `Error (tetap asli): ${stat.error}`, `Dilewati: ${stat.skipped}`, '', ...out.map((x) => x.name)].join('\n');
@@ -531,7 +757,10 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
     onProgress(`Membaca ${path.split('/').pop()} (${i + 1} dari ${data.size})`, i, data.size);
     if (i++ % 10 === 0) await new Promise((r) => setTimeout(r));
     let text, json;
-    try { text = await item.read(); json = JSON.parse(text); } catch { broken.push(path); continue; }
+    try {
+      if (/\.rvdata2$/i.test(path)) { json = marshalToView(await item.readBin()); text = JSON.stringify(json); }
+      else { text = await item.read(); json = JSON.parse(text); }
+    } catch { broken.push(path); continue; }
     if (path.endsWith('System.json')) sys = json;
     await ingest(path, json, text);
   }
@@ -1038,7 +1267,7 @@ async function viewProyek() {
   const out = [box];
   const p = await currentProject();
   if (p) out.push(card(h('h2', {}, 'Ringkasan'),
-    h('p', { class: 'mut' }, `Engine: ${p.engine}\nSumber: ${p.src === 'ja' ? 'Jepang' : 'Inggris'}\nFile JSON: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\nPlugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan)` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`),
+    h('p', { class: 'mut' }, `Engine: ${p.engine}\nSumber: ${p.src === 'ja' ? 'Jepang' : 'Inggris'}\nFile data: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\nPlugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan)` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`),
     p.paramNote ? h('p', { class: 'err' }, p.paramNote) : '',
     p.total ? '' : h('p', { class: 'err' }, UI.emptyImp),
     Object.entries(p.counts).map(([k, v]) => h('span', { class: 'badge' }, `${k} ${v}`)),
