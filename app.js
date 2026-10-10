@@ -110,6 +110,22 @@ export function detectMessagePlugins(text) {
 /** Config efektif: bila proyek memakai plugin message, batas baris manual dimatikan. */
 export const effCfg = (project, cfg) => (project?.msgPlugins?.length ? { ...cfg, wrapWidth: 0, wrapFace: 0 } : cfg);
 const JA = /[\u3040-\u30ff\u3400-\u9fff]/;
+const ID_W = new Set('yang dan di ke dari untuk dengan tidak ini itu ada saya aku kamu kau kita kami mereka akan sudah belum bisa dapat pada adalah atau juga tapi tetapi karena jika kalau apa siapa bagaimana mengapa kenapa sebuah para oleh lagi saja hanya sangat sekali harus mau ingin punya anda dia ia lebih semua setiap masih telah dalam tentang seperti setelah sebelum ketika saat sini situ sana bukan jangan tolong terima kasih maaf selamat ya dong deh kok'.split(' '));
+const EN_W = new Set("the and to of a is are was were you i it that this in on for with not be have has had will would can could my your we he she they them his her but if so what who how why do don't did no yes at as from by an me us just all there here now then when up out about i'm it's you're".split(' '));
+/** Tebak bahasa satu teks (kode escape sudah dibuang): 'ja' | 'en' | 'id' | null (tanpa huruf, mis. angka/simbol). */
+const srcLabel = (s) => ({ auto: 'Otomatis (Jepang/Inggris)', ja: 'Jepang', en: 'Inggris' }[s] || s);
+export function detectLang(t) {
+  if (JA.test(t)) return 'ja';
+  const w = t.toLowerCase().match(/[a-z']+/g);
+  if (!w) return null;
+  let id = 0, en = 0;
+  for (const x of w) {
+    if (ID_W.has(x)) id++;
+    else if (/^(ber|ter|meng|peng)[a-z]{4,}$|^[a-z]{3,}(kan|nya)$/.test(x)) id += 0.5;
+    if (EN_W.has(x)) en++;
+  }
+  return id > en ? 'id' : 'en';
+}
 /** Ganti kode escape dengan token ⟦n⟧. */
 export function maskText(text) {
   const tokens = [];
@@ -155,6 +171,7 @@ export function limitFor(e, cfg) {
 export function isTranslatable(s, src = 'ja') {
   if (typeof s !== 'string') return false;
   const t = s.replace(ESC, '').trim();
+  if (src === 'auto') { const l = detectLang(t); return l === 'ja' || l === 'en'; }
   return !!t && (src !== 'ja' || JA.test(t));
 }
 
@@ -480,7 +497,7 @@ export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
   const base = path.split('/').pop().replace(/\.(json|rvdata2)$/i, ''), ace = /\.rvdata2$/i.test(path), out = [];
   const add = (p, kind, category, original, meta = {}, lineCount = 1) => {
     if (!isTranslatable(original, src)) return;
-    out.push({ file: path, path: JSON.stringify(p), kind, category, original, translation: '', status: 'pending', order: out.length, lineCount, meta, source: src, error: '' });
+    out.push({ file: path, path: JSON.stringify(p), kind, category, original, translation: '', status: 'pending', order: out.length, lineCount, meta, source: src === 'auto' ? detectLang(original.replace(ESC, '').trim()) : src, error: '' });
   };
   const scanList = (list, p) => {
     if (!Array.isArray(list)) return;
@@ -850,7 +867,7 @@ export function applyImport(entries, rows) {
 }
 
 // ===== 4c. TERJEMAH LEWAT CHAT AI =====
-const NL = '⏎', LANG_NAME = { ja: 'Jepang', en: 'Inggris', id: 'Indonesia' };
+const NL = '⏎', LANG_NAME = { ja: 'Jepang', en: 'Inggris', id: 'Indonesia', auto: 'Jepang atau Inggris (tiap baris bisa salah satunya; baris yang sudah berbahasa Indonesia salin apa adanya)' };
 const plainName = (t) => String(t || '').replace(ESC, '').replace(/[\[\]|\n]/g, ' ').trim();
 /**
  * Pecah teks yang belum selesai menjadi bagian-bagian untuk ditempel ke aplikasi AI.
@@ -926,7 +943,7 @@ export const DEFAULT_CONFIG = {
   temperature: 0.3, batchSize: 30, maxChars: 4000, concurrency: 4, delay: 100, priceIn: 0, priceOut: 0,
   fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '', timeout: 120, extraBody: '', auto: true,
 };
-const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian' };
+const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian', auto: 'Japanese or English (each item may be in either language; if an item is already Indonesian, return it unchanged)' };
 const TODO = new Set(['pending', 'error', 'translating']);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const abortErr = () => Object.assign(new Error('Aborted'), { name: 'AbortError' });
@@ -1121,14 +1138,15 @@ export function autoTune(todo, cfg) {
 /** Perkiraan kasar token dan biaya untuk entri yang belum selesai (belum menghitung cache). */
 export function estimateCost(entries, cfg0, src = 'ja') {
   const cfg = cfg0.auto !== false ? autoTune(entries.filter((e) => TODO.has(e.status)), cfg0) : cfg0;
-  const seen = new Set(); let chars = 0;
+  const seen = new Set(); let chars = 0, ja = 0;
   for (const e of entries) {
     if (!TODO.has(e.status) || seen.has(e.original)) continue;
-    seen.add(e.original); chars += maskText(e.original).text.length;
+    seen.add(e.original); const n = maskText(e.original).text.length; chars += n;
+    if (src === 'ja' || (src === 'auto' && e.source === 'ja')) ja += n;
   }
   const items = seen.size, batches = items ? Math.max(Math.ceil(items / cfg.batchSize), Math.ceil(chars / cfg.maxChars)) : 0;
-  const body = chars * (src === 'ja' ? 1 : 0.3);
-  const inTok = Math.round(body + items * 15 + batches * (400 + Math.ceil((cfg.style || '').length / 3.5))), outTok = Math.round(body * (src === 'ja' ? 1 : 1.2) + items * 12);
+  const body = ja + (chars - ja) * 0.3;
+  const inTok = Math.round(body + items * 15 + batches * (400 + Math.ceil((cfg.style || '').length / 3.5))), outTok = Math.round(ja + (chars - ja) * 0.36 + items * 12);
   const cost = cfg.priceIn || cfg.priceOut ? (inTok * cfg.priceIn + outTok * cfg.priceOut) / 1e6 : null;
   return { items, batches, inTok, outTok, cost, batchSize: cfg.batchSize, auto: cfg0.auto !== false };
 }
@@ -1244,7 +1262,7 @@ let importNote = null;
 async function viewProyek() {
   const msg = h('p', { class: 'mut' }), bar = h('progress', { value: '0', max: '1', hidden: '' });
   const box = card(h('h2', {}, 'Impor game'));
-  let src = 'ja', busy = false;
+  let src = 'auto', busy = false;
   if (importNote) { msg.className = importNote.bad ? 'err' : 'mut'; msg.textContent = importNote.text; importNote = null; }
   const lock = (on) => { busy = on; box.classList.toggle('busy', on); bar.hidden = !on; };
   const run = async (ev) => {
@@ -1260,14 +1278,14 @@ async function viewProyek() {
     } catch (e) { lock(false); msg.className = 'err'; msg.textContent = e.message; }
   };
   const sel = h('select', { onchange: (e) => { src = e.target.value; } },
-    h('option', { value: 'ja' }, 'Jepang'), h('option', { value: 'en' }, 'Inggris'));
+    h('option', { value: 'auto' }, 'Otomatis (Jepang/Inggris campur)'), h('option', { value: 'ja' }, 'Jepang'), h('option', { value: 'en' }, 'Inggris'));
   const pick = (label, attrs) => h('label', { class: 'file' }, label, h('input', { type: 'file', onchange: run, ...attrs }));
   box.append(h('label', {}, 'Bahasa sumber'), sel,
     pick('Pilih folder data', { webkitdirectory: '', multiple: '' }), pick('Pilih zip game', { accept: '.zip' }), bar, msg);
   const out = [box];
   const p = await currentProject();
   if (p) out.push(card(h('h2', {}, 'Ringkasan'),
-    h('p', { class: 'mut' }, `Engine: ${p.engine}\nSumber: ${p.src === 'ja' ? 'Jepang' : 'Inggris'}\nFile data: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\nPlugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan)` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`),
+    h('p', { class: 'mut' }, `Engine: ${p.engine}\nSumber: ${srcLabel(p.src)}\nFile data: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\nPlugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan)` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`),
     p.paramNote ? h('p', { class: 'err' }, p.paramNote) : '',
     p.total ? '' : h('p', { class: 'err' }, UI.emptyImp),
     Object.entries(p.counts).map(([k, v]) => h('span', { class: 'badge' }, `${k} ${v}`)),
@@ -1323,7 +1341,7 @@ async function viewTranslate() {
   }
   const money = est.cost === null ? 'isi harga token di Pengaturan' : `sekitar ${est.cost.toFixed(4)} (satuan mengikuti harga di Pengaturan)`;
   const out = [
-    card(h('h2', {}, 'Bahasa'), h('label', {}, 'Sumber'), h('p', { class: 'mut' }, p.src === 'ja' ? 'Jepang' : 'Inggris'), h('label', {}, 'Target'), tgt),
+    card(h('h2', {}, 'Bahasa'), h('label', {}, 'Sumber'), h('p', { class: 'mut' }, srcLabel(p.src)), h('label', {}, 'Target'), tgt),
     card(h('h2', {}, 'Status'), ['pending', 'translating', 'done', 'edited', 'error', 'skipped'].filter(cnt).map((s) => h('span', { class: 'badge' }, `${s} ${cnt(s)}`)),
       h('p', { class: 'mut' }, `${est.auto ? `Mode otomatis: ${est.batchSize} teks per batch, konkurensi menyesuaikan\n` : ''}Perkiraan kasar: ${est.items} teks unik, ${est.batches} batch\nToken masuk ${est.inTok}, keluar ${est.outTok}\nBiaya: ${money}\nBelum menghitung cache.`)),
     card(h('p', { class: 'mut' }, `Teks dikirim ke provider yang dipilih (${cfg.baseUrl}) dengan model ${cfg.model}.`), bar, txt, h('div', { class: 'row' }, start, stop)),
