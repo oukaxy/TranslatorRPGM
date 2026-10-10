@@ -1493,12 +1493,12 @@ async function viewEkspor() {
     } catch (e) { editMsg.className = 'err'; editMsg.textContent = e.message; }
   };
   let chatUrls = [];
-  const chatOut = h('div'), chatMsg = h('p', { class: 'mut' }), perPart = h('input', { type: 'number', value: '150', min: '10', max: '500' });
+  const chatOut = h('div'), chatMsg = h('p', { class: 'mut' }), perPart = h('input', { type: 'number', value: '150', min: '10', max: '100000' }), perChars = h('input', { type: 'number', value: '6000', min: '1000', max: '1000000' });
   const paste = h('textarea', { rows: '5', spellcheck: 'false', placeholder: 'Tempel balasan AI di sini…' });
   const fmtIds = (a) => (a.length ? ` (id ${a.slice(0, 8).join(', ')}${a.length > 8 ? ', …' : ''})` : '');
   const prepare = async () => {
     chatUrls.forEach((u) => URL.revokeObjectURL(u)); chatUrls = [];
-    const parts = buildChatParts(p, await dbQuery('entries', 'projectId', p.id), await loadConfig(), Number(perPart.value) || 150);
+    const parts = buildChatParts(p, await dbQuery('entries', 'projectId', p.id), await loadConfig(), Number(perPart.value) || 150, Number(perChars.value) || 6000);
     chatMsg.className = 'mut'; chatMsg.textContent = '';
     if (!parts.length) { chatOut.replaceChildren(h('p', { class: 'mut' }, 'Tidak ada teks yang belum selesai.')); return; }
     chatOut.replaceChildren(...parts.map((pt) => {
@@ -1526,7 +1526,7 @@ async function viewEkspor() {
       h('div', { class: 'row' }, h('button', { onclick: () => dump('csv') }, 'Siapkan CSV'), h('button', { onclick: () => dump('json') }, 'Siapkan JSON')), editOut,
       h('label', { class: 'file' }, 'Impor hasil edit (.csv / .json)', h('input', { type: 'file', accept: '.csv,.json', onchange: importEdit })), editMsg),
     card(h('h2', {}, 'Terjemah lewat chat AI'), h('p', { class: 'mut' }, 'Untuk menerjemahkan di aplikasi AI lain tanpa API. Teks yang belum selesai dipecah jadi bagian-bagian berisi instruksi, gaya, dan glosarium. Kirim satu bagian ke AI (tempel atau unggah file), lalu tempel balasannya di bawah. Bagian dihitung ulang dari teks yang belum selesai tiap kali kamu menyiapkannya.'),
-      h('label', {}, 'Teks per bagian'), perPart, h('button', { class: 'pri', onclick: prepare }, 'Siapkan bagian'), chatOut,
+      h('label', {}, 'Teks per bagian'), perPart, h('label', {}, 'Maks karakter per bagian'), perChars, h('button', { class: 'pri', onclick: prepare }, 'Siapkan bagian'), chatOut,
       h('label', {}, 'Balasan AI'), paste,
       h('div', { class: 'row' }, h('button', { class: 'pri', onclick: async () => { if (await doImport(paste.value)) paste.value = ''; } }, 'Impor tempelan'),
         h('label', { class: 'file' }, 'Impor file (.txt)', h('input', { type: 'file', accept: '.txt,text/plain', multiple: '', onchange: async (ev) => { const fs = [...ev.target.files]; ev.target.value = ''; if (fs.length) await doImport((await Promise.all(fs.map((f) => f.text()))).join('\n')); } }))), chatMsg)];
