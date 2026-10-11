@@ -1365,7 +1365,17 @@ async function viewProyek() {
     p.paramNote ? h('p', { class: 'err' }, p.paramNote) : '',
     p.total ? '' : h('p', { class: 'err' }, UI.emptyImp),
     Object.entries(p.counts).map(([k, v]) => h('span', { class: 'badge' }, `${k} ${v}`)),
-    h('button', { onclick: async () => { if (confirm('Hapus proyek ini beserta semua terjemahannya?')) { await deleteProject(p.id); await render(); } } }, 'Hapus proyek')));
+    (() => {
+      const st = h('p', { class: 'mut' }); let armed = false, tm = 0;
+      const b = h('button', { onclick: async () => {
+        // konfirmasi dua ketukan (confirm() sering diblokir browser HP)
+        if (!armed) { armed = true; b.textContent = 'Yakin? Ketuk lagi untuk menghapus'; tm = setTimeout(() => { armed = false; b.textContent = 'Hapus proyek'; }, 5000); return; }
+        clearTimeout(tm); b.disabled = true; st.className = 'mut'; st.textContent = 'Menghapus… (proyek besar bisa butuh beberapa detik)';
+        try { await deleteProject(p.id); await render(); }
+        catch (e) { st.className = 'err'; st.textContent = `Gagal menghapus: ${e?.message || e}`; b.disabled = false; armed = false; b.textContent = 'Hapus proyek'; }
+      } }, 'Hapus proyek');
+      return h('div', {}, b, st);
+    })()));
   return out;
 }
 const job = { running: false, ctl: null, value: 0, max: 1, text: '', err: false, ui: null };
