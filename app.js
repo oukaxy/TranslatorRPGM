@@ -504,15 +504,19 @@ async function rebuildRgss3a(file, repl) {
     return { e, nd };
   });
   const tblLen = items.reduce((s, x) => s + 16 + x.e.nameRaw.length, 0) + 4, tbl = new Uint8Array(tblLen), dv = new DataView(tbl.buffer), parts = [];
-  let pos = 0, off = 12 + tblLen;
+  let pos = 0, off = 12 + tblLen, run = null;
+  const flush = () => { if (run) { parts.push(file.slice(run[0], run[1])); run = null; } };
   for (const { e, nd } of items) {
     const len = nd ? nd.length : e.len;
     dv.setUint32(pos, rgssWord(off, key), true); dv.setUint32(pos + 4, rgssWord(len, key), true);
     dv.setUint32(pos + 8, rgssWord(e.fk, key), true); dv.setUint32(pos + 12, rgssWord(e.nameRaw.length, key), true);
     for (let i = 0; i < e.nameRaw.length; i++) tbl[pos + 16 + i] = e.nameRaw[i] ^ ((key >>> (8 * (i % 4))) & 255);
     pos += 16 + e.nameRaw.length; off += len;
-    parts.push(nd ? rgssXor(nd, e.fk) : file.slice(e.offset, e.offset + e.len));
+    if (nd) { flush(); parts.push(rgssXor(nd, e.fk)); }
+    else if (run && run[1] === e.offset) run[1] = e.offset + e.len; // gabung data berurutan jadi satu irisan besar (jauh lebih cepat diunduh)
+    else { flush(); run = [e.offset, e.offset + e.len]; }
   }
+  flush();
   dv.setUint32(pos, key, true); // penanda akhir: 0 xor key
   const missing = [...map.keys()].filter((k) => !used.has(k));
   return { blob: new Blob([head, tbl, ...parts], { type: 'application/octet-stream' }), replaced: used.size, missing };
