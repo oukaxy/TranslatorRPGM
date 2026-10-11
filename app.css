@@ -23,13 +23,14 @@ header{position:fixed;top:0;left:0;right:0;height:calc(56px + env(safe-area-inse
   display:flex;align-items:center;justify-content:space-between;background:var(--bg);border-bottom:1px solid var(--bd);z-index:5}
 h1{font-size:18px;font-weight:650;letter-spacing:-.01em;margin:0}
 h2{font-size:16px;font-weight:650;margin:0 0 6px;letter-spacing:-.005em}
-.icon{min-width:44px;min-height:44px;display:grid;place-items:center;font-size:21px;line-height:1;text-decoration:none;color:var(--mut);border-radius:var(--r-sm)}
+.icon{min-width:44px;min-height:44px;display:grid;place-items:center;line-height:1;text-decoration:none;color:var(--mut);border-radius:var(--r-sm)}
 .icon:active{background:var(--raise)}
 nav{position:fixed;bottom:0;left:0;right:0;height:calc(60px + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);
   display:flex;background:var(--bg);border-top:1px solid var(--bd);z-index:5}
-nav a{flex:1;position:relative;display:grid;place-items:center;min-height:44px;color:var(--mut);text-decoration:none;font-size:13.5px}
+nav a{flex:1;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:44px;color:var(--mut);text-decoration:none;font-size:12px}
+nav svg{display:block}
 nav a.on{color:var(--acc);font-weight:650}
-nav a.on::before{content:"";position:absolute;top:-1px;left:30%;right:30%;height:2px;border-radius:0 0 2px 2px;background:var(--acc)}
+nav a.on::before{content:"";position:absolute;top:-1px;left:34%;right:34%;height:2px;border-radius:0 0 2px 2px;background:var(--acc)}
 
 /* Konten */
 main{max-width:720px;margin:0 auto;padding:14px 14px 8px}
@@ -44,6 +45,9 @@ label{display:block;margin:14px 0 6px;font-size:13px;font-weight:550;color:var(-
 .badge[hidden]{display:none}
 
 /* Kontrol */
+select,input:not([type=checkbox]),textarea{display:block}
+.card>select,.card>input:not([type=checkbox]),.card>textarea{margin-bottom:10px}
+.card>select:last-child,.card>input:last-child,.card>textarea:last-child{margin-bottom:0}
 select,input,textarea,button,.file{font:inherit;color:var(--fg);border-radius:var(--r-sm);border:1px solid var(--bd);background:var(--raise);width:100%}
 select,input,button,.file{min-height:46px;padding:0 14px}
 textarea{padding:10px 14px;resize:vertical;line-height:1.5}
@@ -55,10 +59,12 @@ button:disabled{opacity:.45;cursor:not-allowed}
 button.pri,a.file{background:var(--acc);color:var(--acc-fg);border:0}
 /* tombol pilih file = sekunder (tint), tautan unduh = utama (solid) */
 label.file{background:var(--acc-soft);color:var(--acc);border:0;font-weight:600}
-.file{display:grid;place-items:center;cursor:pointer;margin-top:8px;font-weight:600}
+.file{display:grid;place-items:center;cursor:pointer;margin-top:10px;font-weight:600}
 .file input{display:none}
 a.file{text-decoration:none}
 .card>button{margin-top:10px}
+.card>.mut:last-child,.card>.err:last-child{margin-bottom:0}
+.card>select+.mut{margin-top:4px}
 input[type=checkbox]{width:22px;min-height:22px;padding:0;accent-color:var(--acc)}
 .chk{display:flex;align-items:center;gap:12px;min-height:46px;color:var(--fg);font-size:15px}
 progress{width:100%;height:8px;margin:10px 0;border:0;border-radius:99px;overflow:hidden;background:var(--raise);accent-color:var(--acc);appearance:none;-webkit-appearance:none}
