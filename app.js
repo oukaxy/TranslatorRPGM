@@ -5,6 +5,7 @@ export const PAGE_SIZE = 50;
 export const LINE_WARN = 48;
 export const UI = {
   noData: 'Folder data tidak ditemukan. Pilih folder data atau zip game',
+  rgssBad: 'Arsip .rgss3a tidak bisa dibaca. Pastikan itu Game.rgss3a dari VX Ace (bukan .rgss2a atau .rgssad)',
   zipBad: 'Zip tidak bisa dibaca. Ekstrak dulu lalu pilih folder data',
   zipMethod: 'Metode kompresi zip tidak didukung. Ekstrak dulu lalu pilih folder',
   blocked: 'Database terkunci. Tutup tab lain lalu muat ulang',
@@ -447,8 +448,46 @@ export function normalizeDataPath(p) {
   if (i < 0 || i !== a.length - 2 || !/\.json$/i.test(a[i + 1])) return null;
   return (a[i - 1] === 'www' ? 'www/' : '') + 'data/' + a[i + 1];
 }
+/** Baca arsip RGSS3A (VX Ace) dan ambil hanya Data/*.rvdata2. Memakai File.slice agar hemat memori. */
+const rgssWord = (v, k) => (v ^ k) >>> 0;
+async function readRgss3a(file) {
+  const head = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  if (head.length < 12 || String.fromCharCode(...head.slice(0, 6)) !== 'RGSSAD' || head[7] !== 3) throw new Error(UI.rgssBad);
+  const key = (Math.imul(new DataView(head.buffer).getUint32(8, true), 9) + 3) >>> 0;
+  let size = Math.min(file.size, 1 << 20), buf, dv, pos, ents;
+  for (;;) {
+    buf = new Uint8Array(await file.slice(12, 12 + size).arrayBuffer()); dv = new DataView(buf.buffer); pos = 0; ents = []; let ok = true;
+    for (;;) {
+      if (pos + 4 > buf.length) { ok = false; break; }
+      const offset = rgssWord(dv.getUint32(pos, true), key);
+      if (offset === 0) break;
+      if (pos + 16 > buf.length) { ok = false; break; }
+      const len = rgssWord(dv.getUint32(pos + 4, true), key), fk = rgssWord(dv.getUint32(pos + 8, true), key), nl = rgssWord(dv.getUint32(pos + 12, true), key);
+      if (nl > 1024 || pos + 16 + nl > buf.length) { ok = false; break; }
+      const nb = buf.slice(pos + 16, pos + 16 + nl);
+      for (let i = 0; i < nl; i++) nb[i] ^= (key >>> (8 * (i % 4))) & 255;
+      ents.push({ name: new TextDecoder().decode(nb).replace(/\\/g, '/'), offset, len, fk });
+      pos += 16 + nl;
+    }
+    if (ok) break;
+    if (12 + size >= file.size) throw new Error(UI.rgssBad);
+    size = Math.min(file.size - 12, size * 4);
+  }
+  const dec = (u8, k) => {
+    const out = new Uint8Array(u8.length), a = new DataView(u8.buffer, u8.byteOffset, u8.length), o = new DataView(out.buffer); let i = 0;
+    for (; i + 4 <= u8.length; i += 4) { o.setUint32(i, (a.getUint32(i, true) ^ k) >>> 0, true); k = (Math.imul(k, 7) + 3) >>> 0; }
+    for (let j = 0; i < u8.length; i++, j += 8) out[i] = u8[i] ^ ((k >>> j) & 255);
+    return out;
+  };
+  return ents.filter((e) => /^data\/[^/]+\.rvdata2$/i.test(e.name)).map((e) => {
+    const readBin = async () => dec(new Uint8Array(await file.slice(e.offset, e.offset + e.len).arrayBuffer()), e.fk);
+    return { path: e.name, read: async () => new TextDecoder().decode(await readBin()), readBin };
+  });
+}
 async function collectSources(files) {
   const list = [];
+  for (const f of files) if (/\.rgss3a$/i.test(f.name)) list.push(...await readRgss3a(f));
+  files = files.filter((f) => !/\.rgss3a$/i.test(f.name));
   if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
     const z = await readZip(files[0]);
     z.entries.forEach((e) => list.push({ path: e.name, read: async () => new TextDecoder().decode(await z.read(e)), readBin: () => z.read(e) }));
@@ -1281,7 +1320,7 @@ async function viewProyek() {
     h('option', { value: 'auto' }, 'Otomatis (Jepang/Inggris campur)'), h('option', { value: 'ja' }, 'Jepang'), h('option', { value: 'en' }, 'Inggris'));
   const pick = (label, attrs) => h('label', { class: 'file' }, label, h('input', { type: 'file', onchange: run, ...attrs }));
   box.append(h('label', {}, 'Bahasa sumber'), sel,
-    pick('Pilih folder data', { webkitdirectory: '', multiple: '' }), pick('Pilih zip game', { accept: '.zip' }), bar, msg);
+    pick('Pilih folder data', { webkitdirectory: '', multiple: '' }), pick('Pilih zip game', { accept: '.zip' }), pick('Pilih Game.rgss3a', {}), bar, msg);
   const out = [box];
   const p = await currentProject();
   if (p) out.push(card(h('h2', {}, 'Ringkasan'),
