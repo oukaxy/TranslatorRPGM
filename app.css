@@ -1,33 +1,79 @@
-:root{--bg:#f6f6f8;--fg:#1c1c22;--card:#fff;--mut:#6b6b76;--acc:#3b5bdb;--bd:#e0e0e6}
-@media(prefers-color-scheme:dark){:root{--bg:#16161a;--fg:#ececf1;--card:#222228;--mut:#9a9aa6;--acc:#7c93f5;--bd:#33333c}}
+/* RPG Translator — tampilan bersih. Hanya CSS: class dan struktur HTML/JS tidak berubah. */
+:root{
+  --bg:#f3f4f7;--card:#fff;--raise:#eceef3;--bd:#e1e4eb;
+  --fg:#171a21;--mut:#667085;
+  --acc:#3b5bdb;--acc-fg:#fff;--acc-soft:#e7ebfd;
+  --err:#d92d3a;--warn:#b86e00;
+  --r:14px;--r-sm:10px;
+  color-scheme:light dark;
+}
+@media(prefers-color-scheme:dark){:root{
+  --bg:#0f1115;--card:#171a21;--raise:#1f232c;--bd:#272c37;
+  --fg:#e8eaf0;--mut:#8b93a3;
+  --acc:#7c93f5;--acc-fg:#0f1115;--acc-soft:#232a4a;
+  --err:#ff7b86;--warn:#f5b04a;
+}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif;padding:56px 0 64px}
-header{position:fixed;top:0;left:0;right:0;height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;background:var(--card);border-bottom:1px solid var(--bd)}
-h1{font-size:18px;margin:0}h2{font-size:17px;margin:0 0 8px}
-.icon{min-width:44px;min-height:44px;display:grid;place-items:center;font-size:22px;text-decoration:none;color:var(--fg)}
-nav{position:fixed;bottom:0;left:0;right:0;height:64px;display:flex;background:var(--card);border-top:1px solid var(--bd)}
-nav a{flex:1;display:grid;place-items:center;min-height:44px;color:var(--mut);text-decoration:none;font-size:14px}
-nav a.on{color:var(--acc);font-weight:600}
-main{max-width:720px;margin:0 auto;padding:16px}
-.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:12px}
-.mut{color:var(--mut);font-size:14px;white-space:pre-wrap;word-break:break-word}
-.badge{display:inline-block;font-size:12px;padding:1px 8px;border-radius:99px;background:var(--bg);border:1px solid var(--bd);margin-right:6px}
-label{display:block;margin:10px 0 4px;font-size:14px;color:var(--mut)}
-select,button,.file{min-height:44px;font:inherit;border-radius:10px;border:1px solid var(--bd);background:var(--card);color:var(--fg);padding:0 12px;width:100%}
-.file{display:grid;place-items:center;cursor:pointer;margin-top:8px;background:var(--acc);color:#fff;border:0}
-.file input{display:none}
-.row{display:flex;gap:8px}.row button{flex:1}
-.err{color:#e03131}
-input{min-height:44px;font:inherit;border-radius:10px;border:1px solid var(--bd);background:var(--card);color:var(--fg);padding:0 12px;width:100%}
-input[type=checkbox]{width:22px;min-height:22px;padding:0}
-.chk{display:flex;align-items:center;gap:10px;min-height:44px;color:var(--fg)}
-progress{width:100%;height:10px;margin:8px 0}
-button.pri{background:var(--acc);color:#fff;border:0}
-button:disabled{opacity:.5}
-textarea{font:inherit;border-radius:10px;border:1px solid var(--bd);background:var(--card);color:var(--fg);padding:8px 12px;width:100%;resize:vertical}
-.badge.warn{border-color:#f08c00;color:#f08c00}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  padding:calc(56px + env(safe-area-inset-top)) 0 calc(68px + env(safe-area-inset-bottom));font-variant-numeric:tabular-nums}
+
+/* Header & navigasi */
+header{position:fixed;top:0;left:0;right:0;height:calc(56px + env(safe-area-inset-top));padding:env(safe-area-inset-top) 12px 0 18px;
+  display:flex;align-items:center;justify-content:space-between;background:var(--bg);border-bottom:1px solid var(--bd);z-index:5}
+h1{font-size:18px;font-weight:650;letter-spacing:-.01em;margin:0}
+h2{font-size:16px;font-weight:650;margin:0 0 6px;letter-spacing:-.005em}
+.icon{min-width:44px;min-height:44px;display:grid;place-items:center;font-size:21px;line-height:1;text-decoration:none;color:var(--mut);border-radius:var(--r-sm)}
+.icon:active{background:var(--raise)}
+nav{position:fixed;bottom:0;left:0;right:0;height:calc(60px + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);
+  display:flex;background:var(--bg);border-top:1px solid var(--bd);z-index:5}
+nav a{flex:1;position:relative;display:grid;place-items:center;min-height:44px;color:var(--mut);text-decoration:none;font-size:13.5px}
+nav a.on{color:var(--acc);font-weight:650}
+nav a.on::before{content:"";position:absolute;top:-1px;left:30%;right:30%;height:2px;border-radius:0 0 2px 2px;background:var(--acc)}
+
+/* Konten */
+main{max-width:720px;margin:0 auto;padding:14px 14px 8px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:var(--r);padding:16px;margin-bottom:12px}
+.mut{color:var(--mut);font-size:14px;line-height:1.55;white-space:pre-wrap;word-break:break-word;margin:6px 0}
+.err{color:var(--err);font-size:14px;line-height:1.55;margin:6px 0;word-break:break-word}
+label{display:block;margin:14px 0 6px;font-size:13px;font-weight:550;color:var(--mut)}
+
+/* Chip / badge */
+.badge{display:inline-block;font-size:12.5px;line-height:1;padding:6px 10px;border-radius:99px;background:var(--raise);color:var(--fg);margin:0 6px 6px 0}
+.badge.warn{background:transparent;border:1px solid var(--warn);color:var(--warn)}
 .badge[hidden]{display:none}
+
+/* Kontrol */
+select,input,textarea,button,.file{font:inherit;color:var(--fg);border-radius:var(--r-sm);border:1px solid var(--bd);background:var(--raise);width:100%}
+select,input,button,.file{min-height:46px;padding:0 14px}
+textarea{padding:10px 14px;resize:vertical;line-height:1.5}
+input::placeholder,textarea::placeholder{color:var(--mut);opacity:.8}
+select:focus-visible,input:focus-visible,textarea:focus-visible,button:focus-visible,.file:focus-within,nav a:focus-visible,.icon:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+button{cursor:pointer;font-weight:550}
+button:active,.file:active{filter:brightness(.94)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.pri,a.file{background:var(--acc);color:var(--acc-fg);border:0}
+/* tombol pilih file = sekunder (tint), tautan unduh = utama (solid) */
+label.file{background:var(--acc-soft);color:var(--acc);border:0;font-weight:600}
+.file{display:grid;place-items:center;cursor:pointer;margin-top:8px;font-weight:600}
+.file input{display:none}
 a.file{text-decoration:none}
-.card>button{margin-top:8px}
-.busy .file,.busy select{opacity:.5;pointer-events:none}
+.card>button{margin-top:10px}
+input[type=checkbox]{width:22px;min-height:22px;padding:0;accent-color:var(--acc)}
+.chk{display:flex;align-items:center;gap:12px;min-height:46px;color:var(--fg);font-size:15px}
+progress{width:100%;height:8px;margin:10px 0;border:0;border-radius:99px;overflow:hidden;background:var(--raise);accent-color:var(--acc);appearance:none;-webkit-appearance:none}
+progress::-webkit-progress-bar{background:var(--raise)}
+progress::-webkit-progress-value{background:var(--acc);border-radius:99px}
+progress::-moz-progress-bar{background:var(--acc)}
 progress[hidden]{display:none}
+.busy .file,.busy select{opacity:.5;pointer-events:none}
+
+/* Baris tombol; baris dengan teks (daftar bagian) memberi teks ruang terbanyak */
+.row{display:flex;gap:8px;align-items:center}
+.row>button,.row>.file{flex:1;margin-top:0}
+.row:has(>span){padding:10px 0;gap:10px}
+.row:has(>span)+.row:has(>span){border-top:1px solid var(--bd)}
+.row>span{flex:1 1 auto;min-width:0;font-size:14px;line-height:1.4}
+.row:has(>span)>button,.row:has(>span)>.file{flex:0 0 auto;width:auto;min-width:76px;min-height:42px;padding:0 14px}
+
+@media(prefers-reduced-motion:no-preference){button,.file,.icon{transition:filter .12s,background-color .12s}}
