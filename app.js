@@ -448,15 +448,15 @@ export function normalizeDataPath(p) {
   if (i < 0 || i !== a.length - 2 || !/\.json$/i.test(a[i + 1])) return null;
   return (a[i - 1] === 'www' ? 'www/' : '') + 'data/' + a[i + 1];
 }
-/** Baca arsip RGSS3A (VX Ace) dan ambil hanya Data/*.rvdata2. Memakai File.slice agar hemat memori. */
+/** Baca tabel arsip RGSS3A (VX Ace). Memakai File.slice agar hemat memori. */
 const rgssWord = (v, k) => (v ^ k) >>> 0;
-async function readRgss3a(file) {
+async function parseRgss3a(file) {
   const head = new Uint8Array(await file.slice(0, 12).arrayBuffer());
   if (head.length < 12 || String.fromCharCode(...head.slice(0, 6)) !== 'RGSSAD' || head[7] !== 3) throw new Error(UI.rgssBad);
   const key = (Math.imul(new DataView(head.buffer).getUint32(8, true), 9) + 3) >>> 0;
-  let size = Math.min(file.size, 1 << 20), buf, dv, pos, ents;
+  let size = Math.min(file.size, 1 << 20), ents;
   for (;;) {
-    buf = new Uint8Array(await file.slice(12, 12 + size).arrayBuffer()); dv = new DataView(buf.buffer); pos = 0; ents = []; let ok = true;
+    const buf = new Uint8Array(await file.slice(12, 12 + size).arrayBuffer()), dv = new DataView(buf.buffer); let pos = 0, ok = true; ents = [];
     for (;;) {
       if (pos + 4 > buf.length) { ok = false; break; }
       const offset = rgssWord(dv.getUint32(pos, true), key);
@@ -466,23 +466,56 @@ async function readRgss3a(file) {
       if (nl > 1024 || pos + 16 + nl > buf.length) { ok = false; break; }
       const nb = buf.slice(pos + 16, pos + 16 + nl);
       for (let i = 0; i < nl; i++) nb[i] ^= (key >>> (8 * (i % 4))) & 255;
-      ents.push({ name: new TextDecoder().decode(nb).replace(/\\/g, '/'), offset, len, fk });
+      ents.push({ nameRaw: nb, name: new TextDecoder().decode(nb).replace(/\\/g, '/'), offset, len, fk });
       pos += 16 + nl;
     }
     if (ok) break;
     if (12 + size >= file.size) throw new Error(UI.rgssBad);
     size = Math.min(file.size - 12, size * 4);
   }
-  const dec = (u8, k) => {
-    const out = new Uint8Array(u8.length), a = new DataView(u8.buffer, u8.byteOffset, u8.length), o = new DataView(out.buffer); let i = 0;
-    for (; i + 4 <= u8.length; i += 4) { o.setUint32(i, (a.getUint32(i, true) ^ k) >>> 0, true); k = (Math.imul(k, 7) + 3) >>> 0; }
-    for (let j = 0; i < u8.length; i++, j += 8) out[i] = u8[i] ^ ((k >>> j) & 255);
-    return out;
-  };
+  if (ents.some((e) => e.offset + e.len > file.size)) throw new Error(UI.rgssBad);
+  return { head, key, ents };
+}
+/** XOR data RGSS3A (simetris: dipakai untuk dekripsi dan enkripsi). */
+function rgssXor(u8, k) {
+  const out = new Uint8Array(u8.length), a = new DataView(u8.buffer, u8.byteOffset, u8.length), o = new DataView(out.buffer); let i = 0;
+  for (; i + 4 <= u8.length; i += 4) { o.setUint32(i, (a.getUint32(i, true) ^ k) >>> 0, true); k = (Math.imul(k, 7) + 3) >>> 0; }
+  for (let j = 0; i < u8.length; i++, j += 8) out[i] = u8[i] ^ ((k >>> j) & 255);
+  return out;
+}
+/** Ambil hanya Data/*.rvdata2 dari arsip. */
+async function readRgss3a(file) {
+  const { ents } = await parseRgss3a(file);
   return ents.filter((e) => /^data\/[^/]+\.rvdata2$/i.test(e.name)).map((e) => {
-    const readBin = async () => dec(new Uint8Array(await file.slice(e.offset, e.offset + e.len).arrayBuffer()), e.fk);
+    const readBin = async () => rgssXor(new Uint8Array(await file.slice(e.offset, e.offset + e.len).arrayBuffer()), e.fk);
     return { path: e.name, read: async () => new TextDecoder().decode(await readBin()), readBin };
   });
+}
+/**
+ * Buat ulang arsip: semua isi disalin apa adanya (tetap terenkripsi, tidak dimuat ke memori),
+ * kecuali file di `repl` ({name, data}) yang diganti. Hasilnya Blob.
+ */
+async function rebuildRgss3a(file, repl) {
+  const { head, key, ents } = await parseRgss3a(file);
+  const map = new Map(repl.map((r) => [r.name.replace(/\\/g, '/').toLowerCase(), r.data])), used = new Set();
+  const items = ents.map((e) => {
+    const k = e.name.toLowerCase(), nd = map.get(k);
+    if (nd) used.add(k);
+    return { e, nd };
+  });
+  const tblLen = items.reduce((s, x) => s + 16 + x.e.nameRaw.length, 0) + 4, tbl = new Uint8Array(tblLen), dv = new DataView(tbl.buffer), parts = [];
+  let pos = 0, off = 12 + tblLen;
+  for (const { e, nd } of items) {
+    const len = nd ? nd.length : e.len;
+    dv.setUint32(pos, rgssWord(off, key), true); dv.setUint32(pos + 4, rgssWord(len, key), true);
+    dv.setUint32(pos + 8, rgssWord(e.fk, key), true); dv.setUint32(pos + 12, rgssWord(e.nameRaw.length, key), true);
+    for (let i = 0; i < e.nameRaw.length; i++) tbl[pos + 16 + i] = e.nameRaw[i] ^ ((key >>> (8 * (i % 4))) & 255);
+    pos += 16 + e.nameRaw.length; off += len;
+    parts.push(nd ? rgssXor(nd, e.fk) : file.slice(e.offset, e.offset + e.len));
+  }
+  dv.setUint32(pos, key, true); // penanda akhir: 0 xor key
+  const missing = [...map.keys()].filter((k) => !used.has(k));
+  return { blob: new Blob([head, tbl, ...parts], { type: 'application/octet-stream' }), replaced: used.size, missing };
 }
 async function collectSources(files) {
   const list = [];
@@ -1450,7 +1483,7 @@ async function viewReview() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
   const rows = (await dbQuery('entries', 'projectId', p.id)).sort((a, b) => a.id - b.id);
-  let filter = 'all', q = '', page = 0;
+  let filter = 'all', cat = 'all', q = '', page = 0;
   const box = h('div'), info = h('p', { class: 'mut' });
   const rowCard = (e) => {
     const st = h('span', { class: 'badge' }, e.status), warn = h('span', { class: 'badge warn' }, 'baris panjang'), msg = h('p', { class: 'err' }, e.error);
@@ -1472,7 +1505,7 @@ async function viewReview() {
     return card(h('span', { class: 'badge' }, e.category), st, warn, h('p', { class: 'mut' }, e.original), ta, msg, rt);
   };
   const fill = () => {
-    const list = rows.filter((e) => (filter === 'all' || e.status === filter) && (!q || e.original.toLowerCase().includes(q) || e.translation.toLowerCase().includes(q)));
+    const list = rows.filter((e) => (filter === 'all' || e.status === filter) && (cat === 'all' || e.category === cat) && (!q || e.original.toLowerCase().includes(q) || e.translation.toLowerCase().includes(q)));
     const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE)); page = Math.min(page, pages - 1);
     info.textContent = `${list.length} teks`;
     const go = (n) => () => { page = n; fill(); scrollTo(0, 0); };
@@ -1481,17 +1514,21 @@ async function viewReview() {
         h('button', { onclick: go(page + 1), ...(page < pages - 1 ? {} : { disabled: '' }) }, `Berikutnya (${page + 1}/${pages})`)));
   };
   const sel = h('select', { onchange: (e) => { filter = e.target.value; page = 0; fill(); } }, FILTERS.map(([v, t]) => h('option', { value: v }, t)));
+  const cats = new Map(); rows.forEach((e) => cats.set(e.category, (cats.get(e.category) || 0) + 1));
+  const catSel = h('select', { onchange: (e) => { cat = e.target.value; page = 0; fill(); } },
+    h('option', { value: 'all' }, `Semua kategori (${rows.length})`), [...cats].sort((a, b) => a[0].localeCompare(b[0])).map(([c, n]) => h('option', { value: c }, `${c} (${n})`)));
   const find = h('input', { type: 'search', placeholder: 'Cari teks', onchange: (e) => { q = e.target.value.trim().toLowerCase(); page = 0; fill(); } });
   fill();
-  return [card(sel, find, info), box];
+  return [card(sel, catSel, find, info), box];
 }
-let exportUrl = '', editUrl = '';
+let exportUrl = '', editUrl = '', rgUrl = '';
 async function viewEkspor() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
   const cfg = await loadConfig(), rows = await dbQuery('entries', 'projectId', p.id);
   const n = (f) => rows.filter(f).length, out = h('div');
   const ready = n((e) => (e.status === 'done' || e.status === 'edited') && e.translation.trim()), pend = n((e) => e.status === 'pending' || e.status === 'translating'), err = n((e) => e.status === 'error');
+  const rgMsg = h('p', { class: 'mut' }), rgOut = h('div');
   const btn = h('button', { class: 'pri', onclick: async () => {
     btn.disabled = true; out.replaceChildren(h('p', { class: 'mut' }, 'Memeriksa dengan diff guard…'));
     try {
@@ -1503,7 +1540,20 @@ async function viewEkspor() {
         exportUrl = URL.createObjectURL(r.blob);
         out.replaceChildren(card(h('h2', {}, 'Patch siap'), h('p', { class: 'mut' }, r.report),
           h('a', { class: 'file', href: exportUrl, download: `rpgtl-patch-${p.id}.zip` }, 'Unduh zip'),
-          h('p', { class: 'mut' }, 'Backup folder data dulu, lalu timpa isinya dengan file di dalam zip.')));
+          h('p', { class: 'mut' }, 'Backup folder data dulu, lalu timpa isinya dengan file di dalam zip.'),
+          r.files.some((f) => /\.rvdata2$/i.test(f.name)) ? h('div', {}, h('h2', {}, 'Game pakai Game.rgss3a?'),
+            h('p', { class: 'mut' }, 'Pilih Game.rgss3a asli. App membuat Game.rgss3a baru berisi terjemahan, tanpa perlu ekstrak. Gambar dan audio disalin apa adanya. Backup arsip asli dulu, lalu timpa dengan hasilnya.'),
+            h('label', { class: 'file' }, 'Pilih Game.rgss3a asli', h('input', { type: 'file', onchange: async (ev) => {
+              const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
+              rgMsg.className = 'mut'; rgMsg.textContent = 'Membuat arsip…'; rgOut.replaceChildren();
+              try {
+                const x = await rebuildRgss3a(f, r.files.filter((q) => /\.rvdata2$/i.test(q.name)));
+                if (!x.replaced) throw new Error('Tidak ada file Data di arsip yang cocok dengan patch. Pastikan itu Game.rgss3a dari game yang sama');
+                if (rgUrl) URL.revokeObjectURL(rgUrl); rgUrl = URL.createObjectURL(x.blob);
+                rgMsg.textContent = `Selesai. ${x.replaced} file data diganti${x.missing.length ? `, ${x.missing.length} tidak ada di arsip dan dilewati` : ''}. Ukuran ${(x.blob.size / 1048576).toFixed(1)} MB`;
+                rgOut.replaceChildren(h('a', { class: 'file', href: rgUrl, download: 'Game.rgss3a' }, 'Unduh Game.rgss3a'));
+              } catch (e) { rgMsg.className = 'err'; rgMsg.textContent = e.message; }
+            } })), rgMsg, rgOut) : ''));
       }
     } catch (e) { out.replaceChildren(card(h('p', { class: 'err' }, e.message))); }
     btn.disabled = false;
