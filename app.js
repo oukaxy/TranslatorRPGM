@@ -1119,7 +1119,15 @@ export function parseJsonLoose(s) {
   }
   return null;
 }
-const toArray = (p) => Array.isArray(p) ? p : p && typeof p === 'object' ? Object.values(p).find(Array.isArray) || null : null;
+// Terima array [{id,text}] (format lama) atau objek ringkas {"id":"teks"} (format baru, output lebih pendek).
+const toArray = (p) => {
+  if (Array.isArray(p)) return p;
+  if (!p || typeof p !== 'object') return null;
+  const arr = Object.values(p).find(Array.isArray);
+  if (arr) return arr;
+  const m = Object.entries(p).filter(([k, v]) => /^\d+$/.test(k) && typeof v === 'string').map(([k, v]) => ({ id: Number(k), text: v }));
+  return m.length ? m : null;
+};
 /** Susun pesan untuk LLM. units: [{id, text, speaker?}], context: array string. */
 export function buildMessages({ src, tgt, units, context = [], style = '' }) {
   const system = `You translate RPG game text from ${LANG[src]} to ${LANG[tgt]}.
@@ -1131,7 +1139,7 @@ Rules:
 - If "character_notes" is given, follow each note for lines spoken by that speaker; it overrides the general style guide.
 - If an item has max_chars_per_line and max_lines, the translation must fit: break lines with \\n, never exceed max_chars_per_line characters per line (not counting ⟦n⟧ tokens) or max_lines lines. Indonesian and English run longer than Japanese, so shorten the wording when needed and keep the meaning.
 - "context" holds earlier lines for reference only. Do not translate or return them.
-- Reply with a JSON array only, no code fence, no commentary: [{"id":0,"text":"..."}]. One object per item, same ids.`;
+- Reply with one JSON object only, no code fence, no commentary: {"0":"translation","1":"translation"}. One key per item, using the item's id.`;
   const gls = new Map(); units.forEach((u) => (u.terms || []).forEach(([a, b]) => gls.set(a, b)));
   const cns = new Map(); units.forEach((u) => (u.notes || []).forEach(([a, b]) => cns.set(a, b)));
   const user = JSON.stringify({ context, ...(cns.size ? { character_notes: [...cns].map(([name, note]) => ({ name, note })) } : {}), ...(gls.size ? { glossary: [...gls].map(([from, to]) => ({ from, to })) } : {}), items: units.map((u) => ({ id: u.id, ...(u.speaker ? { speaker: u.speaker } : {}), ...(u.limit ? { max_chars_per_line: u.limit.line, max_lines: u.limit.lines } : {}), text: u.text })) });
@@ -1209,7 +1217,7 @@ export function autoTune(todo, cfg) {
   const seen = new Set(); let chars = 0;
   for (const e of todo) { if (seen.has(e.original)) continue; seen.add(e.original); chars += maskText(e.original).text.length; }
   const avg = seen.size ? chars / seen.size : 50;
-  return { ...cfg, batchSize: Math.max(10, Math.min(60, Math.floor(2400 / (avg + 15)))), maxChars: 4000, concurrency: 5, delay: 0 };
+  return { ...cfg, batchSize: Math.max(10, Math.min(80, Math.floor(3000 / (avg + 15)))), maxChars: 5000, concurrency: Math.min(12, Math.max(5, Number(cfg.concurrency) || 5)), delay: 0 };
 }
 /** Perkiraan kasar token dan biaya untuk entri yang belum selesai (belum menghitung cache). */
 export function estimateCost(entries, cfg0, src = 'ja') {
@@ -1222,7 +1230,7 @@ export function estimateCost(entries, cfg0, src = 'ja') {
   }
   const items = seen.size, batches = items ? Math.max(Math.ceil(items / cfg.batchSize), Math.ceil(chars / cfg.maxChars)) : 0;
   const body = ja + (chars - ja) * 0.3;
-  const inTok = Math.round(body + items * 15 + batches * (400 + Math.ceil((cfg.style || '').length / 3.5))), outTok = Math.round(ja + (chars - ja) * 0.36 + items * 12);
+  const inTok = Math.round(body + items * 15 + batches * (400 + Math.ceil((cfg.style || '').length / 3.5))), outTok = Math.round(ja + (chars - ja) * 0.36 + items * 5);
   const cost = cfg.priceIn || cfg.priceOut ? (inTok * cfg.priceIn + outTok * cfg.priceOut) / 1e6 : null;
   return { items, batches, inTok, outTok, cost, batchSize: cfg.batchSize, auto: cfg0.auto !== false };
 }
@@ -1280,7 +1288,7 @@ export async function runTranslation(project, cfg, o = {}) {
       check: (id, t) => (t.trim() ? (unmaskText(t, byId.get(id).tokens).ok ? '' : UI.tokenBad) : UI.emptyTr),
       onUsage: (u) => { stat.tokensIn += u?.prompt_tokens || 0; stat.tokensOut += u?.completion_tokens || 0; },
     });
-    stat.expOut += batch.reduce((a, u) => a + u.text.length + 12, 0); stat.nb++;
+    stat.expOut += batch.reduce((a, u) => a + u.text.length + 5, 0); stat.nb++;
     const upd = [], cache = [];
     r.ok.forEach((t, id) => {
       const u = byId.get(id), text = unmaskText(t, u.tokens).text;
@@ -1437,7 +1445,7 @@ async function viewTranslate() {
 }
 const FIELDS = [
   ['baseUrl', 'Base URL', 'url'], ['apiKey', 'API key', 'password'], ['model', 'Model', 'text'], ['extraBody', 'Body tambahan JSON (opsional)', 'text'], ['temperature', 'Temperature (0 sampai 2)', 'number'],
-  ['batchSize', 'Ukuran batch (teks)', 'number'], ['maxChars', 'Batas karakter per batch', 'number'], ['concurrency', 'Konkurensi (1 sampai 5)', 'number'],
+  ['batchSize', 'Ukuran batch (teks)', 'number'], ['maxChars', 'Batas karakter per batch', 'number'], ['concurrency', 'Konkurensi maks (1 sampai 12)', 'number'],
   ['delay', 'Jeda antar request (ms)', 'number'], ['timeout', 'Batas waktu per request (detik)', 'number'], ['wrapWidth', 'Lebar baris maks tanpa face (0 = mati)', 'number'], ['wrapFace', 'Lebar baris maks dengan face', 'number'], ['priceIn', 'Harga token masuk per 1 juta', 'number'], ['priceOut', 'Harga token keluar per 1 juta', 'number'],
 ];
 async function viewSettings() {
@@ -1456,7 +1464,7 @@ async function viewSettings() {
   const gather = () => ({
     baseUrl: inp.baseUrl.value.trim(), apiKey: inp.apiKey.value.trim(), remember: remember.checked, model: inp.model.value.trim() || DEFAULT_CONFIG.model, extraBody: inp.extraBody.value.trim(),
     temperature: num('temperature', 0, 2), batchSize: Math.round(num('batchSize', 1, 100)), maxChars: Math.round(num('maxChars', 500, 12000)),
-    concurrency: Math.round(num('concurrency', 1, 5)), delay: Math.round(num('delay', 0, 10000)), timeout: Math.round(num('timeout', 10, 600)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), fast: fast.checked, auto: autoCb.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
+    concurrency: Math.round(num('concurrency', 1, 12)), delay: Math.round(num('delay', 0, 10000)), timeout: Math.round(num('timeout', 10, 600)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), fast: fast.checked, auto: autoCb.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
   });
   const wipeBtn = h('button', { disabled: '', onclick: async () => { try { await resetAll((m) => say(m, true)); location.hash = '#/proyek'; location.reload(); } catch (e) { say(e.message, true); } } }, 'Hapus semua data');
   const wipe = h('input', { type: 'text', placeholder: 'HAPUS', autocomplete: 'off', oninput: (e) => { wipeBtn.disabled = e.target.value !== 'HAPUS'; } });
