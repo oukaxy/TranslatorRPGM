@@ -127,16 +127,22 @@ export function detectLang(t) {
   }
   return id > en ? 'id' : 'en';
 }
-/** Ganti kode escape dengan token ⟦n⟧. */
+/** Ganti kode escape dengan token ⟦n⟧. Kode di awal dan akhir teks tidak dikirim ke AI (sering dihapus model); dipasang lagi saat unmask. */
+const ESC_LEAD = new RegExp('^(?:\\s*(?:' + ESC.source + '))+\\s*'), ESC_TRAIL = new RegExp('(?:\\s*(?:' + ESC.source + '))+\\s*$');
 export function maskText(text) {
+  let lead = '', trail = '', core = text;
+  const a = ESC_LEAD.exec(core); if (a) { lead = a[0]; core = core.slice(lead.length); }
+  const b = ESC_TRAIL.exec(core); if (b) { trail = b[0]; core = core.slice(0, core.length - trail.length); }
+  if (!core.trim()) { lead = ''; trail = ''; core = text; } // teks hanya berisi kode: perlakukan seperti biasa
   const tokens = [];
-  return { text: text.replace(ESC, (m) => { tokens.push(m); return `⟦${tokens.length - 1}⟧`; }), tokens };
+  tokens.lead = lead; tokens.trail = trail;
+  return { text: core.replace(ESC, (m) => { tokens.push(m); return `⟦${tokens.length - 1}⟧`; }), tokens };
 }
 /** Kembalikan kode escape. ok=false bila token hilang, duplikat, atau asing. */
 export function unmaskText(text, tokens) {
   const seen = new Array(tokens.length).fill(0); let ok = true;
   const out = text.replace(/⟦(\d+)⟧/g, (m, n) => { if (tokens[n] === undefined) { ok = false; return m; } seen[n]++; return tokens[n]; });
-  return { ok: ok && seen.every((c) => c === 1), text: out };
+  return { ok: ok && seen.every((c) => c === 1), text: (tokens.lead || '') + out + (tokens.trail || '') };
 }
 /** Teks tanpa kode escape (untuk mengukur panjang baris yang terlihat). */
 export const stripEscapes = (s) => s.replace(ESC, '');
@@ -1501,6 +1507,17 @@ async function viewSettings() {
 }
 const FILTERS = [['all', 'Semua'], ['pending', 'Pending'], ['error', 'Error'], ['edited', 'Diedit']];
 const longLine = (t) => t.split('\n').some((l) => stripEscapes(l).length > LINE_WARN);
+/** Ganti kata di terjemahan. Kode escape tidak disentuh. Mengembalikan {text, count}. */
+function replaceWord(text, find, rep, { whole = true, ignoreCase = true } = {}) {
+  if (!find) return { text, count: 0 };
+  const esc = find.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), W = '[\\p{L}\\p{N}_]';
+  const re = new RegExp(whole ? `(?<!${W})${esc}(?!${W})` : esc, ignoreCase ? 'giu' : 'gu');
+  const fixCase = (m) => !ignoreCase || !rep ? rep : m.length > 1 && m === m.toUpperCase() && m !== m.toLowerCase() ? rep.toUpperCase() : m[0] !== m[0].toLowerCase() ? rep[0].toUpperCase() + rep.slice(1) : rep;
+  let count = 0;
+  const parts = text.split(new RegExp('(' + ESC.source + ')')); // indeks ganjil = kode escape
+  const out = parts.map((p, i) => (i % 2 ? p : p.replace(re, (m) => { count++; return fixCase(m); }))).join('');
+  return { text: out, count };
+}
 async function viewReview() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
@@ -1540,8 +1557,43 @@ async function viewReview() {
   const catSel = h('select', { onchange: (e) => { cat = e.target.value; page = 0; fill(); } },
     h('option', { value: 'all' }, `Semua kategori (${rows.length})`), [...cats].sort((a, b) => a[0].localeCompare(b[0])).map(([c, n]) => h('option', { value: c }, `${c} (${n})`)));
   const find = h('input', { type: 'search', placeholder: 'Cari teks', onchange: (e) => { q = e.target.value.trim().toLowerCase(); page = 0; fill(); } });
+  // Cari & ganti kata di semua terjemahan (mengikuti kategori yang dipilih)
+  const rf = h('input', { type: 'text', placeholder: 'Kata yang dicari, mis. kau', autocapitalize: 'off' }), rr = h('input', { type: 'text', placeholder: 'Diganti dengan, mis. kamu', autocapitalize: 'off' });
+  const wholeCb = h('input', { type: 'checkbox', checked: '' }), icCb = h('input', { type: 'checkbox', checked: '' }), rMsg = h('p', { class: 'mut' });
+  const scan = () => {
+    const opt = { whole: wholeCb.checked, ignoreCase: icCb.checked }, hits = [];
+    let total = 0;
+    for (const e of rows) {
+      if (!e.translation || (cat !== 'all' && e.category !== cat)) continue;
+      const r = replaceWord(e.translation, rf.value, rr.value, opt);
+      if (r.count) { total += r.count; hits.push({ e, text: r.text }); }
+    }
+    return { hits, total };
+  };
+  const preview = () => {
+    if (!rf.value) { rMsg.className = 'err'; rMsg.textContent = 'Isi kata yang dicari dulu'; return; }
+    const { hits, total } = scan(); rMsg.className = 'mut';
+    const ex = hits.slice(0, 3).map(({ e, text }) => { const l = text.split('\n').find((x) => x !== undefined && x.toLowerCase().includes(rr.value.toLowerCase())) || text; return `• ${l.slice(0, 80)}`; }).join('\n');
+    rMsg.textContent = hits.length ? `${total} kata di ${hits.length} teks akan diganti.\n${rr.value ? `Contoh hasil:\n${ex}` : ''}` : 'Tidak ada yang cocok';
+  };
+  const apply = async () => {
+    if (!rf.value) { rMsg.className = 'err'; rMsg.textContent = 'Isi kata yang dicari dulu'; return; }
+    const { hits, total } = scan();
+    if (!hits.length) { rMsg.className = 'mut'; rMsg.textContent = 'Tidak ada yang cocok'; return; }
+    rMsg.className = 'mut'; rMsg.textContent = 'Mengganti…';
+    try {
+      const upd = hits.map(({ e, text }) => ({ ...e, translation: text, status: e.status === 'done' ? 'edited' : e.status, error: '' }));
+      await dbPutMany('entries', upd);
+      hits.forEach(({ e }, i) => Object.assign(e, upd[i]));
+      rMsg.textContent = `Selesai: ${total} kata di ${hits.length} teks diganti`; fill();
+    } catch (x) { rMsg.className = 'err'; rMsg.textContent = `Gagal: ${x.message || x}`; }
+  };
+  const replCard = card(h('h2', {}, 'Cari & ganti kata'),
+    h('p', { class: 'mut' }, 'Mengganti kata di terjemahan saja (bukan teks asli), mengikuti kategori yang dipilih di atas. Kode game tidak disentuh.'),
+    rf, rr, h('label', { class: 'chk' }, wholeCb, 'Kata utuh saja (kau tidak mengubah "kaum")'), h('label', { class: 'chk' }, icCb, 'Abaikan huruf besar/kecil (Kau menjadi Kamu)'),
+    h('button', { onclick: preview }, 'Cek jumlah'), h('button', { class: 'pri', onclick: apply }, 'Ganti semua'), rMsg);
   fill();
-  return [card(sel, catSel, find, info), box];
+  return [card(sel, catSel, find, info), replCard, box];
 }
 let exportUrl = '', editUrl = '', rgUrl = '';
 async function viewEkspor() {
