@@ -73,14 +73,14 @@ export async function sha256(s) {
 export async function deleteProject(id) {
   const cur = await dbGet('settings', 'current'), db = await openDb();
   return new Promise((res, rej) => {
-    const t = db.transaction(['projects', 'entries', 'origFiles', 'settings'], 'readwrite');
+    const t = db.transaction(['projects', 'entries', 'origFiles', 'settings'], 'readwrite'), es = t.objectStore('entries');
     t.objectStore('projects').delete(id);
     t.objectStore('origFiles').delete(IDBKeyRange.bound(id + ':', id + ':\uffff'));
     if (cur?.value === id) t.objectStore('settings').delete('current');
-    t.objectStore('entries').index('projectId').openCursor(IDBKeyRange.only(id)).onsuccess = (e) => {
-      const c = e.target.result; if (c) { c.delete(); c.continue(); }
-    };
-    t.oncomplete = () => res(); t.onerror = () => rej(t.error);
+    // cepat: kalau semua entries milik proyek ini, kosongkan sekaligus; kalau tidak, hapus per key tanpa kursor
+    const all = es.count(), mine = es.index('projectId').getAllKeys(IDBKeyRange.only(id));
+    mine.onsuccess = () => { if (all.result === mine.result.length) es.clear(); else mine.result.forEach((k) => es.delete(k)); };
+    t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new Error('Transaksi dibatalkan'));
   });
 }
 /** Reset semua data aplikasi (hanya rpgtl-db dan key rpgtl:*). */
