@@ -1247,8 +1247,8 @@ export async function runTranslation(project, cfg, o = {}) {
   const pos = new Map(all.map((e, i) => [e.id, i])), todo = all.filter((e) => TODO.has(e.status));
   const stat = { done: 0, error: 0, cached: 0, tokensIn: 0, tokensOut: 0, stopped: false, expOut: 0, nb: 0 };
   const auto = cfg.auto !== false, eff = auto ? autoTune(todo, cfg) : cfg;
-  // Jumlah batch yang berjalan bersamaan: mulai 3, turun saat provider membatasi, naik pelan saat lancar (maks 5).
-  const lim = { cur: auto ? 3 : eff.concurrency, max: eff.concurrency, active: 0, okRun: 0 };
+  // Jumlah batch yang berjalan bersamaan: mulai 6, turun saat provider membatasi, naik tiap 4 batch lancar (sampai batas konkurensi).
+  const lim = { cur: auto ? Math.min(eff.concurrency, 6) : eff.concurrency, max: eff.concurrency, active: 0, okRun: 0 };
   let n = 0; const tick = (t) => onProgress(n + base, todo.length + base, (stat.tokensIn ? `${t} · token masuk ${stat.tokensIn}, keluar ${stat.tokensOut}` : t) + (stat.nb >= 3 && stat.tokensOut > stat.expOut * 2.5 ? ' · Token keluar jauh di atas wajar: model mungkin memakai mode berpikir (lihat Body tambahan di Pengaturan)' : ''));
   const groups = new Map();
   for (const e of todo) { if (!groups.has(e.original)) groups.set(e.original, []); groups.get(e.original).push(e); }
@@ -1276,7 +1276,7 @@ export async function runTranslation(project, cfg, o = {}) {
     const w = Math.max(gate.until - Date.now(), gate.pace);
     if (w > 1500) tick(`Menunggu limit provider (${Math.round(w / 1000)} dtk) · ${n + base} dari ${todo.length + base} teks`);
     if (w > 0) await sleepSig(w, signal);
-    try { const r = await chat(m, signal); gate.pace = gate.pace < 200 ? 0 : gate.pace / 2; if (auto && ++lim.okRun >= 8 && lim.cur < lim.max) { lim.cur++; lim.okRun = 0; } return r; }
+    try { const r = await chat(m, signal); gate.pace = gate.pace < 200 ? 0 : gate.pace / 2; if (auto && ++lim.okRun >= 4 && lim.cur < lim.max) { lim.cur++; lim.okRun = 0; } return r; }
     catch (e) {
       if (e.status === 429 || e.status >= 500) { if (auto) { lim.cur = Math.max(1, lim.cur - 1); lim.okRun = 0; } gate.until = Math.max(gate.until, Date.now() + Math.min(60000, e.retryAfter ?? 2000)); gate.pace = Math.min(5000, gate.pace ? gate.pace * 2 : 500); }
       throw e;
