@@ -98,6 +98,9 @@ export const DB_FIELDS = {
   Items: ['name', 'description'], Weapons: ['name', 'description'], Armors: ['name', 'description'],
   Enemies: ['name'], States: ['name', 'message1', 'message2', 'message3', 'message4'],
 };
+/** Tag di field note database yang isinya teks tampil (hanya isi tag yang diterjemahkan, nama tag dan tanda <> tetap). */
+export const NOTE_TAGS = ['図鑑特徴'];
+const noteTagRe = (tag) => new RegExp('<' + tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[:：]([\\s\\S]*?)>', 'g');
 // Kode escape (\C[2], \!, ...) dan tag plugin ASCII seperti <br>, <WordWrap>, <left>. Tag berisi huruf Jepang tidak ikut.
 const ESC = /\\(?:[A-Za-z]+\[\d+\]|[A-Za-z]|[{}.|!^$<>\\])|<\/?[A-Za-z][ -;=?-~]{0,40}>/g;
 // Plugin message yang punya word-wrap sendiri. Bila aktif, pemecahan baris manual dimatikan.
@@ -693,7 +696,19 @@ export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
     if (!pl || pl.status === false || !pl.parameters) return;
     for (const k of Object.keys(pl.parameters)) if (typeof pl.parameters[k] === 'string' && !looksStruct(pl.parameters[k]) && A.param.has(`${pl.name}.${k}`)) add([i, 'parameters', k], 'field', 'plugin', pl.parameters[k]);
   });
-  else if (DB_FIELDS[base]) (json || []).forEach((it, i) => it && DB_FIELDS[base].forEach((f) => add([i, f], 'field', base.toLowerCase(), it[f])));
+  else if (DB_FIELDS[base]) (json || []).forEach((it, i) => {
+    if (!it) return;
+    DB_FIELDS[base].forEach((f) => add([i, f], 'field', base.toLowerCase(), it[f]));
+    if (typeof it.note !== 'string') return;
+    for (const tag of NOTE_TAGS) {
+      let n = 0;
+      for (const m of it.note.matchAll(noteTagRe(tag))) {
+        const raw = m[1];
+        add([i, 'note', tag, n], 'field', 'note-tag', raw.trim().replace(/\r\n/g, '\n'), { lead: raw.slice(0, raw.length - raw.trimStart().length), trail: raw.slice(raw.trimEnd().length), crlf: raw.includes('\r\n') });
+        n++;
+      }
+    }
+  });
   return out;
 }
 // ---- Penulis ZIP, CRC-32, exporter, diff guard (M-3) ----
@@ -765,6 +780,21 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
   for (const e of entries.filter(isApplicable)) {
     const p = JSON.parse(e.path);
     if (e.kind === 'block') { const k = JSON.stringify(p.slice(0, -1)); if (!blocks.has(k)) blocks.set(k, []); blocks.get(k).push({ p, e }); continue; }
+    if (e.category === 'note-tag') {
+      // path = [..., indeks, 'note', namaTag, urutan]; hanya isi tag ke-urutan yang diganti
+      const noteP = p.slice(0, -2), tag = p.at(-2), nth = p.at(-1), holder = getAt(json, noteP.slice(0, -1)), nk = noteP.at(-1);
+      if (typeof holder?.[nk] !== 'string') { problems.push(`${e.file} ${e.path}: note tidak cocok dengan file asli`); continue; }
+      let idx = -1, hit = false;
+      holder[nk] = holder[nk].replace(noteTagRe(tag), (all, raw) => {
+        idx++; if (idx !== nth) return all;
+        hit = true;
+        let t = e.translation.replace(/[<>]/g, '').trim();
+        if (e.meta?.crlf) t = t.replace(/\r?\n/g, '\r\n');
+        return all.slice(0, all.length - raw.length - 1) + (e.meta?.lead || '') + t + (e.meta?.trail || '') + '>';
+      });
+      if (!hit) problems.push(`${e.file} ${e.path}: tag ${tag} ke-${nth} tidak ditemukan di file asli`);
+      continue;
+    }
     const parent = getAt(json, p.slice(0, -1)), key = p.at(-1);
     if (typeof parent?.[key] !== 'string') { problems.push(`${e.file} ${e.path}: path tidak cocok dengan file asli`); continue; }
     const old = parent[key];
@@ -987,9 +1017,11 @@ export async function restoreFromPristine(project, files, cats, onProgress = () 
     const mine = JSON.parse(f.text); let changed = false;
     for (const e of extractFile(f.path, pj, { src: project.src, allow: project.allow })) {
       if (e.kind !== 'field' || !cats.has(e.category)) continue;
-      const pa = JSON.parse(e.path), parent = getAt(mine, pa.slice(0, -1)), key = pa.at(-1);
-      if (typeof parent?.[key] !== 'string') { res.badField++; continue; }
-      if (parent[key] !== e.original) { parent[key] = e.original; changed = true; }
+      if (e.category !== 'note-tag') {
+        const pa = JSON.parse(e.path), parent = getAt(mine, pa.slice(0, -1)), key = pa.at(-1);
+        if (typeof parent?.[key] !== 'string') { res.badField++; continue; }
+        if (parent[key] !== e.original) { parent[key] = e.original; changed = true; }
+      }
       const old = byKey.get(`${f.path}|${e.path}`), hash = await sha256(e.original);
       if (old) { out.push({ ...old, original: e.original, category: e.category, translation: fill ? e.original : '', status: fill ? 'done' : 'pending', error: '', hash }); res.restored++; }
       else { out.push({ ...e, file: f.path, projectId: project.id, hash, ...(fill ? { translation: e.original, status: 'done' } : {}) }); res.created++; }
@@ -1622,7 +1654,7 @@ async function viewProyek() {
         b.disabled = false;
       } }, 'Cari'), res));
     // Pulihkan kategori tertentu dari game asli yang belum diubah (mis. comment yang terlanjur salah).
-    const cats = [...new Set([...Object.keys(p.counts || {}), 'comment', 'comment-teks', 'comment-label'])], pickC = new Set(cats.filter((c) => /^comment/.test(c)));
+    const cats = [...new Set([...Object.keys(p.counts || {}), 'comment', 'comment-teks', 'comment-label', 'note-tag'])], pickC = new Set(cats.filter((c) => /^comment/.test(c)));
     const fillOpt = { on: true };
     const rmsg = h('p', { class: 'mut' }), rbar = h('progress', { value: '0', max: '1', hidden: '' });
     const doRestore = async (ev) => {
@@ -1639,7 +1671,7 @@ async function viewProyek() {
     out.push(card(h('h2', {}, 'Pulihkan dari game asli'),
       h('p', { class: 'mut' }, 'Untuk teks yang terlanjur diubah dan tidak punya backup. Pilih game asli yang belum diubah dan kategori yang mau dikembalikan. Data proyek pada kategori itu ditimpa dengan teks asli dari game, terjemahan kategori itu dikosongkan, kategori lain tidak disentuh. Hanya teks bertipe field (seperti comment), bukan blok dialog.'),
       cats.map((c) => h('label', { class: 'row' }, h('input', { type: 'checkbox', ...(pickC.has(c) ? { checked: '' } : {}), onchange: (e) => { e.target.checked ? pickC.add(c) : pickC.delete(c); } }), ` ${c}`)),
-      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: '', onchange: (e) => { fillOpt.on = e.target.checked; } }), ' Isi terjemahan dengan teks asli (status done) supaya file ikut di patch'),
+      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: '', onchange: (e) => { fillOpt.on = e.target.checked; } }), ' Isi terjemahan dengan teks asli (status done) supaya file ikut di patch. Matikan kalau memilih note-tag, supaya hasilnya pending dan bisa diterjemahkan'),
       pickR('Pilih folder data asli', { webkitdirectory: '', multiple: '' }), pickR('Pilih zip game asli', { accept: '.zip' }), pickR('Pilih Game.rgss3a asli', {}), rbar, rmsg));
   }
   return out;
@@ -1815,6 +1847,7 @@ async function viewReview() {
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
   const rows = (await dbQuery('entries', 'projectId', p.id)).sort((a, b) => a.id - b.id);
   let filter = 'all', cat = 'all', q = '', page = 0;
+  const origNorm = new WeakMap(), normOf = (e) => { let v = origNorm.get(e); if (v === undefined) { v = searchNorm(e.original); origNorm.set(e, v); } return v; };
   const box = h('div'), info = h('p', { class: 'mut' });
   const rowCard = (e) => {
     const st = h('span', { class: 'badge' }, e.status), warn = h('span', { class: 'badge warn' }, 'baris panjang'), msg = h('p', { class: 'err' }, e.error);
@@ -1836,7 +1869,7 @@ async function viewReview() {
     return card(h('span', { class: 'badge' }, e.category), st, warn, h('p', { class: 'mut' }, e.original), ta, msg, rt);
   };
   const fill = () => {
-    const list = rows.filter((e) => (filter === 'all' || e.status === filter) && (cat === 'all' || e.category === cat) && (!q || e.original.toLowerCase().includes(q) || e.translation.toLowerCase().includes(q)));
+    const list = rows.filter((e) => (filter === 'all' || e.status === filter) && (cat === 'all' || e.category === cat) && (!q || normOf(e).includes(q) || searchNorm(e.translation || '').includes(q)));
     const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE)); page = Math.min(page, pages - 1);
     info.textContent = `${list.length} teks`;
     const go = (n) => () => { page = n; fill(); scrollTo(0, 0); };
@@ -1848,7 +1881,7 @@ async function viewReview() {
   const cats = new Map(); rows.forEach((e) => cats.set(e.category, (cats.get(e.category) || 0) + 1));
   const catSel = h('select', { onchange: (e) => { cat = e.target.value; page = 0; fill(); } },
     h('option', { value: 'all' }, `Semua kategori (${rows.length})`), [...cats].sort((a, b) => a[0].localeCompare(b[0])).map(([c, n]) => h('option', { value: c }, `${c} (${n})`)));
-  const find = h('input', { type: 'search', placeholder: 'Cari teks', onchange: (e) => { q = e.target.value.trim().toLowerCase(); page = 0; fill(); } });
+  const find = h('input', { type: 'search', placeholder: 'Cari teks', onchange: (e) => { q = searchNorm(e.target.value); page = 0; fill(); } });
   // Cari & ganti kata di semua terjemahan (mengikuti kategori yang dipilih)
   const rf = h('input', { type: 'text', placeholder: 'Kata yang dicari, mis. kau', autocapitalize: 'off' }), rr = h('input', { type: 'text', placeholder: 'Diganti dengan, mis. kamu', autocapitalize: 'off' });
   const wholeCb = h('input', { type: 'checkbox', checked: '' }), icCb = h('input', { type: 'checkbox', checked: '' }), rMsg = h('p', { class: 'mut' });
