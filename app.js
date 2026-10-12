@@ -810,13 +810,15 @@ function sync402(list, i, k, oldText, newText) {
  * @param {string[]} problems diisi bila path tidak cocok
  */
 export function applyTranslations(json, entries, problems = [], opts = {}) {
-  const blocks = new Map();
-  for (const e of entries.filter(isApplicable)) {
+  const blocks = new Map(), isObj = (v) => v !== null && typeof v === 'object';
+  // Entri yang posisinya tidak cocok dengan file asli dicatat (opts.bad) dan dilewati, bukan menggagalkan seluruh patch.
+  const fail = (e, msg) => { problems.push(`${e.file} ${e.path}: ${msg}`); opts.bad?.add(e); };
+  for (const e of entries.filter(isApplicable)) { try {
     const p = JSON.parse(e.path);
     if (e.kind === 'block') { const k = JSON.stringify(p.slice(0, -1)); if (!blocks.has(k)) blocks.set(k, []); blocks.get(k).push({ p, e }); continue; }
     if (e.category === 'script-teks') {
       const holderP = p.slice(0, -2), nth = p.at(-1), holder = getAt(json, holderP.slice(0, -1)), hk = holderP.at(-1);
-      if (typeof holder?.[hk] !== 'string') { problems.push(`${e.file} ${e.path}: script tidak cocok dengan file asli`); continue; }
+      if (!isObj(holder) || typeof holder[hk] !== 'string') { fail(e, 'script tidak cocok dengan file asli'); continue; }
       let idx = -1, hit = false;
       holder[hk] = holder[hk].replace(rbLit(), (all, d) => {
         idx++; if (idx !== nth) return all;
@@ -828,13 +830,13 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
         const q = dq ? '"' : "'";
         return q + (e.meta?.lead || '') + t + (e.meta?.trail || '') + q;
       });
-      if (!hit) problems.push(`${e.file} ${e.path}: string ke-${nth} tidak ditemukan di file asli`);
+      if (!hit) fail(e, `string ke-${nth} tidak ditemukan di file asli`);
       continue;
     }
     if (e.category === 'note-tag') {
       // path = [..., indeks, 'note', namaTag, urutan]; hanya isi tag ke-urutan yang diganti
       const noteP = p.slice(0, -2), tag = p.at(-2), nth = p.at(-1), holder = getAt(json, noteP.slice(0, -1)), nk = noteP.at(-1);
-      if (typeof holder?.[nk] !== 'string') { problems.push(`${e.file} ${e.path}: note tidak cocok dengan file asli`); continue; }
+      if (!isObj(holder) || typeof holder[nk] !== 'string') { fail(e, 'note tidak cocok dengan file asli'); continue; }
       let idx = -1, hit = false;
       holder[nk] = holder[nk].replace(noteTagRe(tag), (all, raw) => {
         idx++; if (idx !== nth) return all;
@@ -843,11 +845,12 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
         if (e.meta?.crlf) t = t.replace(/\r?\n/g, '\r\n');
         return all.slice(0, all.length - raw.length - 1) + (e.meta?.lead || '') + t + (e.meta?.trail || '') + '>';
       });
-      if (!hit) problems.push(`${e.file} ${e.path}: tag ${tag} ke-${nth} tidak ditemukan di file asli`);
+      if (!hit) fail(e, `tag ${tag} ke-${nth} tidak ditemukan di file asli`);
       continue;
     }
     const parent = getAt(json, p.slice(0, -1)), key = p.at(-1);
-    if (typeof parent?.[key] !== 'string') { problems.push(`${e.file} ${e.path}: path tidak cocok dengan file asli`); continue; }
+    // parent harus objek/array: kalau berupa string, parent[0] adalah huruf pertamanya (bertipe string) dan penugasan akan error
+    if (!isObj(parent) || typeof parent[key] !== 'string') { fail(e, 'path tidak cocok dengan file asli'); continue; }
     const old = parent[key];
     parent[key] = e.kind === 'choice' || /^comment/.test(e.category) ? e.translation.replace(/\s*\n\s*/g, ' ') : e.category === 'plugin' ? (e.meta?.prefix || '') + e.translation.replace(/\s*\n\s*/g, ' ').trim() : e.translation;
     if (e.kind === 'field' && e.category !== 'plugin' && opts.wrap && WRAP_KEYS.test(String(key))) {
@@ -856,13 +859,13 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
       if (opts.stats && parent[key].split('\n').length > 2) opts.stats.long++;
     }
     if (e.kind === 'choice') sync402(getAt(json, p.slice(0, -4)), p.at(-4), p.at(-1), old, parent[key]);
-  }
+  } catch (x) { fail(e, x.message || String(x)); } }
   for (const [k, arr] of blocks) {
     const list = getAt(json, JSON.parse(k));
     arr.sort((a, b) => b.p.at(-1) - a.p.at(-1));
-    for (const { p, e } of arr) {
+    for (const { p, e } of arr) { try {
       const i = p.at(-1), head = Array.isArray(list) ? list[i] : null, body = head?.code === 101 ? 401 : head?.code === 105 ? 405 : 0;
-      if (!body) { problems.push(`${e.file} ${e.path}: header blok tidak cocok dengan file asli`); continue; }
+      if (!body) { fail(e, 'header blok tidak cocok dengan file asli'); continue; }
       let j = i + 1; while (list[j]?.code === body) j++;
       let lines = e.translation.replace(/^\n+|\n+$/g, '').split('\n');
       if (body === 401 && opts.wrap) {
@@ -871,7 +874,7 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
         if (w) { lines = w; if (opts.stats) opts.stats.wrapped++; }
       }
       list.splice(i + 1, j - i - 1, ...lines.map((t) => ({ code: body, indent: head.indent, parameters: [t] })));
-    }
+    } catch (x) { fail(e, x.message || String(x)); } }
   }
   return json;
 }
@@ -961,7 +964,7 @@ function fixAceCmds(v) {
  * @returns {{ok:boolean, empty?:boolean, problems:string[], files:{name:string,data:Uint8Array}[], report:string, stat:object}}
  */
 export function buildPatch(files, entries, { model = '', date = new Date(), wrap = null, notes = [], allow = null } = {}) {
-  const byFile = new Map(), out = [], problems = [], stat = { files: 0, applied: 0, pending: 0, error: 0, skipped: 0, wrapped: 0, long: 0 };
+  const byFile = new Map(), out = [], problems = [], warnings = [], badAll = [], stat = { files: 0, applied: 0, pending: 0, error: 0, skipped: 0, wrapped: 0, long: 0, mismatch: 0 };
   for (const e of entries) {
     if (!byFile.has(e.file)) byFile.set(e.file, []); byFile.get(e.file).push(e);
     if (e.status === 'pending' || e.status === 'translating') stat.pending++; else if (e.status === 'error') stat.error++; else if (e.status === 'skipped') stat.skipped++;
@@ -974,7 +977,16 @@ export function buildPatch(files, entries, { model = '', date = new Date(), wrap
       if (isPl) { pj = parsePluginsJs(f.text); if (!pj) throw new Error('x'); orig = pj.arr; work = JSON.parse(JSON.stringify(pj.arr)); }
       else { orig = JSON.parse(f.text); work = JSON.parse(f.text); }
     } catch { problems.push(`${f.path}: file asli tidak bisa dibaca`); continue; }
-    const pr = []; applyTranslations(work, es, pr, { wrap, stats: stat });
+    const fresh = () => (isPl ? JSON.parse(JSON.stringify(pj.arr)) : JSON.parse(f.text));
+    let pr = [], bad = new Set(), st = { wrapped: 0, long: 0 }, use = es;
+    applyTranslations(work, use, pr, { wrap, stats: st, bad });
+    if (bad.size) { // buang entri yang posisinya tak cocok, terapkan sisanya ke salinan bersih
+      warnings.push(...pr); badAll.push(...bad); stat.mismatch += bad.size;
+      use = es.filter((x) => !bad.has(x)); work = fresh(); pr = []; st = { wrapped: 0, long: 0 };
+      applyTranslations(work, use, pr, { wrap, stats: st, bad: new Set() });
+    }
+    stat.wrapped += st.wrapped; stat.long += st.long;
+    if (!use.length) continue;
     const text = isPl ? buildPluginsJs(pj, work) : JSON.stringify(work); let re = null;
     try { re = isPl ? parsePluginsJs(text)?.arr : JSON.parse(text); if (!re) throw new Error('x'); } catch { pr.push(`${f.path}: hasil tidak bisa dibaca ulang`); }
     if (!pr.length) pr.push(...diffGuard(orig, re, f.path, allow));
@@ -986,11 +998,11 @@ export function buildPatch(files, entries, { model = '', date = new Date(), wrap
       } catch (e) { pr.push(`${f.path}: gagal menulis rvdata2 (${e.message})`); }
     }
     if (pr.length) { problems.push(...pr); continue; }
-    out.push({ name: f.path, data: data || new TextEncoder().encode(text) }); stat.files++; stat.applied += es.length;
+    out.push({ name: f.path, data: data || new TextEncoder().encode(text) }); stat.files++; stat.applied += use.length;
   }
   const report = ['RPG Maker Translator - patch-report', `Tanggal: ${date.toISOString()}`, `Model: ${model}`, ...notes, `File diubah: ${stat.files}`, `Teks diterapkan: ${stat.applied}`, `Teks dipecah ulang agar muat: ${stat.wrapped}`, `Deskripsi/profil lebih dari 2 baris (mungkin terpotong di game): ${stat.long}`,
-    `Belum diterjemahkan (tetap asli): ${stat.pending}`, `Error (tetap asli): ${stat.error}`, `Dilewati: ${stat.skipped}`, '', ...out.map((x) => x.name)].join('\n');
-  return { ok: !problems.length && out.length > 0, empty: !problems.length && !out.length, problems, files: out, report, stat };
+    `Belum diterjemahkan (tetap asli): ${stat.pending}`, `Error (tetap asli): ${stat.error}`, `Dilewati: ${stat.skipped}`, `Posisi tidak cocok dengan file asli (tetap asli): ${stat.mismatch}`, ...(warnings.length ? ['', ...warnings.slice(0, 50), ...(warnings.length > 50 ? [`...dan ${warnings.length - 50} lainnya`] : [])] : []), '', ...out.map((x) => x.name)].join('\n');
+  return { ok: !problems.length && out.length > 0, empty: !problems.length && !out.length, problems, warnings, bad: badAll, files: out, report, stat };
 }
 /** Ekspor proyek: JSON asli + terjemahan, lolos diff guard, lalu zip. Bila gagal, tidak ada zip. */
 export async function exportProject(project, model = '', wrap = null) {
@@ -2181,12 +2193,28 @@ async function viewEkspor() {
   const n = (f) => rows.filter(f).length, out = h('div');
   const ready = n((e) => (e.status === 'done' || e.status === 'edited') && e.translation.trim()), pend = n((e) => e.status === 'pending' || e.status === 'translating'), err = n((e) => e.status === 'error');
   const rgMsg = h('p', { class: 'mut' }), rgOut = h('div');
+  // Entri yang posisinya tidak cocok: tampilkan, lalu tawarkan pencocokan ulang lewat teks asli (fitur Selamatkan)
+  const warnCard = (r) => {
+    if (!r.bad?.length) return '';
+    const wm = h('p', { class: 'mut' }), wb = h('button', { onclick: async () => {
+      wb.disabled = true; wm.className = 'mut'; wm.textContent = 'Mencocokkan ulang…';
+      try {
+        await dbPutMany('entries', r.bad.map((e) => ({ ...e, status: 'skipped', error: 'Tidak ada di game asli' })));
+        const x = await rescueSkipped(p, (t) => { wm.textContent = t; });
+        wm.textContent = `Selesai. Cocok ulang ${x.exact + x.fuzzy} dari ${x.orphans} teks (persis ${x.exact}, mirip ${x.fuzzy}). Belum cocok: ${x.left}${x.bad ? `, file gagal dibaca: ${x.bad}` : ''}.\nTekan Buat patch lagi.`;
+      } catch (e) { wm.className = 'err'; wm.textContent = `Gagal: ${e.message || e}`; }
+      wb.disabled = false;
+    } }, 'Cocokkan ulang teks yang dilewati');
+    return card(h('h2', {}, `${r.bad.length} teks dilewati`),
+      h('p', { class: 'mut' }, 'Posisinya tidak cocok dengan file asli proyek sekarang, jadi teks ini tetap asli di patch. Teks lainnya tetap ikut diekspor. Tombol di bawah menandainya lalu mencocokkannya ulang lewat teks asli; terjemahannya tidak dihapus.'),
+      r.warnings.slice(0, 10).map((x) => h('p', { class: 'mut' }, x)), r.warnings.length > 10 ? h('p', { class: 'mut' }, `…dan ${r.warnings.length - 10} lainnya (lengkap di patch-report.txt)`) : '', wb, wm);
+  };
   const btn = h('button', { class: 'pri', onclick: async () => {
     btn.disabled = true; out.replaceChildren(h('p', { class: 'mut' }, 'Memeriksa dengan diff guard…'));
     try {
       const r = await exportProject(p, cfg.model, cfg.wrapWidth || cfg.wrapFace ? { width: cfg.wrapWidth, face: cfg.wrapFace } : null);
       if (!r.ok) out.replaceChildren(card(h('h2', {}, 'Ekspor dibatalkan'),
-        h('p', { class: 'err' }, r.empty ? UI.exportEmpty : 'Diff guard menolak hasil. Tidak ada file dibuat. Perbaiki lalu coba lagi'), r.problems.map((x) => h('p', { class: 'mut' }, x))));
+        h('p', { class: 'err' }, r.empty ? UI.exportEmpty : 'Diff guard menolak hasil. Tidak ada file dibuat. Perbaiki lalu coba lagi'), r.problems.map((x) => h('p', { class: 'mut' }, x))), warnCard(r));
       else {
         if (exportUrl) URL.revokeObjectURL(exportUrl);
         exportUrl = URL.createObjectURL(r.blob);
@@ -2205,7 +2233,7 @@ async function viewEkspor() {
                 rgMsg.textContent = `Selesai. ${x.replaced} file data diganti${x.missing.length ? `, ${x.missing.length} tidak ada di arsip dan dilewati` : ''}. Ukuran ${(x.blob.size / 1048576).toFixed(1)} MB`;
                 rgOut.replaceChildren(h('a', { class: 'file', href: rgUrl, download: 'Game.rgss3a' }, 'Unduh Game.rgss3a'));
               } catch (e) { rgMsg.className = 'err'; rgMsg.textContent = e.message; }
-            } })), rgMsg, rgOut) : ''));
+            } })), rgMsg, rgOut) : ''), warnCard(r));
       }
     } catch (e) { out.replaceChildren(card(h('p', { class: 'err' }, e.message))); }
     btn.disabled = false;
