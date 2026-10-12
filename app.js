@@ -572,6 +572,29 @@ const normPluginsPath = (p) => ((p.replace(/\\/g, '/').match(/(?:^|\/)(www\/)?js
 // Event: 320 ganti nama, 324 ganti nickname, 325 ganti profil aktor (parameters[1] = teks).
 const NAME_CODES = new Set([320, 324, 325]);
 // System: daftar tipe berupa array string.
+/**
+ * Diagnostik: hitung perintah Script (kode 355/655) yang berisi kalimat Inggris/Jepang di dalam tanda kutip.
+ * Hanya membaca, tidak mengubah apa pun. Dipakai untuk mengetahui apakah teks game bersembunyi di script call.
+ */
+export function scanScriptCalls(json) {
+  const r = { cmds: 0, hits: 0, samples: [] };
+  const sentence = (s) => JA.test(s) || (/[A-Za-z][A-Za-z']*(?:\s+[A-Za-z][A-Za-z',.!?]*){2,}/.test(s) && detectLang(s) === 'en');
+  const walk = (v) => {
+    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (!v || typeof v !== 'object') return;
+    if ((v.code === 355 || v.code === 655) && Array.isArray(v.parameters) && typeof v.parameters[0] === 'string') {
+      r.cmds++;
+      for (const m of v.parameters[0].matchAll(/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g)) {
+        const t = (m[1] ?? m[2]).trim();
+        if (t && sentence(t)) { r.hits++; if (r.samples.length < 3) r.samples.push(t.slice(0, 60)); }
+      }
+      return;
+    }
+    for (const k of Object.keys(v)) if (!k.startsWith('__')) walk(v[k]);
+  };
+  walk(json);
+  return r;
+}
 const SYS_LISTS = ['skillTypes', 'weaponTypes', 'armorTypes', 'equipTypes', 'elements'];
 const SYS_LISTS_ACE = ['skill_types', 'weapon_types', 'armor_types', 'elements'];
 export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
@@ -843,10 +866,16 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
   const { engine: eng, data, plugins } = await collectSources(files);
   if (!data.size) throw new Error(UI.noData);
   const id = 'p' + Date.now().toString(36), orig = [], entries = [], broken = [], counts = {};
+  const scriptDiag = { cmds: 0, hits: 0, files: [], samples: [] };
   let sys = null, i = 0, msgPlugins = [], pluginsSeen = false, pluginsText = '';
   if (plugins) try { pluginsText = await plugins.read(); msgPlugins = detectMessagePlugins(pluginsText); pluginsSeen = true; } catch { /* plugins.js tidak terbaca */ }
   const ingest = async (path, json, text) => {
     orig.push({ key: `${id}:${path}`, projectId: id, path, text });
+    if (/\.rvdata2$/i.test(path) && json && typeof json === 'object') {
+      const d = scanScriptCalls(json);
+      scriptDiag.cmds += d.cmds; scriptDiag.hits += d.hits;
+      if (d.hits) { scriptDiag.files.push([path.split('/').pop(), d.hits]); if (scriptDiag.samples.length < 5) scriptDiag.samples.push(...d.samples.slice(0, 5 - scriptDiag.samples.length)); }
+    }
     for (const e of extractFile(path, json, { src, allow })) {
       e.projectId = id; e.hash = await sha256(e.original); entries.push(e);
       counts[e.category] = (counts[e.category] || 0) + 1;
@@ -870,7 +899,7 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
     else paramNote = pluginsText ? 'js/plugins.js tidak bisa dibaca (bukan array JSON murni), parameter plugin dilewati' : 'js/plugins.js tidak ikut dipilih, parameter plugin dilewati';
   }
   const engine = eng || (sys && (sys.advanced || sys.itemCategories) ? 'MZ' : 'MV');
-  const project = { id, engine, src, tgt: 'id', msgPlugins, pluginsSeen, allow, paramNote, files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
+  const project = { id, engine, src, tgt: 'id', scriptDiag, msgPlugins, pluginsSeen, allow, paramNote, files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
   onProgress(`Menyimpan ${entries.length} teks…`, data.size, data.size);
   await dbPutMany('origFiles', orig);
   await dbPutMany('entries', entries);
@@ -1377,6 +1406,13 @@ async function viewProyek() {
   if (p) out.push(card(h('h2', {}, 'Ringkasan'),
     h('p', { class: 'mut' }, `Engine: ${p.engine}\nSumber: ${srcLabel(p.src)}\nFile data: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\nPlugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan)` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`),
     p.paramNote ? h('p', { class: 'err' }, p.paramNote) : '',
+    p.engine === 'VX Ace' ? (() => {
+      const d = p.scriptDiag;
+      if (!d) return h('p', { class: 'mut' }, 'Diagnostik script call: impor ulang proyek ini untuk menghitung.');
+      const top = d.files.sort((a, b) => b[1] - a[1]).slice(0, 5).map(([f, n]) => `${f} (${n})`).join(', ');
+      return h('p', { class: d.hits ? 'err' : 'mut' }, `Diagnostik script call: ${d.cmds} perintah Script, ${d.hits} berisi kalimat Inggris/Jepang.` +
+        (d.hits ? `\nTerbanyak: ${top}\nContoh: ${d.samples.map((x) => `"${x}"`).join(' | ')}\nTeks ada di script call, perlu pembaca khusus.` : '\nNol: teks kemungkinan dari Scripts.rvdata2 (belum dipindai).'));
+    })() : '',
     p.total ? '' : h('p', { class: 'err' }, UI.emptyImp),
     Object.entries(p.counts).map(([k, v]) => h('span', { class: 'badge' }, `${k} ${v}`)),
     (() => {
