@@ -1484,26 +1484,75 @@ async function currentProject() {
 }
 let importNote = null;
 const CODE_NAME = { 101: 'Show Text', 401: 'baris Show Text', 102: 'Show Choices', 402: 'cabang pilihan', 105: 'Scroll Text', 405: 'baris Scroll Text', 108: 'Comment', 408: 'lanjutan Comment', 355: 'Script', 655: 'lanjutan Script', 356: 'Plugin Command', 357: 'Plugin Command MZ' };
-/** Cari potongan teks di semua data asli proyek dan laporkan lokasinya (file, jenis perintah, path). Hanya membaca. */
-export async function searchOrig(projectId, needle, max = 30) {
-  const q = needle.trim().toLowerCase(), res = [];
-  if (!q) return res;
-  for (const f of await dbPrefix('origFiles', projectId + ':')) {
-    if (res.length >= max || !f.text.toLowerCase().includes(q)) continue;
+/** Normalisasi untuk pencarian: buang kode escape, spasi, tanda baca; samakan lebar huruf. */
+const searchNorm = (t) => String(t).normalize('NFKC').replace(ESC, '').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+/** Hitung bigram karakter (multiset) sebagai Map gram -> jumlah. */
+const searchGrams = (n) => {
+  const m = new Map();
+  if (n.length < 2) { m.set(n, 1); return m; }
+  for (let i = 0; i < n.length - 1; i++) { const g = n.slice(i, i + 2); m.set(g, (m.get(g) || 0) + 1); }
+  return m;
+};
+/**
+ * Cari teks di semua data asli proyek dan laporkan lokasinya (file, jenis perintah, path). Hanya membaca.
+ * Cocok persis (potongan teks) = 100%. Kalau tidak persis, dihitung kemiripan (bigram karakter) dan hasil
+ * dengan skor >= minScore ditampilkan, terurut dari yang paling mirip. Baris Show Text/Scroll/Comment/Script
+ * yang berurutan juga digabung sebagai satu kandidat, supaya kalimat panjang yang dipecah per baris tetap ketemu.
+ * Query yang terlalu pendek (< 6 karakter setelah normalisasi) hanya dicocokkan persis.
+ * @returns {Promise<Array<{file:string, code:(number|undefined), path:string, text:string, score:number, lines:number}>>}
+ */
+export async function searchOrig(projectId, needle, max = 30, minScore = 60, onProgress = () => {}) {
+  const qn = searchNorm(needle), res = [];
+  if (!qn) return res;
+  const fuzzy = qn.length >= 6, qg = searchGrams(qn);
+  let qTotal = 0; for (const c of qg.values()) qTotal += c;
+  const consider = (raw, file, path, cmd, lines) => {
+    const n = searchNorm(raw);
+    if (n.length < 2) return;
+    let score;
+    if (n.includes(qn)) score = 100;
+    else {
+      if (!fuzzy || n.length < qn.length * 0.4 || n.length > qn.length * 8) return;
+      const g = searchGrams(n); let gTotal = 0, inter = 0;
+      for (const c of g.values()) gTotal += c;
+      for (const [k, c] of qg) { const d = g.get(k); if (d) inter += Math.min(c, d); }
+      const dice = (2 * inter) / (qTotal + gTotal), cover = n.length > qn.length ? (inter / qTotal) * 0.85 : 0;
+      score = Math.round(100 * Math.max(dice, cover));
+    }
+    if (score < minScore) return;
+    res.push({ file, code: cmd?.code, path: path.join('/'), text: String(raw).replace(/\s+/g, ' ').slice(0, 100), score, lines });
+    if (res.length > max * 4) { res.sort((x, y) => y.score - x.score); res.length = max * 2; }
+  };
+  const LINE = new Set([401, 405, 408, 655]);
+  const files = await dbPrefix('origFiles', projectId + ':');
+  let i = 0;
+  for (const f of files) {
+    if (++i % 6 === 0) { onProgress(i, files.length); await new Promise((r) => setTimeout(r, 0)); }
     let json; try { json = JSON.parse(f.text); } catch { continue; }
+    const file = f.path.split('/').pop();
     const walk = (v, path, cmd) => {
-      if (res.length >= max) return;
-      if (typeof v === 'string') {
-        if (v.toLowerCase().includes(q)) res.push({ file: f.path.split('/').pop(), code: cmd?.code, path: path.join('/'), text: v.replace(/\s+/g, ' ').slice(0, 70) });
+      if (typeof v === 'string') { consider(v, file, path, cmd, 1); return; }
+      if (!v || typeof v !== 'object') return;
+      if (Array.isArray(v)) {
+        // gabungkan baris berurutan dengan kode sama (mis. 401 untuk satu pesan)
+        let run = [], first = null, start = -1;
+        const flush = () => { if (run.length > 1) consider(run.join(' '), file, [...path, start, 'parameters', 0], first, run.length); run = []; first = null; };
+        v.forEach((x, k) => {
+          const isLine = x && typeof x === 'object' && !Array.isArray(x) && LINE.has(x.code) && typeof x.parameters?.[0] === 'string';
+          if (isLine && first && first.code !== x.code) flush();
+          if (isLine) { if (!first) { first = x; start = k; } run.push(x.parameters[0]); } else flush();
+        });
+        flush();
+        v.forEach((x, k) => walk(x, [...path, k], cmd));
         return;
       }
-      if (!v || typeof v !== 'object') return;
-      const c = !Array.isArray(v) && typeof v.code === 'number' ? v : cmd;
+      const c = typeof v.code === 'number' ? v : cmd;
       for (const k of Object.keys(v)) if (!k.startsWith('__')) walk(v[k], [...path, k], c);
     };
     walk(json, [], null);
   }
-  return res;
+  res.sort((x, y) => y.score - x.score);
+  return res.slice(0, max);
 }
 async function viewProyek() {
   const msg = h('p', { class: 'mut' }), bar = h('progress', { value: '0', max: '1', hidden: '' });
@@ -1559,13 +1608,16 @@ async function viewProyek() {
       return h('div', {}, b, st);
     })()));
   if (p) {
-    const q = h('input', { type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: 'mis. taste setting' }), res = h('p', { class: 'mut' });
-    out.push(card(h('h2', {}, 'Cari teks di data game'), h('p', { class: 'mut' }, 'Ketik potongan teks yang belum berubah di game (bahasa aslinya). Hasilnya menunjukkan file dan jenis perintah tempat teks itu berada. Tidak ada hasil berarti teksnya bukan di file data yang diimpor.'), q,
+    const q = h('textarea', { rows: '3', autocomplete: 'off', spellcheck: 'false', placeholder: 'mis. taste setting, atau satu kalimat panjang' }), res = h('p', { class: 'mut' });
+    const minIn = h('input', { type: 'number', min: '30', max: '100', value: '60', inputmode: 'numeric' });
+    out.push(card(h('h2', {}, 'Cari teks di data game'), h('p', { class: 'mut' }, 'Ketik potongan teks atau kalimat yang belum berubah di game (bahasa aslinya). Cocok persis tampil 100%; selain itu dicari yang mirip dan ditampilkan dengan persentase kemiripan. Kalimat yang dipecah per baris di game juga ikut dicocokkan. Query kurang dari 6 karakter hanya dicari persis.'), q,
+      h('label', { class: 'mut' }, 'Minimal mirip (%): '), minIn,
       h('button', { onclick: async (ev) => {
         const b = ev.currentTarget; b.disabled = true; res.className = 'mut'; res.textContent = 'Mencari…';
         try {
-          const r = await searchOrig(p.id, q.value);
-          res.textContent = r.length ? r.map((x) => `${x.file} | ${x.code === undefined ? 'field data' : `kode ${x.code} (${CODE_NAME[x.code] || 'lainnya'})`}\n${x.path}\n"${x.text}"`).join('\n\n') : 'Tidak ditemukan di file data yang diimpor.';
+          const minScore = Math.min(100, Math.max(30, Number(minIn.value) || 60));
+          const r = await searchOrig(p.id, q.value, 30, minScore, (d, n) => { res.textContent = `Mencari… ${d}/${n} file`; });
+          res.textContent = r.length ? r.map((x) => `${x.score}% | ${x.file} | ${x.code === undefined ? 'field data' : `kode ${x.code} (${CODE_NAME[x.code] || 'lainnya'})`}${x.lines > 1 ? ` | gabungan ${x.lines} baris` : ''}\n${x.path}\n"${x.text}"`).join('\n\n') : `Tidak ada yang mirip minimal ${minScore}% di file data yang diimpor. Coba turunkan persentasenya.`;
         } catch (e) { res.className = 'err'; res.textContent = e?.message || String(e); }
         b.disabled = false;
       } }, 'Cari'), res));
