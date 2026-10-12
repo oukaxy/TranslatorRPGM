@@ -634,7 +634,7 @@ const SYS_LISTS = ['skillTypes', 'weaponTypes', 'armorTypes', 'equipTypes', 'ele
 const SYS_LISTS_ACE = ['skill_types', 'weapon_types', 'armor_types', 'elements'];
 /**
  * Klasifikasi baris Comment. false = lewati (kode/konfigurasi). 'comment' = kemungkinan teks tampil
- * (kalimat panjang atau berkode escape pesan seperti \\>). 'comment-label' = label pendek, biasanya catatan developer.
+ * berkode escape pesan seperti \\>. 'comment-teks' = kalimat panjang tanpa kode. 'comment-label' = label pendek, biasanya catatan developer. Dua yang terakhir lebih berisiko: bisa jadi konfigurasi script.
  */
 export function isCommentText(s, src = 'ja') {
   if (!isTranslatable(s, src)) return false;
@@ -643,7 +643,7 @@ export function isCommentText(s, src = 'ja') {
   const words = (t.match(/[A-Za-z']+/g) || []).length, ja = JA.test(t), esc = s.replace(ESC, '') !== s;
   if (!ja && words < 3) return false;
   const long = ja ? t.length >= 10 || /[。！？…」』]$/.test(t) : words >= 4;
-  return esc || long ? 'comment' : 'comment-label';
+  return esc ? 'comment' : long ? 'comment-teks' : 'comment-label';
 }
 export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
   const A = allowSets(allow);
@@ -964,6 +964,42 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
   return project;
 }
 
+/**
+ * Pulihkan teks field dari game asli (yang belum diubah) ke data tersimpan proyek, hanya untuk kategori terpilih.
+ * Data asli proyek ditulis ulang pada path itu, entri direset ke pending (atau dibuat bila belum ada).
+ * Hanya kind 'field' (mis. comment); blok dialog dan pilihan dilewati. Struktur file tidak berubah.
+ * @returns {{matched:number, restored:number, created:number, nofile:number, bad:number}}
+ */
+export async function restoreFromPristine(project, files, cats, onProgress = () => {}) {
+  const { data } = await collectSources(files), base = (x) => x.split('/').pop().toLowerCase();
+  const byBase = new Map([...data].map(([k, v]) => [base(k), v]));
+  const stored = await dbPrefix('origFiles', project.id + ':'), ents = await dbQuery('entries', 'projectId', project.id);
+  const byKey = new Map(ents.map((e) => [`${e.file}|${e.path}`, e]));
+  const res = { matched: 0, restored: 0, created: 0, nofile: 0, bad: 0 }, newOrig = [], out = [];
+  let i = 0;
+  for (const f of stored) {
+    onProgress(`Memeriksa ${base(f.path)} (${++i} dari ${stored.length})`, i, stored.length);
+    if (i % 10 === 0) await new Promise((r) => setTimeout(r));
+    const item = byBase.get(base(f.path));
+    if (!item) { res.nofile++; continue; }
+    let pj; try { pj = /\.rvdata2$/i.test(f.path) ? marshalToView(await item.readBin()) : JSON.parse(await item.read()); } catch { res.bad++; continue; }
+    res.matched++;
+    const mine = JSON.parse(f.text); let changed = false;
+    for (const e of extractFile(f.path, pj, { src: project.src, allow: project.allow })) {
+      if (e.kind !== 'field' || !cats.has(e.category)) continue;
+      const pa = JSON.parse(e.path), parent = getAt(mine, pa.slice(0, -1)), key = pa.at(-1);
+      if (typeof parent?.[key] !== 'string') { res.bad++; continue; }
+      if (parent[key] !== e.original) { parent[key] = e.original; changed = true; }
+      const old = byKey.get(`${f.path}|${e.path}`), hash = await sha256(e.original);
+      if (old) { out.push({ ...old, original: e.original, category: e.category, translation: '', status: 'pending', error: '', hash }); res.restored++; }
+      else { out.push({ ...e, file: f.path, projectId: project.id, hash }); res.created++; }
+    }
+    if (changed) newOrig.push({ ...f, text: JSON.stringify(mine) });
+  }
+  if (newOrig.length) await dbPutMany('origFiles', newOrig);
+  if (out.length) await dbPutMany('entries', out);
+  return res;
+}
 // ===== 4b. GLOSARIUM & EDIT MANUAL (CSV/JSON) =====
 /** Glosarium: satu baris "sumber = terjemahan". Baris berawalan # diabaikan. Diurut dari istilah terpanjang. */
 export function parseGlossary(text = '') {
@@ -1524,6 +1560,24 @@ async function viewProyek() {
         } catch (e) { res.className = 'err'; res.textContent = e?.message || String(e); }
         b.disabled = false;
       } }, 'Cari'), res));
+    // Pulihkan kategori tertentu dari game asli yang belum diubah (mis. comment yang terlanjur salah).
+    const cats = [...new Set([...Object.keys(p.counts || {}), 'comment', 'comment-teks', 'comment-label'])], pickC = new Set(cats.filter((c) => /^comment/.test(c)));
+    const rmsg = h('p', { class: 'mut' }), rbar = h('progress', { value: '0', max: '1', hidden: '' });
+    const doRestore = async (ev) => {
+      const fs = [...ev.target.files]; ev.target.value = ''; if (!fs.length) return;
+      if (!pickC.size) { rmsg.className = 'err'; rmsg.textContent = 'Centang minimal satu kategori'; return; }
+      rbar.hidden = false; rmsg.className = 'mut'; rmsg.textContent = 'Membaca game asli…';
+      try {
+        const r = await restoreFromPristine(p, fs, pickC, (t, d, n) => { rmsg.textContent = t; rbar.max = n; rbar.value = d; });
+        rmsg.textContent = `Selesai. File cocok: ${r.matched} (tidak ada di game asli: ${r.nofile}, gagal dibaca: ${r.bad})\nDipulihkan: ${r.restored}, dibuat baru: ${r.created}\nSekarang ekspor ulang dan timpa folder Data. Teks yang dipulihkan berstatus pending.`;
+      } catch (e) { rmsg.className = 'err'; rmsg.textContent = e?.message || String(e); }
+      rbar.hidden = true;
+    };
+    const pickR = (label, attrs) => h('label', { class: 'file' }, label, h('input', { type: 'file', onchange: doRestore, ...attrs }));
+    out.push(card(h('h2', {}, 'Pulihkan dari game asli'),
+      h('p', { class: 'mut' }, 'Untuk teks yang terlanjur diubah dan tidak punya backup. Pilih game asli yang belum diubah dan kategori yang mau dikembalikan. Data proyek pada kategori itu ditimpa dengan teks asli dari game, terjemahan kategori itu dikosongkan, kategori lain tidak disentuh. Hanya teks bertipe field (seperti comment), bukan blok dialog.'),
+      cats.map((c) => h('label', { class: 'row' }, h('input', { type: 'checkbox', ...(pickC.has(c) ? { checked: '' } : {}), onchange: (e) => { e.target.checked ? pickC.add(c) : pickC.delete(c); } }), ` ${c}`)),
+      pickR('Pilih folder data asli', { webkitdirectory: '', multiple: '' }), pickR('Pilih zip game asli', { accept: '.zip' }), pickR('Pilih Game.rgss3a asli', {}), rbar, rmsg));
   }
   return out;
 }
@@ -1566,7 +1620,7 @@ async function viewTranslate() {
   const cfg = await loadConfig(), all = await dbQuery('entries', 'projectId', p.id);
   // Kategori yang masih punya teks belum diterjemahkan (pending/error). Default: semua terpilih.
   const todoBy = new Map(); all.filter((e) => TODO.has(e.status)).forEach((e) => todoBy.set(e.category, (todoBy.get(e.category) || 0) + 1));
-  if (catSel.pid !== p.id || !catSel.set) { catSel.pid = p.id; catSel.set = new Set([...todoBy.keys()].filter((k) => k !== 'comment-label')); }
+  if (catSel.pid !== p.id || !catSel.set) { catSel.pid = p.id; catSel.set = new Set([...todoBy.keys()].filter((k) => k !== 'comment-label' && k !== 'comment-teks')); }
   for (const k of [...catSel.set]) if (!todoBy.has(k)) catSel.set.delete(k);
   const pickedAll = [...todoBy.keys()].every((k) => catSel.set.has(k));
   const scoped = pickedAll ? all : all.filter((e) => !TODO.has(e.status) || catSel.set.has(e.category));
@@ -1595,7 +1649,19 @@ async function viewTranslate() {
         h('input', { type: 'checkbox', ...(catSel.set.has(k) ? { checked: '' } : {}), onchange: (e) => { e.target.checked ? catSel.set.add(k) : catSel.set.delete(k); render(); } }), ` ${k} (${n})`)),
       h('div', { class: 'row' },
         h('button', { onclick: () => { catSel.set = new Set(todoBy.keys()); render(); } }, 'Pilih semua'),
-        h('button', { onclick: () => { catSel.set = new Set(); render(); } }, 'Kosongkan'))) : '',
+        h('button', { onclick: () => { catSel.set = new Set(); render(); } }, 'Kosongkan')),
+      (() => {
+        const back = all.filter((e) => catSel.set.has(e.category) && e.status !== 'pending');
+        if (!back.length) return '';
+        let armed = false, tm = 0; const msg = h('p', { class: 'mut' });
+        const b = h('button', { onclick: async () => {
+          if (!armed) { armed = true; b.textContent = `Yakin? Ketuk lagi: ${back.length} teks dikosongkan`; tm = setTimeout(() => { armed = false; b.textContent = 'Kembalikan ke teks asli'; }, 5000); return; }
+          clearTimeout(tm); b.disabled = true;
+          await dbPutMany('entries', back.map((e) => ({ ...e, translation: '', status: 'pending', error: '' })));
+          await render();
+        } }, 'Kembalikan ke teks asli');
+        return h('div', {}, h('p', { class: 'mut' }, 'Batalkan terjemahan kategori yang dicentang: hasilnya dikosongkan dan saat ekspor teks itu kembali seperti data yang kamu impor.'), b, msg);
+      })()) : '',
     cnt('done') ? (() => {
       const m = h('p', { class: 'mut' });
       return card(h('h2', {}, 'Periksa hasil'), h('p', { class: 'mut' }, 'Cari terjemahan yang masih bercampur huruf Jepang atau asing (setengah terjemah). Yang ketemu ditandai error supaya bisa diterjemahkan ulang lewat tombol Lanjutkan. Terjemahan yang kamu edit manual tidak disentuh.'),
