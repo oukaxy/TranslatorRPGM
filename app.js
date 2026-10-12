@@ -975,26 +975,35 @@ export async function restoreFromPristine(project, files, cats, onProgress = () 
   const byBase = new Map([...data].map(([k, v]) => [base(k), v]));
   const stored = await dbPrefix('origFiles', project.id + ':'), ents = await dbQuery('entries', 'projectId', project.id);
   const byKey = new Map(ents.map((e) => [`${e.file}|${e.path}`, e]));
-  const res = { matched: 0, restored: 0, created: 0, nofile: 0, bad: 0 }, newOrig = [], out = [];
+  const res = { matched: 0, restored: 0, created: 0, nofile: 0, bad: 0, badField: 0, badNames: [], skipped: 0 }, newOrig = [], out = [];
   let i = 0;
   for (const f of stored) {
     onProgress(`Memeriksa ${base(f.path)} (${++i} dari ${stored.length})`, i, stored.length);
     if (i % 10 === 0) await new Promise((r) => setTimeout(r));
     const item = byBase.get(base(f.path));
     if (!item) { res.nofile++; continue; }
-    let pj; try { pj = /\.rvdata2$/i.test(f.path) ? marshalToView(await item.readBin()) : JSON.parse(await item.read()); } catch { res.bad++; continue; }
+    let pj; try { pj = /\.rvdata2$/i.test(f.path) ? marshalToView(await item.readBin()) : JSON.parse(await item.read()); } catch { res.bad++; if (res.badNames.length < 5) res.badNames.push(base(f.path)); continue; }
     res.matched++;
     const mine = JSON.parse(f.text); let changed = false;
     for (const e of extractFile(f.path, pj, { src: project.src, allow: project.allow })) {
       if (e.kind !== 'field' || !cats.has(e.category)) continue;
       const pa = JSON.parse(e.path), parent = getAt(mine, pa.slice(0, -1)), key = pa.at(-1);
-      if (typeof parent?.[key] !== 'string') { res.bad++; continue; }
+      if (typeof parent?.[key] !== 'string') { res.badField++; continue; }
       if (parent[key] !== e.original) { parent[key] = e.original; changed = true; }
       const old = byKey.get(`${f.path}|${e.path}`), hash = await sha256(e.original);
       if (old) { out.push({ ...old, original: e.original, category: e.category, translation: '', status: 'pending', error: '', hash }); res.restored++; }
       else { out.push({ ...e, file: f.path, projectId: project.id, hash }); res.created++; }
     }
     if (changed) newOrig.push({ ...f, text: JSON.stringify(mine) });
+  }
+  // Entri lama di kategori terpilih yang sudah tidak diekstrak filter baru.
+  // Teks asli di origFiles tidak pernah diubah, jadi cukup kosongkan terjemahannya.
+  const touched = new Set(out.map((x) => x.id).filter(Boolean));
+  for (const e of ents) {
+    if (e.kind !== 'field' || !cats.has(e.category) || touched.has(e.id)) continue;
+    if (e.status === 'skipped' && !e.translation) continue;
+    out.push({ ...e, translation: '', status: 'skipped', error: '' });
+    res.skipped++;
   }
   if (newOrig.length) await dbPutMany('origFiles', newOrig);
   if (out.length) await dbPutMany('entries', out);
@@ -1569,7 +1578,7 @@ async function viewProyek() {
       rbar.hidden = false; rmsg.className = 'mut'; rmsg.textContent = 'Membaca game asli…';
       try {
         const r = await restoreFromPristine(p, fs, pickC, (t, d, n) => { rmsg.textContent = t; rbar.max = n; rbar.value = d; });
-        rmsg.textContent = `Selesai. File cocok: ${r.matched} (tidak ada di game asli: ${r.nofile}, gagal dibaca: ${r.bad})\nDipulihkan: ${r.restored}, dibuat baru: ${r.created}\nSekarang ekspor ulang dan timpa folder Data. Teks yang dipulihkan berstatus pending.`;
+        rmsg.textContent = `Selesai. File cocok: ${r.matched} (tidak ada di game asli: ${r.nofile}, gagal dibaca: ${r.bad})\nField tidak cocok: ${r.badField}\nContoh file gagal: ${r.badNames.join(', ') || '-'}\nDipulihkan: ${r.restored}, dibuat baru: ${r.created}, dilewati (skipped): ${r.skipped}\nSekarang ekspor ulang dan timpa folder Data. Teks yang dipulihkan berstatus pending.`;
       } catch (e) { rmsg.className = 'err'; rmsg.textContent = e?.message || String(e); }
       rbar.hidden = true;
     };
