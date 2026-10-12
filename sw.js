@@ -1,7 +1,7 @@
 // Service worker: cache app shell agar bisa dibuka offline.
 // Hanya menyentuh cache berawalan "rpgtl-shell-" dan hanya request same-origin.
 // Panggilan ke provider LLM (cross-origin) tidak pernah dicegat.
-const VERSION = 'rpgtl-shell-v16';
+const VERSION = 'rpgtl-shell-v17';
 const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'manifest.json'];
 
 self.addEventListener('install', (e) => {
@@ -32,15 +32,16 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // Aset: pakai cache, perbarui di belakang layar.
+  // Aset: jaringan dulu supaya deploy baru langsung terpakai, cache bila offline.
   e.respondWith(
     caches.open(VERSION).then(async (c) => {
-      const hit = await c.match(req);
-      const net = fetch(req, { cache: 'no-cache' }).then((res) => {
+      try {
+        const res = await fetch(req, { cache: 'no-cache' });
         if (res.ok) c.put(req, res.clone());
         return res;
-      }).catch(() => hit);
-      return hit || net;
+      } catch {
+        return (await c.match(req)) || Response.error();
+      }
     })
   );
 });
