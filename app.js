@@ -2042,7 +2042,23 @@ async function viewSettings() {
     h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')), msg),
   card(h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn)];
 }
-const FILTERS = [['all', 'Semua'], ['pending', 'Pending'], ['error', 'Error'], ['edited', 'Diedit']];
+const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped']];
+/** Filter khusus: cari teks asli yang memuat kode/fungsi tertentu. Dicocokkan ke teks asli (kode game ada di sana). */
+const FUNC_FILTERS = [
+  ['any', 'Semua jenis kode/fungsi', null],
+  ['esc', 'Ada kode escape apa pun', () => new RegExp(ESC.source)],
+  ['v', 'Variabel \\V[n] / v[n]', /\\v\[\d+\]|\bv\[\d+\]/i],
+  ['s', 'Switch s[n]', /\bs\[\d+\]/i],
+  ['n', 'Nama aktor \\N[n] / \\P[n]', /\\[np]\[\d+\]/i],
+  ['c', 'Warna \\C[n]', /\\c\[(?:\d+|#[0-9a-f]{3,8})\]/i],
+  ['i', 'Ikon \\I[n]', /\\i\[\d+\]/i],
+  ['fn', 'Pemanggilan fungsi, mis. if(...)', /\b[A-Za-z_]\w*\([^)\n]*(?:\[\d+\]|\\[A-Za-z]+\[)/],
+  ['kw', 'Kata kunci script (if, else, var, return...)', /\b(?:if|else|elsif|unless|while|for|var|let|const|return|function|def|end|true|false|nil|null)\b/],
+  ['game', 'Objek $game...', /\$game[A-Za-z]+/],
+  ['ctl', 'Kontrol \\{ \\} \\. \\| \\! \\^ \\> \\< \\$ \\G', /\\[{}.|!^><$gG]/],
+  ['tag', 'Tag <...>', /<\/?[A-Za-z][^>\n]{0,40}>/],
+  ['ph', 'Placeholder %1', /%\d/],
+];
 const longLine = (t) => t.split('\n').some((l) => stripEscapes(l).length > LINE_WARN);
 /** Ganti kata di terjemahan. Kode escape tidak disentuh. Mengembalikan {text, count}. */
 function replaceWord(text, find, rep, { whole = true, ignoreCase = true } = {}) {
@@ -2059,9 +2075,25 @@ async function viewReview() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
   const rows = (await dbQuery('entries', 'projectId', p.id)).sort((a, b) => a.id - b.id);
-  let filter = 'all', cat = 'all', q = '', page = 0;
+  let filter = 'all', cat = 'all', fn = 'any', mode = 'loose', q = '', qRaw = '', qRe = null, page = 0;
   const origNorm = new WeakMap(), normOf = (e) => { let v = origNorm.get(e); if (v === undefined) { v = searchNorm(e.original); origNorm.set(e, v); } return v; };
   const box = h('div'), info = h('p', { class: 'mut' });
+  let qErr = '';
+  const fnTest = (k) => { const f = FUNC_FILTERS.find((x) => x[0] === k); if (!f || !f[2]) return null; return typeof f[2] === 'function' ? f[2]() : f[2]; };
+  // Cocokkan kata kunci ke teks asli + terjemahan. 'loose' = abaikan spasi/tanda baca/kode (lama); 'exact' = potongan literal apa adanya (cocok untuk \v[, (\v, if); 'regex' = ekspresi reguler.
+  const matchText = (e) => {
+    if (!qRaw) return true;
+    const k = qRaw.toLowerCase(), lit = e.original.toLowerCase().includes(k) || (e.translation || '').toLowerCase().includes(k);
+    if (mode === 'loose' && q) return lit || normOf(e).includes(q) || searchNorm(e.translation || '').includes(q);
+    if (mode === 'regex') return qErr ? true : !!qRe && (qRe.test(e.original) || qRe.test(e.translation || ''));
+    return lit;
+  };
+  const setQuery = (v) => {
+    qRaw = v; q = searchNorm(v); qRe = null; qErr = '';
+    // Kueri yang isinya cuma tanda baca/kode tidak punya bentuk 'loose'; otomatis dicari persis supaya tidak menampilkan semua teks.
+    if (mode === 'regex' && v) { try { qRe = new RegExp(v, 'iu'); } catch (x) { qErr = `Regex tidak valid: ${x.message}`; } }
+    page = 0; fill();
+  };
   const rowCard = (e) => {
     const st = h('span', { class: 'badge' }, e.status), warn = h('span', { class: 'badge warn' }, 'baris panjang'), msg = h('p', { class: 'err' }, e.error);
     warn.hidden = !longLine(e.translation);
@@ -2082,19 +2114,27 @@ async function viewReview() {
     return card(h('span', { class: 'badge' }, e.category), st, warn, h('p', { class: 'mut' }, e.original), ta, msg, rt);
   };
   const fill = () => {
-    const list = rows.filter((e) => (filter === 'all' || e.status === filter) && (cat === 'all' || e.category === cat) && (!q || normOf(e).includes(q) || searchNorm(e.translation || '').includes(q)));
+    const fnRe = fnTest(fn);
+    const list = rows.filter((e) => (filter === 'all' || e.status === filter) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
     const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE)); page = Math.min(page, pages - 1);
-    info.textContent = `${list.length} teks`;
+    info.textContent = qErr ? qErr : `${list.length} teks`; info.className = qErr ? 'err' : 'mut';
     const go = (n) => () => { page = n; fill(); scrollTo(0, 0); };
     box.replaceChildren(...list.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map(rowCard),
       h('div', { class: 'row' }, h('button', { onclick: go(page - 1), ...(page ? {} : { disabled: '' }) }, 'Sebelumnya'),
         h('button', { onclick: go(page + 1), ...(page < pages - 1 ? {} : { disabled: '' }) }, `Berikutnya (${page + 1}/${pages})`)));
   };
-  const sel = h('select', { onchange: (e) => { filter = e.target.value; page = 0; fill(); } }, FILTERS.map(([v, t]) => h('option', { value: v }, t)));
+  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1));
+  const sel = h('select', { 'aria-label': 'Filter status', onchange: (e) => { filter = e.target.value; page = 0; fill(); } }, FILTERS.map(([v, t]) => h('option', { value: v }, v === 'all' ? `${t} (${rows.length})` : `${t} (${sCnt.get(v) || 0})`)));
+  const fnSel = h('select', { 'aria-label': 'Filter kode atau fungsi', onchange: (e) => { fn = e.target.value; page = 0; fill(); } }, FUNC_FILTERS.map(([v, t]) => { const re = fnTest(v); return h('option', { value: v }, re ? `${t} (${rows.filter((x) => re.test(x.original)).length})` : t); }));
+  const modeSel = h('select', { 'aria-label': 'Mode pencarian', onchange: (e) => { mode = e.target.value; setQuery(qRaw); } },
+    h('option', { value: 'loose' }, 'Cari longgar (abaikan spasi & tanda baca)'), h('option', { value: 'exact' }, 'Cari persis (kode & tanda baca, mis. \\v[ atau if)'), h('option', { value: 'regex' }, 'Regex'));
   const cats = new Map(); rows.forEach((e) => cats.set(e.category, (cats.get(e.category) || 0) + 1));
   const catSel = h('select', { onchange: (e) => { cat = e.target.value; page = 0; fill(); } },
     h('option', { value: 'all' }, `Semua kategori (${rows.length})`), [...cats].sort((a, b) => a[0].localeCompare(b[0])).map(([c, n]) => h('option', { value: c }, `${c} (${n})`)));
-  const find = h('input', { type: 'search', placeholder: 'Cari teks', onchange: (e) => { q = searchNorm(e.target.value); page = 0; fill(); } });
+  let tmr = 0;
+  const find = h('input', { type: 'search', placeholder: 'Cari teks, kode, atau fungsi', autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false',
+    oninput: (e) => { clearTimeout(tmr); const v = e.target.value; tmr = setTimeout(() => setQuery(v), 250); },
+    onchange: (e) => { clearTimeout(tmr); setQuery(e.target.value); } });
   // Cari & ganti kata di semua terjemahan (mengikuti kategori yang dipilih)
   const rf = h('input', { type: 'text', placeholder: 'Kata yang dicari, mis. kau', autocapitalize: 'off' }), rr = h('input', { type: 'text', placeholder: 'Diganti dengan, mis. kamu', autocapitalize: 'off' });
   const wholeCb = h('input', { type: 'checkbox', checked: '' }), icCb = h('input', { type: 'checkbox', checked: '' }), rMsg = h('p', { class: 'mut' });
@@ -2131,7 +2171,7 @@ async function viewReview() {
     rf, rr, h('label', { class: 'chk' }, wholeCb, 'Kata utuh saja (kau tidak mengubah "kaum")'), h('label', { class: 'chk' }, icCb, 'Abaikan huruf besar/kecil (Kau menjadi Kamu)'),
     h('button', { onclick: preview }, 'Cek jumlah'), h('button', { class: 'pri', onclick: apply }, 'Ganti semua'), rMsg);
   fill();
-  return [card(sel, catSel, find, info), replCard, box];
+  return [card(find, modeSel, sel, catSel, fnSel, info), replCard, box];
 }
 let exportUrl = '', editUrl = '', editUrlFilled = '', rgUrl = '';
 async function viewEkspor() {
