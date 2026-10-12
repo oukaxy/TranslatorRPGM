@@ -810,7 +810,7 @@ function sync402(list, i, k, oldText, newText) {
  * @param {string[]} problems diisi bila path tidak cocok
  */
 export function applyTranslations(json, entries, problems = [], opts = {}) {
-  const blocks = new Map(), isObj = (v) => v !== null && typeof v === 'object';
+  const blocks = new Map(), isObj = (v) => v !== null && typeof v === 'object', nz = (x) => String(x ?? '').replace(/\s+/g, ' ').trim();
   // Entri yang posisinya tidak cocok dengan file asli dicatat (opts.bad) dan dilewati, bukan menggagalkan seluruh patch.
   const fail = (e, msg) => { problems.push(`${e.file} ${e.path}: ${msg}`); opts.bad?.add(e); };
   for (const e of entries.filter(isApplicable)) { try {
@@ -852,6 +852,8 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
     // parent harus objek/array: kalau berupa string, parent[0] adalah huruf pertamanya (bertipe string) dan penugasan akan error
     if (!isObj(parent) || typeof parent[key] !== 'string') { fail(e, 'path tidak cocok dengan file asli'); continue; }
     const old = parent[key];
+    // Pengaman: pilihan di posisi ini harus sama dengan teks asli entri, supaya terjemahan tidak masuk ke pilihan lain
+    if (e.kind === 'choice' && nz(old) !== nz(e.original)) { fail(e, 'teks asli di posisi ini berbeda (posisi bergeser)'); continue; }
     parent[key] = e.kind === 'choice' || /^comment/.test(e.category) ? e.translation.replace(/\s*\n\s*/g, ' ') : e.category === 'plugin' ? (e.meta?.prefix || '') + e.translation.replace(/\s*\n\s*/g, ' ').trim() : e.translation;
     if (e.kind === 'field' && e.category !== 'plugin' && opts.wrap && WRAP_KEYS.test(String(key))) {
       const w = wrapLines(parent[key], opts.wrap.width);
@@ -867,6 +869,8 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
       const i = p.at(-1), head = Array.isArray(list) ? list[i] : null, body = head?.code === 101 ? 401 : head?.code === 105 ? 405 : 0;
       if (!body) { fail(e, 'header blok tidak cocok dengan file asli'); continue; }
       let j = i + 1; while (list[j]?.code === body) j++;
+      // Pengaman: isi blok di posisi ini harus sama dengan teks asli entri, supaya dialog tidak tertimpa ke blok lain
+      if (nz(list.slice(i + 1, j).map((c) => c.parameters?.[0]).join('\n')) !== nz(e.original)) { fail(e, 'teks asli di posisi ini berbeda (posisi bergeser)'); continue; }
       let lines = e.translation.replace(/^\n+|\n+$/g, '').split('\n');
       if (body === 401 && opts.wrap) {
         const face = typeof head.parameters?.[0] === 'string' && head.parameters[0] !== '';
