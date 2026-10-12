@@ -632,12 +632,18 @@ export function scanGaps(path, json, covered) {
 }
 const SYS_LISTS = ['skillTypes', 'weaponTypes', 'armorTypes', 'equipTypes', 'elements'];
 const SYS_LISTS_ACE = ['skill_types', 'weapon_types', 'armor_types', 'elements'];
-/** Baris Comment yang layak diterjemahkan: kalimat (bukan konfigurasi/kode). Dipakai untuk deskripsi pilihan dan sejenisnya. */
+/**
+ * Klasifikasi baris Comment. false = lewati (kode/konfigurasi). 'comment' = kemungkinan teks tampil
+ * (kalimat panjang atau berkode escape pesan seperti \\>). 'comment-label' = label pendek, biasanya catatan developer.
+ */
 export function isCommentText(s, src = 'ja') {
   if (!isTranslatable(s, src)) return false;
   const t = s.replace(ESC, '').trim();
   if (/[=$@{}]|\w_\w/.test(t)) return false;
-  return JA.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 3;
+  const words = (t.match(/[A-Za-z']+/g) || []).length, ja = JA.test(t), esc = s.replace(ESC, '') !== s;
+  if (!ja && words < 3) return false;
+  const long = ja ? t.length >= 10 || /[。！？…」』]$/.test(t) : words >= 4;
+  return esc || long ? 'comment' : 'comment-label';
 }
 export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
   const A = allowSets(allow);
@@ -657,7 +663,7 @@ export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
         if (lines.length) add([...p, i], 'block', body === 401 ? 'dialog' : 'scroll', lines.join('\n'), { speaker: P[4] || '', face: !!P[0] }, lines.length);
         i = j - 1;
       } else if (c.code === 102 && Array.isArray(P[0])) P[0].forEach((t, k) => add([...p, i, 'parameters', 0, k], 'choice', 'choice', t));
-      else if ((c.code === 108 || c.code === 408) && typeof P[0] === 'string' && isCommentText(P[0], src)) add([...p, i, 'parameters', 0], 'field', 'comment', P[0]);
+      else if ((c.code === 108 || c.code === 408) && typeof P[0] === 'string' && isCommentText(P[0], src)) add([...p, i, 'parameters', 0], 'field', isCommentText(P[0], src), P[0]);
       else if (NAME_CODES.has(c.code) && typeof P[1] === 'string') add([...p, i, 'parameters', 1], 'field', 'actorname', P[1]);
       else if (c.code === 357 && A.mz.size && P[3] && typeof P[3] === 'object') {
         for (const k of Object.keys(P[3])) if (typeof P[3][k] === 'string' && !looksStruct(P[3][k]) && A.mz.has(`${P[0]}.${P[1]}.${k}`)) add([...p, i, 'parameters', 3, k], 'field', 'plugin', P[3][k]);
@@ -762,7 +768,7 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
     const parent = getAt(json, p.slice(0, -1)), key = p.at(-1);
     if (typeof parent?.[key] !== 'string') { problems.push(`${e.file} ${e.path}: path tidak cocok dengan file asli`); continue; }
     const old = parent[key];
-    parent[key] = e.kind === 'choice' || e.category === 'comment' ? e.translation.replace(/\s*\n\s*/g, ' ') : e.category === 'plugin' ? (e.meta?.prefix || '') + e.translation.replace(/\s*\n\s*/g, ' ').trim() : e.translation;
+    parent[key] = e.kind === 'choice' || /^comment/.test(e.category) ? e.translation.replace(/\s*\n\s*/g, ' ') : e.category === 'plugin' ? (e.meta?.prefix || '') + e.translation.replace(/\s*\n\s*/g, ' ').trim() : e.translation;
     if (e.kind === 'field' && e.category !== 'plugin' && opts.wrap && WRAP_KEYS.test(String(key))) {
       const w = wrapLines(parent[key], opts.wrap.width);
       if (w) { parent[key] = w.join('\n'); if (opts.stats) opts.stats.wrapped++; }
@@ -1105,6 +1111,9 @@ export const DEFAULT_CONFIG = {
   fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '', timeout: 120, extraBody: '', auto: true,
 };
 const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian', auto: 'Japanese or English (each item may be in either language; if an item is already Indonesian, return it unchanged)' };
+/** Hasil terjemahan yang masih memuat huruf Jepang/Mandarin, Cyrillic, Arab, atau Hangul: tanda terjemahan setengah jalan atau ngaco. */
+export const stray = (t) => JA.test(t) || /[\u0400-\u04FF\u0600-\u06FF\uAC00-\uD7AF]/.test(t);
+const STRAY_MSG = 'Hasil masih bercampur huruf Jepang/asing, bukan bahasa target';
 const TODO = new Set(['pending', 'error', 'translating']);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const abortErr = () => Object.assign(new Error('Aborted'), { name: 'AbortError' });
@@ -1219,7 +1228,7 @@ export function buildMessages({ src, tgt, units, context = [], style = '' }) {
 Rules:
 - Keep every ⟦n⟧ token exactly as given: same count, same form. Never translate, add, or remove them.
 - Keep line breaks as line breaks and keep the same number of lines when possible.
-- Translate as natural game dialogue. Keep names consistent. Keep short UI terms short.
+- Translate every word into ${LANG[tgt]}. Never leave Japanese, Chinese, or Korean characters in the translation and never mix source-language words into the sentence; romanize a name if you must keep it. Reply only in ${LANG[tgt]}.\n- Translate as natural game dialogue. Keep names consistent. Keep short UI terms short.
 - If "glossary" is given, translate those terms exactly as listed (from -> to).${style.trim() ? `\n- Style guide for all text: ${style.trim().replace(/\s+/g, ' ')}` : ''}
 - If "character_notes" is given, follow each note for lines spoken by that speaker; it overrides the general style guide.
 - If an item has max_chars_per_line and max_lines, the translation must fit: break lines with \\n, never exceed max_chars_per_line characters per line (not counting ⟦n⟧ tokens) or max_lines lines. Indonesian and English run longer than Japanese, so shorten the wording when needed and keep the meaning.
@@ -1345,7 +1354,7 @@ export async function runTranslation(project, cfg, o = {}) {
     const terms = termsFor(gl, `${original}\n${entries[0].meta?.speaker || ''}`);
     const notes = notesFor(cn, entries[0].meta?.speaker || '');
     const key = await cacheKey(project, cfg, original, terms, notes), c = await dbGet('cache', key);
-    if (c) { entries.forEach((e) => hits.push({ ...e, translation: c.text, status: 'done', error: '' })); continue; }
+    if (c && !stray(c.text)) { entries.forEach((e) => hits.push({ ...e, translation: c.text, status: 'done', error: '' })); continue; }
     const m = maskText(original), e0 = entries[0], p = pos.get(e0.id);
     units.push({
       id: uid++, key, text: m.text, tokens: m.tokens, speaker: e0.meta?.speaker || '', entries, terms, notes,
@@ -1371,7 +1380,7 @@ export async function runTranslation(project, cfg, o = {}) {
   const run = async (batch) => {
     const r = await translateBatch(batch, {
       chat: guarded, retry: { signal }, src: project.src, tgt: project.tgt, context: batch[0].ctx, style: cfg.style,
-      check: (id, t) => (t.trim() ? (unmaskText(t, byId.get(id).tokens).ok ? '' : UI.tokenBad) : UI.emptyTr),
+      check: (id, t) => (!t.trim() ? UI.emptyTr : !unmaskText(t, byId.get(id).tokens).ok ? UI.tokenBad : stray(t) ? STRAY_MSG : ''),
       onUsage: (u) => { stat.tokensIn += u?.prompt_tokens || 0; stat.tokensOut += u?.completion_tokens || 0; },
     });
     stat.expOut += batch.reduce((a, u) => a + u.text.length + 5, 0); stat.nb++;
@@ -1557,9 +1566,9 @@ async function viewTranslate() {
   const cfg = await loadConfig(), all = await dbQuery('entries', 'projectId', p.id);
   // Kategori yang masih punya teks belum diterjemahkan (pending/error). Default: semua terpilih.
   const todoBy = new Map(); all.filter((e) => TODO.has(e.status)).forEach((e) => todoBy.set(e.category, (todoBy.get(e.category) || 0) + 1));
-  if (catSel.pid !== p.id || !catSel.set) { catSel.pid = p.id; catSel.set = new Set(todoBy.keys()); }
+  if (catSel.pid !== p.id || !catSel.set) { catSel.pid = p.id; catSel.set = new Set([...todoBy.keys()].filter((k) => k !== 'comment-label')); }
   for (const k of [...catSel.set]) if (!todoBy.has(k)) catSel.set.delete(k);
-  const pickedAll = catSel.set.size === todoBy.size;
+  const pickedAll = [...todoBy.keys()].every((k) => catSel.set.has(k));
   const scoped = pickedAll ? all : all.filter((e) => !TODO.has(e.status) || catSel.set.has(e.category));
   const cnt = (s) => all.filter((e) => e.status === s).length, est = estimateCost(scoped, cfg, p.src);
   const tgt = h('select', { onchange: async (e) => { p.tgt = e.target.value; await dbPut('projects', { ...p, updatedAt: Date.now() }); await render(); } },
@@ -1587,6 +1596,17 @@ async function viewTranslate() {
       h('div', { class: 'row' },
         h('button', { onclick: () => { catSel.set = new Set(todoBy.keys()); render(); } }, 'Pilih semua'),
         h('button', { onclick: () => { catSel.set = new Set(); render(); } }, 'Kosongkan'))) : '',
+    cnt('done') ? (() => {
+      const m = h('p', { class: 'mut' });
+      return card(h('h2', {}, 'Periksa hasil'), h('p', { class: 'mut' }, 'Cari terjemahan yang masih bercampur huruf Jepang atau asing (setengah terjemah). Yang ketemu ditandai error supaya bisa diterjemahkan ulang lewat tombol Lanjutkan. Terjemahan yang kamu edit manual tidak disentuh.'),
+        h('button', { onclick: async (ev) => {
+          const b = ev.currentTarget; b.disabled = true;
+          const bad = all.filter((e) => e.status === 'done' && stray(e.translation));
+          if (bad.length) await dbPutMany('entries', bad.map((e) => ({ ...e, status: 'error', error: STRAY_MSG })));
+          m.textContent = bad.length ? `${bad.length} teks ditandai error.` : 'Tidak ada hasil yang bercampur huruf asing.';
+          b.disabled = false; if (bad.length) render();
+        } }, 'Periksa hasil'), m);
+    })() : '',
     card(h('p', { class: 'mut' }, `Teks dikirim ke provider yang dipilih (${cfg.baseUrl}) dengan model ${cfg.model}.`), bar, txt, h('div', { class: 'row' }, start, stop)),
   ];
   paintJob(true);
