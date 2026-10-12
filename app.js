@@ -1060,35 +1060,43 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
 const normTxt = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
 const escSig = (s) => (String(s ?? '').match(ESC) || []).sort().join('\u0001');
 const bigrams = (s) => { const m = new Map(); for (let i = 0; i < s.length - 1; i++) { const g = s.slice(i, i + 2); m.set(g, (m.get(g) || 0) + 1); } return m; };
+const prep = (x) => { const n = normTxt(x.original); return { x, n, len: n.length, sig: escSig(x.original), g: null }; };
+const diceP = (p, q) => {
+  if (p.n === q.n) return 1; if (p.len < 2 || q.len < 2) return 0;
+  const A = (p.g ||= bigrams(p.n)), B = (q.g ||= bigrams(q.n)), [S, L] = A.size <= B.size ? [A, B] : [B, A]; let hit = 0;
+  for (const [g, n] of S) hit += Math.min(n, L.get(g) || 0);
+  return (2 * hit) / (p.len + q.len - 2);
+};
 /** Kemiripan Dice 0..1 antara dua teks (spasi diabaikan). */
-export function similarity(a, b) {
-  a = normTxt(a); b = normTxt(b); if (a === b) return 1; if (a.length < 2 || b.length < 2) return 0;
-  const A = bigrams(a), B = bigrams(b); let hit = 0;
-  for (const [g, n] of A) hit += Math.min(n, B.get(g) || 0);
-  return (2 * hit) / (a.length + b.length - 2);
-}
+export const similarity = (a, b) => diceP(prep({ original: a }), prep({ original: b }));
 /**
  * Cocokkan entri yatim (terjemahan masih ada, tapi posisinya hilang) ke teks baru dari game asli.
  * Urutan: teks sama persis (spasi diabaikan), lalu mirip >= minSim dengan kode escape yang sama.
- * @returns {{o:object,c:object,exact:boolean}[]} pasangan yang cocok; yang tidak cocok tidak muncul
+ * Dipercepat dengan indeks, bigram dihitung sekali, dan batas panjang; tick dipanggil berkala agar UI tidak macet.
+ * @returns {Promise<{o:object,c:object,exact:boolean}[]>} pasangan yang cocok; yang tidak cocok tidak muncul
  */
-export function matchOrphans(orphans, cands, minSim = 0.8) {
-  const used = new Set(), out = [];
-  const free = (c) => !used.has(c);
-  for (const o of orphans) {
-    const c = cands.find((x) => free(x) && x.category === o.category && normTxt(x.original) === normTxt(o.original));
-    if (c) { used.add(c); out.push({ o, c, exact: true }); }
+export async function matchOrphans(orphans, cands, minSim = 0.8, tick = null) {
+  const used = new Set(), out = [], exactIdx = new Map(), bucket = new Map();
+  for (const c of cands) {
+    const p = prep(c), k = `${c.category}\n${p.n}`; (exactIdx.get(k) || exactIdx.set(k, []).get(k)).push(p);
+    const bk = `${c.category}\n${p.sig}`; (bucket.get(bk) || bucket.set(bk, []).get(bk)).push(p);
   }
-  const done = new Set(out.map((m) => m.o));
+  const rest = []; let n = 0;
   for (const o of orphans) {
-    if (done.has(o)) continue;
+    const p = prep(o), hit = (exactIdx.get(`${o.category}\n${p.n}`) || []).find((q) => !used.has(q));
+    if (hit) { used.add(hit); out.push({ o, c: hit.x, exact: true }); } else rest.push(p);
+    if (tick && ++n % 200 === 0) await tick(n, orphans.length * 2);
+  }
+  n = 0;
+  for (const p of rest) {
     let best = null, bs = minSim;
-    for (const c of cands) {
-      if (!free(c) || c.category !== o.category || escSig(c.original) !== escSig(o.original)) continue;
-      const sc = similarity(o.original, c.original);
-      if (sc >= bs) { bs = sc; best = c; }
+    for (const q of bucket.get(`${p.x.category}\n${p.sig}`) || []) {
+      if (used.has(q)) continue;
+      const m = Math.max(p.len, q.len); if (!m || 2 * Math.min(p.len, q.len) / (p.len + q.len) < bs) continue;
+      const sc = diceP(p, q); if (sc >= bs) { bs = sc; best = q; if (sc === 1) break; }
     }
-    if (best) { used.add(best); out.push({ o, c: best, exact: false }); }
+    if (best) { used.add(best); out.push({ o: p.x, c: best.x, exact: false }); }
+    if (tick && ++n % 20 === 0) await tick(orphans.length + n, orphans.length * 2);
   }
   return out;
 }
@@ -1098,18 +1106,21 @@ export function matchOrphans(orphans, cands, minSim = 0.8) {
  */
 export async function rescueSkipped(project, onProgress = () => {}) {
   const stored = await dbPrefix('origFiles', project.id + ':'), ents = await dbQuery('entries', 'projectId', project.id);
-  const sk = ents.filter((e) => e.status === 'skipped' && e.error === 'Tidak ada di game asli' && typeof e.translation === 'string' && e.translation.trim());
-  const res = { orphans: sk.length, exact: 0, fuzzy: 0, left: 0, bad: 0 }, toPut = [];
-  const byFile = new Map(); for (const e of sk) { if (!byFile.has(e.file)) byFile.set(e.file, []); byFile.get(e.file).push(e); }
+  const res = { orphans: 0, exact: 0, fuzzy: 0, left: 0, bad: 0 }, toPut = [], byFile = new Map(), live = new Map();
+  for (const e of ents) {
+    if (e.status !== 'skipped') { if (!live.has(e.file)) live.set(e.file, new Set()); live.get(e.file).add(`${e.category}\n${e.path}`); continue; }
+    if (e.error !== 'Tidak ada di game asli' || typeof e.translation !== 'string' || !e.translation.trim()) continue;
+    if (!byFile.has(e.file)) byFile.set(e.file, []); byFile.get(e.file).push(e); res.orphans++;
+  }
   let i = 0;
   for (const f of stored) {
     const orphans = byFile.get(f.path); if (!orphans) continue;
-    onProgress(`Mencocokkan ${f.path.split('/').pop()} (${++i} dari ${byFile.size})`, i, byFile.size);
-    if (i % 10 === 0) await new Promise((r) => setTimeout(r));
+    const name = f.path.split('/').pop(), head = `Mencocokkan ${name} (${++i} dari ${byFile.size}, ${orphans.length} teks)`;
+    onProgress(head); await new Promise((r) => setTimeout(r));
     let json; try { json = /(^|\/)js\/plugins\.js$/.test(f.path) ? parsePluginsJs(f.text)?.arr : JSON.parse(f.text); if (!json) throw new Error('x'); } catch { res.bad += orphans.length; continue; }
-    const live = new Set(ents.filter((e) => e.file === f.path && e.status !== 'skipped').map((e) => `${e.category}\n${e.path}`));
-    const cands = extractFile(f.path, json, { src: project.src, allow: project.allow }).filter((c) => !live.has(`${c.category}\n${c.path}`));
-    const ms = matchOrphans(orphans, cands);
+    const lv = live.get(f.path) || new Set();
+    const cands = extractFile(f.path, json, { src: project.src, allow: project.allow }).filter((c) => !lv.has(`${c.category}\n${c.path}`));
+    const ms = await matchOrphans(orphans, cands, 0.8, async (d, t) => { onProgress(`${head}: ${d}/${t}`); await new Promise((r) => setTimeout(r)); });
     for (const { o, c, exact } of ms) {
       toPut.push({ ...o, path: c.path, kind: c.kind, meta: c.meta, lineCount: c.lineCount, order: c.order, original: c.original, hash: await sha256(c.original), status: 'edited', error: '' });
       exact ? res.exact++ : res.fuzzy++;
