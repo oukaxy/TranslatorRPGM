@@ -1378,6 +1378,28 @@ async function currentProject() {
   return cur ? dbGet('projects', cur.value) : null;
 }
 let importNote = null;
+const CODE_NAME = { 101: 'Show Text', 401: 'baris Show Text', 102: 'Show Choices', 402: 'cabang pilihan', 105: 'Scroll Text', 405: 'baris Scroll Text', 108: 'Comment', 408: 'lanjutan Comment', 355: 'Script', 655: 'lanjutan Script', 356: 'Plugin Command', 357: 'Plugin Command MZ' };
+/** Cari potongan teks di semua data asli proyek dan laporkan lokasinya (file, jenis perintah, path). Hanya membaca. */
+export async function searchOrig(projectId, needle, max = 30) {
+  const q = needle.trim().toLowerCase(), res = [];
+  if (!q) return res;
+  for (const f of await dbPrefix('origFiles', projectId + ':')) {
+    if (res.length >= max || !f.text.toLowerCase().includes(q)) continue;
+    let json; try { json = JSON.parse(f.text); } catch { continue; }
+    const walk = (v, path, cmd) => {
+      if (res.length >= max) return;
+      if (typeof v === 'string') {
+        if (v.toLowerCase().includes(q)) res.push({ file: f.path.split('/').pop(), code: cmd?.code, path: path.join('/'), text: v.replace(/\s+/g, ' ').slice(0, 70) });
+        return;
+      }
+      if (!v || typeof v !== 'object') return;
+      const c = !Array.isArray(v) && typeof v.code === 'number' ? v : cmd;
+      for (const k of Object.keys(v)) if (!k.startsWith('__')) walk(v[k], [...path, k], c);
+    };
+    walk(json, [], null);
+  }
+  return res;
+}
 async function viewProyek() {
   const msg = h('p', { class: 'mut' }), bar = h('progress', { value: '0', max: '1', hidden: '' });
   const box = card(h('h2', {}, 'Impor game'));
@@ -1426,6 +1448,18 @@ async function viewProyek() {
       } }, 'Hapus proyek');
       return h('div', {}, b, st);
     })()));
+  if (p) {
+    const q = h('input', { type: 'text', autocomplete: 'off', spellcheck: 'false', placeholder: 'mis. taste setting' }), res = h('p', { class: 'mut' });
+    out.push(card(h('h2', {}, 'Cari teks di data game'), h('p', { class: 'mut' }, 'Ketik potongan teks yang belum berubah di game (bahasa aslinya). Hasilnya menunjukkan file dan jenis perintah tempat teks itu berada. Tidak ada hasil berarti teksnya bukan di file data yang diimpor.'), q,
+      h('button', { onclick: async (ev) => {
+        const b = ev.currentTarget; b.disabled = true; res.className = 'mut'; res.textContent = 'Mencari…';
+        try {
+          const r = await searchOrig(p.id, q.value);
+          res.textContent = r.length ? r.map((x) => `${x.file} | ${x.code === undefined ? 'field data' : `kode ${x.code} (${CODE_NAME[x.code] || 'lainnya'})`}\n${x.path}\n"${x.text}"`).join('\n\n') : 'Tidak ditemukan di file data yang diimpor.';
+        } catch (e) { res.className = 'err'; res.textContent = e?.message || String(e); }
+        b.disabled = false;
+      } }, 'Cari'), res));
+  }
   return out;
 }
 const job = { running: false, ctl: null, value: 0, max: 1, text: '', err: false, ui: null };
