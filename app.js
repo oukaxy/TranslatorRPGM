@@ -1841,7 +1841,7 @@ async function viewProyek() {
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: '', onchange: (e) => { fillOpt.on = e.target.checked; } }), ' Isi kolom terjemahan dengan teks asli (status done) supaya semua file ikut di patch dan kembali seperti game asli. Matikan kalau mau hasilnya pending lalu diterjemahkan ulang'),
       pickR('Pilih folder data asli', { webkitdirectory: '', multiple: '' }), pickR('Pilih zip game asli', { accept: '.zip' }), pickR('Pilih Game.rgss3a asli', {}), rbar, rmsg));
     const smsg = h('p', { class: 'mut' });
-    out.push(card(h('h2', {}, 'Selamatkan teks \"Tidak ada di game asli\"'),
+    out.push(card(h('h2', {}, 'Selamatkan teks Tidak ada di game asli'),
       h('p', { class: 'mut' }, 'Dipakai setelah Pulihkan bila ada dialog bertanda skipped. Terjemahannya masih tersimpan; tombol ini mencocokkan ulang posisinya ke file asli proyek yang sekarang (spasi/baris baru diabaikan, lalu yang mirip >= 80% dengan kode escape sama). Yang cocok jadi berstatus edited dan ikut diekspor. Cek hasilnya di tab Review.'),
       h('button', { onclick: async (ev) => {
         const b = ev.currentTarget; b.disabled = true; smsg.className = 'mut'; smsg.textContent = 'Mencocokkan…';
