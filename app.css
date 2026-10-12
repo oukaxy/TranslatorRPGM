@@ -83,3 +83,5 @@ progress[hidden]{display:none}
 .row:has(>span)>button,.row:has(>span)>.file{flex:0 0 auto;width:auto;min-width:76px;min-height:42px;padding:0 14px}
 
 @media(prefers-reduced-motion:no-preference){button,.file,.icon{transition:filter .12s,background-color .12s}}
+
+label.row{margin:6px 0;font-size:15px;font-weight:500;color:var(--fg);min-height:40px}

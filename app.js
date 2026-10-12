@@ -1329,7 +1329,8 @@ export function estimateCost(entries, cfg0, src = 'ja') {
 export async function runTranslation(project, cfg, o = {}) {
   const { signal, onProgress = () => {}, base = 0 } = o, chat = o.chat || ((m, s) => llmChat(cfg, m, s));
   const all = (await dbQuery('entries', 'projectId', project.id)).sort((a, b) => a.id - b.id);
-  const pos = new Map(all.map((e, i) => [e.id, i])), todo = all.filter((e) => TODO.has(e.status));
+  const cats = Array.isArray(o.cats) ? new Set(o.cats) : null; // null = semua kategori
+  const pos = new Map(all.map((e, i) => [e.id, i])), todo = all.filter((e) => TODO.has(e.status) && (!cats || cats.has(e.category)));
   const stat = { done: 0, error: 0, cached: 0, tokensIn: 0, tokensOut: 0, stopped: false, expOut: 0, nb: 0 };
   const auto = cfg.auto !== false, eff = auto ? autoTune(todo, cfg) : cfg;
   // Jumlah batch yang berjalan bersamaan: mulai 6, turun saat provider membatasi, naik tiap 4 batch lancar (sampai batas konkurensi).
@@ -1523,17 +1524,21 @@ const paintJob = (force) => {
   u.bar.max = job.max; u.bar.value = job.value; u.txt.textContent = job.text; u.txt.className = job.err ? 'err' : 'mut';
   u.start.disabled = job.running; u.stop.disabled = !job.running;
 };
+// Kategori yang dipilih untuk diterjemahkan (tab Translate). Disimpan per proyek selama halaman terbuka.
+const catSel = { pid: null, set: null };
 async function startJob() {
   if (job.running) return;
   const cfg = await loadConfig(), p = await currentProject();
   job.err = false;
   if (!cfg.apiKey) { job.err = true; job.text = UI.noKey; return paintJob(); }
+  const cats = catSel.pid === p.id && catSel.set ? [...catSel.set] : null;
+  if (cats && !cats.length) { job.err = true; job.text = 'Pilih minimal satu kategori dulu'; return paintJob(); }
   const before = await dbQuery('entries', 'projectId', p.id), base = before.filter((e) => e.status === 'done' || e.status === 'edited').length;
-  job.running = true; job.ctl = new AbortController(); job.value = base; job.max = base + before.filter((e) => TODO.has(e.status)).length || 1; job.text = 'Memulai…'; paintJob();
+  job.running = true; job.ctl = new AbortController(); job.value = base; job.max = base + before.filter((e) => TODO.has(e.status) && (!cats || cats.includes(e.category))).length || 1; job.text = 'Memulai…'; paintJob();
   let lock = null; try { lock = await navigator.wakeLock?.request('screen'); } catch { /* layar tetap boleh mati */ }
   try {
     let t0 = Date.now(), d0 = null;
-    const r = await runTranslation(p, cfg, { signal: job.ctl.signal, base, onProgress: (d, t, txt) => {
+    const r = await runTranslation(p, cfg, { signal: job.ctl.signal, base, cats, onProgress: (d, t, txt) => {
       if (d0 === null) { d0 = d; t0 = Date.now(); }
       let eta = '';
       if (d > d0 && d < t) { const sec = ((t - d) * (Date.now() - t0)) / 1000 / (d - d0); eta = ` · sisa ±${sec >= 90 ? Math.round(sec / 60) + ' menit' : Math.round(sec) + ' detik'}`; }
@@ -1550,7 +1555,13 @@ async function viewTranslate() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
   const cfg = await loadConfig(), all = await dbQuery('entries', 'projectId', p.id);
-  const cnt = (s) => all.filter((e) => e.status === s).length, est = estimateCost(all, cfg, p.src);
+  // Kategori yang masih punya teks belum diterjemahkan (pending/error). Default: semua terpilih.
+  const todoBy = new Map(); all.filter((e) => TODO.has(e.status)).forEach((e) => todoBy.set(e.category, (todoBy.get(e.category) || 0) + 1));
+  if (catSel.pid !== p.id || !catSel.set) { catSel.pid = p.id; catSel.set = new Set(todoBy.keys()); }
+  for (const k of [...catSel.set]) if (!todoBy.has(k)) catSel.set.delete(k);
+  const pickedAll = catSel.set.size === todoBy.size;
+  const scoped = pickedAll ? all : all.filter((e) => !TODO.has(e.status) || catSel.set.has(e.category));
+  const cnt = (s) => all.filter((e) => e.status === s).length, est = estimateCost(scoped, cfg, p.src);
   const tgt = h('select', { onchange: async (e) => { p.tgt = e.target.value; await dbPut('projects', { ...p, updatedAt: Date.now() }); await render(); } },
     h('option', { value: 'id', ...(p.tgt === 'id' ? { selected: '' } : {}) }, 'Indonesia'),
     h('option', { value: 'en', ...(p.tgt === 'en' ? { selected: '' } : {}) }, 'Inggris'));
@@ -1569,6 +1580,13 @@ async function viewTranslate() {
     card(h('h2', {}, 'Bahasa'), h('label', {}, 'Sumber'), h('p', { class: 'mut' }, srcLabel(p.src)), h('label', {}, 'Target'), tgt),
     card(h('h2', {}, 'Status'), ['pending', 'translating', 'done', 'edited', 'error', 'skipped'].filter(cnt).map((s) => h('span', { class: 'badge' }, `${s} ${cnt(s)}`)),
       h('p', { class: 'mut' }, `${est.auto ? `Mode otomatis: ${est.batchSize} teks per batch, konkurensi menyesuaikan\n` : ''}Perkiraan kasar: ${est.items} teks unik, ${est.batches} batch\nToken masuk ${est.inTok}, keluar ${est.outTok}\nBiaya: ${money}\nBelum menghitung cache.`)),
+    todoBy.size ? card(h('h2', {}, 'Kategori yang diterjemahkan'),
+      h('p', { class: 'mut' }, 'Centang kategori yang mau diterjemahkan sekarang. Hanya teks yang belum diterjemahkan (pending/error) di kategori itu yang dikirim ke LLM di Pengaturan. Kategori lain tidak disentuh.'),
+      [...todoBy].sort((a, b) => b[1] - a[1]).map(([k, n]) => h('label', { class: 'row' },
+        h('input', { type: 'checkbox', ...(catSel.set.has(k) ? { checked: '' } : {}), onchange: (e) => { e.target.checked ? catSel.set.add(k) : catSel.set.delete(k); render(); } }), ` ${k} (${n})`)),
+      h('div', { class: 'row' },
+        h('button', { onclick: () => { catSel.set = new Set(todoBy.keys()); render(); } }, 'Pilih semua'),
+        h('button', { onclick: () => { catSel.set = new Set(); render(); } }, 'Kosongkan'))) : '',
     card(h('p', { class: 'mut' }, `Teks dikirim ke provider yang dipilih (${cfg.baseUrl}) dengan model ${cfg.model}.`), bar, txt, h('div', { class: 'row' }, start, stop)),
   ];
   paintJob(true);
