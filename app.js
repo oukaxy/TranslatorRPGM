@@ -1057,6 +1057,70 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
   return project;
 }
 
+const normTxt = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+const escSig = (s) => (String(s ?? '').match(ESC) || []).sort().join('\u0001');
+const bigrams = (s) => { const m = new Map(); for (let i = 0; i < s.length - 1; i++) { const g = s.slice(i, i + 2); m.set(g, (m.get(g) || 0) + 1); } return m; };
+/** Kemiripan Dice 0..1 antara dua teks (spasi diabaikan). */
+export function similarity(a, b) {
+  a = normTxt(a); b = normTxt(b); if (a === b) return 1; if (a.length < 2 || b.length < 2) return 0;
+  const A = bigrams(a), B = bigrams(b); let hit = 0;
+  for (const [g, n] of A) hit += Math.min(n, B.get(g) || 0);
+  return (2 * hit) / (a.length + b.length - 2);
+}
+/**
+ * Cocokkan entri yatim (terjemahan masih ada, tapi posisinya hilang) ke teks baru dari game asli.
+ * Urutan: teks sama persis (spasi diabaikan), lalu mirip >= minSim dengan kode escape yang sama.
+ * @returns {{o:object,c:object,exact:boolean}[]} pasangan yang cocok; yang tidak cocok tidak muncul
+ */
+export function matchOrphans(orphans, cands, minSim = 0.8) {
+  const used = new Set(), out = [];
+  const free = (c) => !used.has(c);
+  for (const o of orphans) {
+    const c = cands.find((x) => free(x) && x.category === o.category && normTxt(x.original) === normTxt(o.original));
+    if (c) { used.add(c); out.push({ o, c, exact: true }); }
+  }
+  const done = new Set(out.map((m) => m.o));
+  for (const o of orphans) {
+    if (done.has(o)) continue;
+    let best = null, bs = minSim;
+    for (const c of cands) {
+      if (!free(c) || c.category !== o.category || escSig(c.original) !== escSig(o.original)) continue;
+      const sc = similarity(o.original, c.original);
+      if (sc >= bs) { bs = sc; best = c; }
+    }
+    if (best) { used.add(best); out.push({ o, c: best, exact: false }); }
+  }
+  return out;
+}
+/**
+ * Selamatkan entri bertanda "Tidak ada di game asli": terjemahannya masih tersimpan, hanya posisinya yang tidak cocok.
+ * Teks dicocokkan ulang ke file asli proyek yang sekarang (hasil Pulihkan), tanpa perlu memilih game asli lagi.
+ */
+export async function rescueSkipped(project, onProgress = () => {}) {
+  const stored = await dbPrefix('origFiles', project.id + ':'), ents = await dbQuery('entries', 'projectId', project.id);
+  const sk = ents.filter((e) => e.status === 'skipped' && e.error === 'Tidak ada di game asli' && typeof e.translation === 'string' && e.translation.trim());
+  const res = { orphans: sk.length, exact: 0, fuzzy: 0, left: 0, bad: 0 }, toPut = [];
+  const byFile = new Map(); for (const e of sk) { if (!byFile.has(e.file)) byFile.set(e.file, []); byFile.get(e.file).push(e); }
+  let i = 0;
+  for (const f of stored) {
+    const orphans = byFile.get(f.path); if (!orphans) continue;
+    onProgress(`Mencocokkan ${f.path.split('/').pop()} (${++i} dari ${byFile.size})`, i, byFile.size);
+    if (i % 10 === 0) await new Promise((r) => setTimeout(r));
+    let json; try { json = /(^|\/)js\/plugins\.js$/.test(f.path) ? parsePluginsJs(f.text)?.arr : JSON.parse(f.text); if (!json) throw new Error('x'); } catch { res.bad += orphans.length; continue; }
+    const live = new Set(ents.filter((e) => e.file === f.path && e.status !== 'skipped').map((e) => `${e.category}\n${e.path}`));
+    const cands = extractFile(f.path, json, { src: project.src, allow: project.allow }).filter((c) => !live.has(`${c.category}\n${c.path}`));
+    const ms = matchOrphans(orphans, cands);
+    for (const { o, c, exact } of ms) {
+      toPut.push({ ...o, path: c.path, kind: c.kind, meta: c.meta, lineCount: c.lineCount, order: c.order, original: c.original, hash: await sha256(c.original), status: 'edited', error: '' });
+      exact ? res.exact++ : res.fuzzy++;
+    }
+    res.left += orphans.length - ms.length;
+  }
+  if (toPut.length) await dbPutMany('entries', toPut);
+  const all = await dbQuery('entries', 'projectId', project.id);
+  project.updatedAt = Date.now(); project.total = all.length; await dbPut('projects', project);
+  return res;
+}
 /**
  * Pulihkan teks dari game asli (yang belum diubah) ke proyek, per kategori terpilih. Semua jenis teks ikut:
  * field, dialog/scroll (blok), pilihan, dan nama pembicara.
@@ -1090,7 +1154,7 @@ export async function restoreFromPristine(project, files, cats, onProgress = () 
     const ex = extractFile(path, json, { src: project.src, allow: project.allow });
     if (!ex.some((e) => cats.has(e.category)) && !oldEs.some((e) => cats.has(e.category))) return false;
     const byPath = new Map(oldEs.map((e) => [e.path, e])), claimed = new Set(), pool = new Map(), later = [];
-    for (const o of oldEs) { const k = `${o.category}\n${o.original}`; if (!pool.has(k)) pool.set(k, []); pool.get(k).push(o); }
+    for (const o of oldEs) { const k = `${o.category}\n${normTxt(o.original)}`; if (!pool.has(k)) pool.set(k, []); pool.get(k).push(o); }
     for (const e of ex) {
       const o0 = byPath.get(e.path), old = o0 && o0.category === e.category && !claimed.has(o0.id) ? o0 : null;
       if (cats.has(e.category)) {
@@ -1101,7 +1165,7 @@ export async function restoreFromPristine(project, files, cats, onProgress = () 
     }
     // kategori tidak dipilih yang posisinya bergeser: cari entri lama dengan teks asli yang sama
     for (const e of later) {
-      const c = (pool.get(`${e.category}\n${e.original}`) || []).find((x) => !claimed.has(x.id)); if (!c) continue;
+      const c = (pool.get(`${e.category}\n${normTxt(e.original)}`) || []).find((x) => !claimed.has(x.id)); if (!c) continue;
       claimed.add(c.id); res.moved++; toPut.push({ ...c, path: e.path, kind: e.kind, meta: e.meta, lineCount: e.lineCount, order: e.order });
     }
     for (const o of oldEs) {
@@ -1776,6 +1840,17 @@ async function viewProyek() {
       cats.map((c) => { const cb = h('input', { type: 'checkbox', ...(pickC.has(c) ? { checked: '' } : {}), onchange: (e) => { e.target.checked ? pickC.add(c) : pickC.delete(c); } }); boxes.push(cb); return h('label', { class: 'row' }, cb, ` ${c}`); }),
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: '', onchange: (e) => { fillOpt.on = e.target.checked; } }), ' Isi kolom terjemahan dengan teks asli (status done) supaya semua file ikut di patch dan kembali seperti game asli. Matikan kalau mau hasilnya pending lalu diterjemahkan ulang'),
       pickR('Pilih folder data asli', { webkitdirectory: '', multiple: '' }), pickR('Pilih zip game asli', { accept: '.zip' }), pickR('Pilih Game.rgss3a asli', {}), rbar, rmsg));
+    const smsg = h('p', { class: 'mut' });
+    out.push(card(h('h2', {}, 'Selamatkan teks \"Tidak ada di game asli\"'),
+      h('p', { class: 'mut' }, 'Dipakai setelah Pulihkan bila ada dialog bertanda skipped. Terjemahannya masih tersimpan; tombol ini mencocokkan ulang posisinya ke file asli proyek yang sekarang (spasi/baris baru diabaikan, lalu yang mirip >= 80% dengan kode escape sama). Yang cocok jadi berstatus edited dan ikut diekspor. Cek hasilnya di tab Review.'),
+      h('button', { onclick: async (ev) => {
+        const b = ev.currentTarget; b.disabled = true; smsg.className = 'mut'; smsg.textContent = 'Mencocokkan…';
+        try {
+          const r = await rescueSkipped(p, (t) => { smsg.textContent = t; });
+          smsg.textContent = `Selesai. Entri skipped: ${r.orphans}\nDiselamatkan (teks sama): ${r.exact}\nDiselamatkan (mirip, mohon dicek): ${r.fuzzy}\nMasih tidak cocok: ${r.left}${r.bad ? `\nFile gagal dibaca: ${r.bad}` : ''}`;
+        } catch (e) { smsg.className = 'err'; smsg.textContent = e?.message || String(e); }
+        b.disabled = false;
+      } }, 'Selamatkan sekarang'), smsg));
   }
   return out;
 }
