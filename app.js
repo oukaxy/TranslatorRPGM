@@ -539,7 +539,7 @@ async function collectSources(files) {
   const data = new Map();
   for (const i of list) { const k = normalizeDataPath(i.path); if (k) data.set(k, i); }
   const engine = has(/(^|\/)js\/rmmz_core\.js$/) ? 'MZ' : has(/(^|\/)js\/rpg_core\.js$/) ? 'MV' : [...data.keys()].some((k) => /\.rvdata2$/i.test(k)) ? 'VX Ace' : null;
-  return { engine, data, plugins: list.find((i) => /(^|\/)js\/plugins\.js$/.test(i.path)) || null };
+  return { engine, data, plugins: list.find((i) => /(^|\/)js\/plugins\.js$/.test(i.path)) || null, scripts: list.find((i) => /(^|\/)data\/scripts\.rvdata2$/i.test(i.path.replace(/\\/g, '/'))) || null };
 }
 /**
  * Ekstrak unit teks dari satu file JSON sesuai whitelist.
@@ -573,13 +573,42 @@ const normPluginsPath = (p) => ((p.replace(/\\/g, '/').match(/(?:^|\/)(www\/)?js
 const NAME_CODES = new Set([320, 324, 325]);
 // System: daftar tipe berupa array string.
 /**
+ * Diagnostik (hanya baca): buka Scripts.rvdata2 (daftar [id, nama, kode zlib]), dekompres tiap script,
+ * lalu cari string di dalam tanda kutip yang mirip kalimat. Komentar (#, =begin/=end) dilewati.
+ * @returns {{total:number, found:Array}} found = [[namaScript, jumlah, contoh[]]] terbanyak dulu
+ */
+export async function scanScripts(u8) {
+  const root = marshalToView(u8);
+  if (!Array.isArray(root)) throw new Error('format Scripts.rvdata2 tidak dikenal');
+  const dec = new TextDecoder('utf-8'), strOf = (v) => (typeof v === 'string' ? v : v?.__a ?? (v?.__s ? dec.decode(B64.dec(v.__s)) : ''));
+  const sentence = (x) => { const t = x.replace(ESC, '').trim(); return !!t && !/[=$@{}]|\w_\w/.test(t) && (JA.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 3) && detectLang(t) !== 'id'; };
+  const found = [];
+  for (const e of root) {
+    if (!Array.isArray(e) || !e[2]?.__s) continue;
+    let code;
+    try { code = dec.decode(await new Response(new Blob([B64.dec(e[2].__s)]).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer()); } catch { continue; }
+    let n = 0, inBlock = false; const samples = [];
+    for (const line of code.split(/\r?\n/)) {
+      if (/^=begin/.test(line)) { inBlock = true; continue; }
+      if (/^=end/.test(line)) { inBlock = false; continue; }
+      if (inBlock || /^\s*#/.test(line)) continue;
+      for (const m of line.matchAll(/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g)) {
+        const t = (m[1] ?? m[2]).trim();
+        if (t && sentence(t)) { n++; if (samples.length < 2) samples.push(t.slice(0, 50)); }
+      }
+    }
+    if (n) found.push([strOf(e[1]) || `#${e[0]}`, n, samples]);
+  }
+  return { total: root.length, found: found.sort((a, b) => b[1] - a[1]) };
+}
+/**
  * Diagnostik: cari string mirip kalimat yang TIDAK diambil extractor, dikelompokkan per jenis perintah event
  * (atau per field data). Hanya membaca. covered = kumpulan baris teks yang sudah diambil dari file ini.
  */
 export function scanGaps(path, json, covered) {
   const base = path.split('/').pop().replace(/\.(json|rvdata2)$/i, ''), groups = new Map();
   const note = (label, t) => { const g = groups.get(label) || { n: 0, samples: [] }; g.n++; if (g.samples.length < 2) g.samples.push(t.replace(/\s+/g, ' ').slice(0, 50)); groups.set(label, g); };
-  const sentence = (x) => { const t = x.replace(ESC, '').trim(); return !!t && !/[=$@{}]|\w_\w/.test(t) && (JA.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 3); };
+  const sentence = (x) => { const t = x.replace(ESC, '').trim(); return !!t && !/[=$@{}]|\w_\w/.test(t) && (JA.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 3) && detectLang(t) !== 'id'; };
   const seen = (x) => covered.has(x.trim());
   const label = (c) => `kode ${c.code} (${CODE_NAME[c.code] || 'lainnya'})`;
   const walk = (v, key, cmd) => {
@@ -589,6 +618,7 @@ export function scanGaps(path, json, covered) {
         for (const m of v.matchAll(/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g)) { const t = (m[1] ?? m[2]).trim(); if (t && sentence(t) && !seen(t)) note(label(cmd), t); }
         return;
       }
+      if (!cmd && /^(variables|switches|name)$/.test(key)) return; // label internal editor, tidak tampil di game
       if (sentence(v)) note(cmd ? label(cmd) : `${base}.${key}`, v);
       return;
     }
@@ -873,10 +903,11 @@ export async function exportProject(project, model = '', wrap = null) {
   return { ...r, blob: await writeZip([...r.files, { name: 'patch-report.txt', data: new TextEncoder().encode(r.report) }]) };
 }
 /** Impor folder/zip: simpan JSON asli dan entries ke IndexedDB. */
+const engine_isAce = (e) => e === 'VX Ace';
 export async function importProject(files, src = 'ja', onProgress = () => {}, { allow: allowText = '' } = {}) {
   const allow = parseAllow(allowText);
   onProgress('Membaca daftar file…', 0, 0);
-  const { engine: eng, data, plugins } = await collectSources(files);
+  const { engine: eng, data, plugins, scripts } = await collectSources(files);
   if (!data.size) throw new Error(UI.noData);
   const id = 'p' + Date.now().toString(36), orig = [], entries = [], broken = [], counts = {};
   const gaps = new Map();
@@ -905,6 +936,12 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
     if (path.endsWith('System.json')) sys = json;
     await ingest(path, json, text);
   }
+  let scriptsDiag = null;
+  if (engine_isAce(eng) && scripts) {
+    onProgress('Memeriksa Scripts.rvdata2…', data.size, data.size);
+    try { const r = await scanScripts(await scripts.readBin()); scriptsDiag = { total: r.total, found: r.found.slice(0, 8), hits: r.found.reduce((a, x) => a + x[1], 0) }; }
+    catch (e) { scriptsDiag = { error: e?.message || String(e) }; }
+  } else if (engine_isAce(eng)) scriptsDiag = { missing: true };
   let paramNote = '';
   if (allow.param.length) {
     const pj = pluginsText ? parsePluginsJs(pluginsText) : null;
@@ -912,7 +949,7 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
     else paramNote = pluginsText ? 'js/plugins.js tidak bisa dibaca (bukan array JSON murni), parameter plugin dilewati' : 'js/plugins.js tidak ikut dipilih, parameter plugin dilewati';
   }
   const engine = eng || (sys && (sys.advanced || sys.itemCategories) ? 'MZ' : 'MV');
-  const project = { id, engine, src, tgt: 'id', gaps: [...gaps].sort((a, b) => b[1].n - a[1].n).slice(0, 10), msgPlugins, pluginsSeen, allow, paramNote, files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
+  const project = { id, engine, src, tgt: 'id', scriptsDiag, gaps: [...gaps].sort((a, b) => b[1].n - a[1].n).slice(0, 10), msgPlugins, pluginsSeen, allow, paramNote, files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
   onProgress(`Menyimpan ${entries.length} teks…`, data.size, data.size);
   await dbPutMany('origFiles', orig);
   await dbPutMany('entries', entries);
@@ -1441,6 +1478,13 @@ async function viewProyek() {
   if (p) out.push(card(h('h2', {}, 'Ringkasan'),
     h('p', { class: 'mut' }, `Engine: ${p.engine}\nSumber: ${srcLabel(p.src)}\nFile data: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\nPlugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan)` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`),
     p.paramNote ? h('p', { class: 'err' }, p.paramNote) : '',
+    p.engine === 'VX Ace' ? (() => {
+      const d = p.scriptsDiag;
+      if (!d) return h('p', { class: 'mut' }, 'Diagnostik Scripts.rvdata2: impor ulang proyek ini untuk memeriksa.');
+      if (d.missing) return h('p', { class: 'mut' }, 'Scripts.rvdata2 tidak ikut dipilih (pilih seluruh folder Data atau Game.rgss3a).');
+      if (d.error) return h('p', { class: 'err' }, `Scripts.rvdata2 gagal dibaca: ${d.error}`);
+      return h('p', { class: d.hits ? 'err' : 'mut' }, `Scripts.rvdata2: ${d.total} script, ${d.hits} kalimat Inggris/Jepang di dalam tanda kutip.` + (d.hits ? `\n${d.found.map(([k, n, sm]) => `${k}: ${n} | ${sm.map((x) => `"${x}"`).join(' / ')}`).join('\n')}` : ''));
+    })() : '',
     (() => {
       if (!p.gaps) return h('p', { class: 'mut' }, 'Diagnostik teks yang belum terbaca: impor ulang proyek ini untuk menghitung.');
       if (!p.gaps.length) return h('p', { class: 'mut' }, 'Diagnostik: tidak ada kalimat lain yang terlewat di file data.');
