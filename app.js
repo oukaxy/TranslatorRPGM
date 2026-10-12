@@ -970,7 +970,7 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
  * Hanya kind 'field' (mis. comment); blok dialog dan pilihan dilewati. Struktur file tidak berubah.
  * @returns {{matched:number, restored:number, created:number, nofile:number, bad:number}}
  */
-export async function restoreFromPristine(project, files, cats, onProgress = () => {}) {
+export async function restoreFromPristine(project, files, cats, onProgress = () => {}, fill = false) {
   const { data } = await collectSources(files), base = (x) => x.split('/').pop().toLowerCase();
   const byBase = new Map([...data].map(([k, v]) => [base(k), v]));
   const stored = await dbPrefix('origFiles', project.id + ':'), ents = await dbQuery('entries', 'projectId', project.id);
@@ -991,8 +991,8 @@ export async function restoreFromPristine(project, files, cats, onProgress = () 
       if (typeof parent?.[key] !== 'string') { res.badField++; continue; }
       if (parent[key] !== e.original) { parent[key] = e.original; changed = true; }
       const old = byKey.get(`${f.path}|${e.path}`), hash = await sha256(e.original);
-      if (old) { out.push({ ...old, original: e.original, category: e.category, translation: '', status: 'pending', error: '', hash }); res.restored++; }
-      else { out.push({ ...e, file: f.path, projectId: project.id, hash }); res.created++; }
+      if (old) { out.push({ ...old, original: e.original, category: e.category, translation: fill ? e.original : '', status: fill ? 'done' : 'pending', error: '', hash }); res.restored++; }
+      else { out.push({ ...e, file: f.path, projectId: project.id, hash, ...(fill ? { translation: e.original, status: 'done' } : {}) }); res.created++; }
     }
     if (changed) newOrig.push({ ...f, text: JSON.stringify(mine) });
   }
@@ -1001,8 +1001,8 @@ export async function restoreFromPristine(project, files, cats, onProgress = () 
   const touched = new Set(out.map((x) => x.id).filter(Boolean));
   for (const e of ents) {
     if (e.kind !== 'field' || !cats.has(e.category) || touched.has(e.id)) continue;
-    if (e.status === 'skipped' && !e.translation) continue;
-    out.push({ ...e, translation: '', status: 'skipped', error: '' });
+    if (fill ? (e.status === 'done' && e.translation === e.original) : (e.status === 'skipped' && !e.translation)) continue;
+    out.push({ ...e, translation: fill ? e.original : '', status: fill ? 'done' : 'skipped', error: '' });
     res.skipped++;
   }
   if (newOrig.length) await dbPutMany('origFiles', newOrig);
@@ -1571,14 +1571,15 @@ async function viewProyek() {
       } }, 'Cari'), res));
     // Pulihkan kategori tertentu dari game asli yang belum diubah (mis. comment yang terlanjur salah).
     const cats = [...new Set([...Object.keys(p.counts || {}), 'comment', 'comment-teks', 'comment-label'])], pickC = new Set(cats.filter((c) => /^comment/.test(c)));
+    const fillOpt = { on: true };
     const rmsg = h('p', { class: 'mut' }), rbar = h('progress', { value: '0', max: '1', hidden: '' });
     const doRestore = async (ev) => {
       const fs = [...ev.target.files]; ev.target.value = ''; if (!fs.length) return;
       if (!pickC.size) { rmsg.className = 'err'; rmsg.textContent = 'Centang minimal satu kategori'; return; }
       rbar.hidden = false; rmsg.className = 'mut'; rmsg.textContent = 'Membaca game asli…';
       try {
-        const r = await restoreFromPristine(p, fs, pickC, (t, d, n) => { rmsg.textContent = t; rbar.max = n; rbar.value = d; });
-        rmsg.textContent = `Selesai. File cocok: ${r.matched} (tidak ada di game asli: ${r.nofile}, gagal dibaca: ${r.bad})\nField tidak cocok: ${r.badField}\nContoh file gagal: ${r.badNames.join(', ') || '-'}\nDipulihkan: ${r.restored}, dibuat baru: ${r.created}, dilewati (skipped): ${r.skipped}\nSekarang ekspor ulang dan timpa folder Data. Teks yang dipulihkan berstatus pending.`;
+        const r = await restoreFromPristine(p, fs, pickC, (t, d, n) => { rmsg.textContent = t; rbar.max = n; rbar.value = d; }, fillOpt.on);
+        rmsg.textContent = `Selesai. File cocok: ${r.matched} (tidak ada di game asli: ${r.nofile}, gagal dibaca: ${r.bad})\nField tidak cocok: ${r.badField}\nContoh file gagal: ${r.badNames.join(', ') || '-'}\nDipulihkan: ${r.restored}, dibuat baru: ${r.created}, dilewati (skipped): ${r.skipped}\nSekarang ekspor ulang dan timpa folder Data. ${fillOpt.on ? 'Teks yang dipulihkan berstatus done dengan teks asli, jadi ikut masuk patch.' : 'Teks yang dipulihkan berstatus pending.'}`;
       } catch (e) { rmsg.className = 'err'; rmsg.textContent = e?.message || String(e); }
       rbar.hidden = true;
     };
@@ -1586,6 +1587,7 @@ async function viewProyek() {
     out.push(card(h('h2', {}, 'Pulihkan dari game asli'),
       h('p', { class: 'mut' }, 'Untuk teks yang terlanjur diubah dan tidak punya backup. Pilih game asli yang belum diubah dan kategori yang mau dikembalikan. Data proyek pada kategori itu ditimpa dengan teks asli dari game, terjemahan kategori itu dikosongkan, kategori lain tidak disentuh. Hanya teks bertipe field (seperti comment), bukan blok dialog.'),
       cats.map((c) => h('label', { class: 'row' }, h('input', { type: 'checkbox', ...(pickC.has(c) ? { checked: '' } : {}), onchange: (e) => { e.target.checked ? pickC.add(c) : pickC.delete(c); } }), ` ${c}`)),
+      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: '', onchange: (e) => { fillOpt.on = e.target.checked; } }), ' Isi terjemahan dengan teks asli (status done) supaya file ikut di patch'),
       pickR('Pilih folder data asli', { webkitdirectory: '', multiple: '' }), pickR('Pilih zip game asli', { accept: '.zip' }), pickR('Pilih Game.rgss3a asli', {}), rbar, rmsg));
   }
   return out;
