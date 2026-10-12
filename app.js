@@ -130,7 +130,7 @@ const JA = /[\u3040-\u30ff\u3400-\u9fff]/;
 const ID_W = new Set('yang dan di ke dari untuk dengan tidak ini itu ada saya aku kamu kau kita kami mereka akan sudah belum bisa dapat pada adalah atau juga tapi tetapi karena jika kalau apa siapa bagaimana mengapa kenapa sebuah para oleh lagi saja hanya sangat sekali harus mau ingin punya anda dia ia lebih semua setiap masih telah dalam tentang seperti setelah sebelum ketika saat sini situ sana bukan jangan tolong terima kasih maaf selamat ya dong deh kok'.split(' '));
 const EN_W = new Set("the and to of a is are was were you i it that this in on for with not be have has had will would can could my your we he she they them his her but if so what who how why do don't did no yes at as from by an me us just all there here now then when up out about i'm it's you're".split(' '));
 /** Tebak bahasa satu teks (kode escape sudah dibuang): 'ja' | 'en' | 'id' | null (tanpa huruf, mis. angka/simbol). */
-const srcLabel = (s) => ({ auto: 'Otomatis (Jepang/Inggris)', ja: 'Jepang', en: 'Inggris' }[s] || s);
+const srcLabel = (s) => ({ auto: 'Otomatis (Jepang/Inggris)', all: 'Semua teks (bahasa apa pun)', ja: 'Jepang', en: 'Inggris' }[s] || s);
 export function detectLang(t) {
   if (JA.test(t)) return 'ja';
   const w = t.toLowerCase().match(/[a-z']+/g);
@@ -194,6 +194,7 @@ export function limitFor(e, cfg) {
 export function isTranslatable(s, src = 'ja') {
   if (typeof s !== 'string') return false;
   const t = s.replace(ESC, '').trim();
+  if (src === 'all') return !!t; // semua bahasa: asal tidak kosong/hanya kode escape
   if (src === 'auto') { const l = detectLang(t); return l === 'ja' || l === 'en'; }
   return !!t && (src !== 'ja' || JA.test(t));
 }
@@ -657,18 +658,24 @@ export function isCommentText(s, src = 'ja') {
   const t = s.replace(ESC, '').trim();
   if (/[=$@{}]|\w_\w/.test(t)) return false;
   const words = (t.match(/[A-Za-z']+/g) || []).length, ja = JA.test(t), esc = s.replace(ESC, '') !== s;
-  if (!ja && words < 3) return false;
+  const nonLatin = src === 'all' && /[^\x00-\x7f]/.test(t);
+  if (!ja && !nonLatin && words < 3) return false;
   const long = ja ? t.length >= 10 || /[。！？…」』]$/.test(t) : words >= 4;
   return esc ? 'comment' : long ? 'comment-teks' : 'comment-label';
 }
 /** Apakah string di dalam script mirip kalimat untuk pemain (bukan kunci/kode). */
-const scriptSentence = (x) => { const t = x.replace(ESC, '').trim(); return !!t && !/[=$@{}]|\w_\w/.test(t) && (JA.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 3) && detectLang(t) !== 'id'; };
+const scriptSentence = (x, src = 'ja') => {
+  const t = x.replace(ESC, '').trim();
+  if (!t || /[=$@{}]|\w_\w/.test(t)) return false;
+  if (src === 'all') return /[^\x00-\x7f]/.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 2;
+  return (JA.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 3) && detectLang(t) !== 'id';
+};
 export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
   const A = allowSets(allow);
   const base = path.split('/').pop().replace(/\.(json|rvdata2)$/i, ''), ace = /\.rvdata2$/i.test(path), out = [];
   const add = (p, kind, category, original, meta = {}, lineCount = 1) => {
     if (!isTranslatable(original, src)) return;
-    out.push({ file: path, path: JSON.stringify(p), kind, category, original, translation: '', status: 'pending', order: out.length, lineCount, meta, source: src === 'auto' ? detectLang(original.replace(ESC, '').trim()) : src, error: '' });
+    out.push({ file: path, path: JSON.stringify(p), kind, category, original, translation: '', status: 'pending', order: out.length, lineCount, meta, source: src === 'auto' ? detectLang(original.replace(ESC, '').trim()) : src === 'all' ? (JA.test(original) ? 'ja' : detectLang(original.replace(ESC, '').trim()) || 'all') : src, error: '' });
   };
   // Kalimat di dalam string berkutip pada perintah Script (355/655) dan Control Variables bertipe script (122).
   // path = [..., 'parameters', k, '#s', urutan literal]; yang diganti hanya isi literal ke-urutan.
@@ -676,7 +683,7 @@ export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
     let n = 0;
     for (const m of str.matchAll(rbLit())) {
       const raw = m[1] ?? m[2];
-      if (scriptSentence(raw)) add([...p, '#s', n], 'field', 'script-teks', raw.trim(), { lead: raw.slice(0, raw.length - raw.trimStart().length), trail: raw.slice(raw.trimEnd().length) });
+      if (scriptSentence(raw, src)) add([...p, '#s', n], 'field', 'script-teks', raw.trim(), { lead: raw.slice(0, raw.length - raw.trimStart().length), trail: raw.slice(raw.trimEnd().length) });
       n++;
     }
   };
@@ -1199,7 +1206,7 @@ export function applyImport(entries, rows) {
 }
 
 // ===== 4c. TERJEMAH LEWAT CHAT AI =====
-const NL = '⏎', LANG_NAME = { ja: 'Jepang', en: 'Inggris', id: 'Indonesia', auto: 'Jepang atau Inggris (tiap baris bisa salah satunya; baris yang sudah berbahasa Indonesia salin apa adanya)' };
+const NL = '⏎', LANG_NAME = { all: 'bahasa apa pun (tiap baris bisa Jepang, Inggris, Indonesia, Korea, dll; baris yang sudah berbahasa Indonesia salin apa adanya)', ja: 'Jepang', en: 'Inggris', id: 'Indonesia', auto: 'Jepang atau Inggris (tiap baris bisa salah satunya; baris yang sudah berbahasa Indonesia salin apa adanya)' };
 const plainName = (t) => String(t || '').replace(ESC, '').replace(/[\[\]|\n]/g, ' ').trim();
 /**
  * Pecah teks yang belum selesai menjadi bagian-bagian untuk ditempel ke aplikasi AI.
@@ -1485,7 +1492,7 @@ export function estimateCost(entries, cfg0, src = 'ja') {
   for (const e of entries) {
     if (!TODO.has(e.status) || seen.has(e.original)) continue;
     seen.add(e.original); const n = maskText(e.original).text.length; chars += n;
-    if (src === 'ja' || (src === 'auto' && e.source === 'ja')) ja += n;
+    if (src === 'ja' || ((src === 'auto' || src === 'all') && e.source === 'ja')) ja += n;
   }
   const items = seen.size, batches = items ? Math.max(Math.ceil(items / cfg.batchSize), Math.ceil(chars / cfg.maxChars)) : 0;
   const body = ja + (chars - ja) * 0.3;
@@ -1693,7 +1700,7 @@ async function viewProyek() {
     } catch (e) { lock(false); msg.className = 'err'; msg.textContent = e.message; }
   };
   const sel = h('select', { onchange: (e) => { src = e.target.value; } },
-    h('option', { value: 'auto' }, 'Otomatis (Jepang/Inggris campur)'), h('option', { value: 'ja' }, 'Jepang'), h('option', { value: 'en' }, 'Inggris'));
+    h('option', { value: 'auto' }, 'Otomatis (Jepang/Inggris campur)'), h('option', { value: 'all' }, 'Semua teks (bahasa apa pun, impor penuh)'), h('option', { value: 'ja' }, 'Jepang'), h('option', { value: 'en' }, 'Inggris'));
   const pick = (label, attrs) => h('label', { class: 'file' }, label, h('input', { type: 'file', onchange: run, ...attrs }));
   box.append(h('label', {}, 'Bahasa sumber'), sel,
     pick('Pilih folder data', { webkitdirectory: '', multiple: '' }), pick('Pilih zip game', { accept: '.zip' }), pick('Pilih Game.rgss3a', {}), bar, msg);
@@ -1744,6 +1751,8 @@ async function viewProyek() {
     // Pulihkan dari game asli: semua jenis teks (field, dialog, pilihan, pembicara) per kategori.
     const cats = [...new Set([...ALL_CATS, ...Object.keys(p.counts || {})])], pickC = new Set(cats);
     const fillOpt = { on: true }, boxes = [];
+    const rsrc = h('select', { onchange: (e) => { p.src = e.target.value; } },
+      ...[['auto', 'Otomatis (Jepang/Inggris campur)'], ['all', 'Semua teks (bahasa apa pun, impor penuh)'], ['ja', 'Jepang'], ['en', 'Inggris']].map(([v, t]) => h('option', { value: v, ...(p.src === v ? { selected: '' } : {}) }, t)));
     const rmsg = h('p', { class: 'mut' }), rbar = h('progress', { value: '0', max: '1', hidden: '' });
     const doRestore = async (ev) => {
       const fs = [...ev.target.files]; ev.target.value = ''; if (!fs.length) return;
@@ -1759,6 +1768,7 @@ async function viewProyek() {
     const pickR = (label, attrs) => h('label', { class: 'file' }, label, h('input', { type: 'file', onchange: doRestore, ...attrs }));
     out.push(card(h('h2', {}, 'Pulihkan dari game asli'),
       h('p', { class: 'mut' }, 'Untuk teks yang terlanjur diubah dan tidak punya backup. Pilih game asli yang belum diubah dan kategori yang mau dikembalikan. File asli proyek diganti dengan file dari game asli, lalu teks kategori terpilih diambil ulang dan otomatis mengisi kolom terjemahan di tab Review (dialog, pilihan, pembicara, field). Teks yang belum ada di proyek dibuat baru dari file asli, termasuk file yang hilang. Kategori yang tidak dicentang tetap, terjemahannya tidak disentuh.'),
+      h('label', {}, 'Bahasa sumber (menentukan teks mana yang diambil)'), rsrc,
       h('div', { class: 'row' }, h('button', { onclick: () => setAll(true) }, 'Pilih semua'), h('button', { onclick: () => setAll(false) }, 'Kosongkan')),
       cats.map((c) => { const cb = h('input', { type: 'checkbox', ...(pickC.has(c) ? { checked: '' } : {}), onchange: (e) => { e.target.checked ? pickC.add(c) : pickC.delete(c); } }); boxes.push(cb); return h('label', { class: 'row' }, cb, ` ${c}`); }),
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: '', onchange: (e) => { fillOpt.on = e.target.checked; } }), ' Isi kolom terjemahan dengan teks asli (status done) supaya semua file ikut di patch dan kembali seperti game asli. Matikan kalau mau hasilnya pending lalu diterjemahkan ulang'),
