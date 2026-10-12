@@ -849,10 +849,15 @@ function splitList(list) {
  * @returns {string[]} daftar masalah (kosong bila lolos), maksimal 20
  */
 export function diffGuard(orig, next, file = 'data/X.json', allow = null) {
-  const probs = [], allowS = new Set(), allowB = new Set();
+  const probs = [], allowS = new Set(), allowB = new Set(), allowN = new Set();
   // Proyek lama menyimpan indeks array System.terms sebagai string; samakan jadi angka.
   const norm = (path) => JSON.stringify(JSON.parse(path).map((k) => (typeof k === 'string' && /^\d+$/.test(k) ? Number(k) : k)));
-  for (const e of extractFile(file, orig, { src: 'en', allow })) (e.kind === 'block' ? allowB : allowS).add(norm(e.path));
+  for (const e of extractFile(file, orig, { src: 'en', allow })) {
+    // note-tag: yang boleh berubah hanya isi tag di dalam string note; path note-nya didaftarkan terpisah
+    if (e.category === 'note-tag') allowN.add(norm(JSON.stringify(JSON.parse(e.path).slice(0, -2))));
+    else (e.kind === 'block' ? allowB : allowS).add(norm(e.path));
+  }
+  const maskNote = (x) => NOTE_TAGS.reduce((acc, tag) => acc.replace(noteTagRe(tag), (all, raw) => all.slice(0, all.length - raw.length - 1) + '>'), x);
   const bad = (p, why) => { if (probs.length < 20) probs.push(`${file} ${JSON.stringify(p)}: ${why}`); };
   const cmpList = (a, b, p) => {
     const A = splitList(a), B = splitList(b);
@@ -870,7 +875,11 @@ export function diffGuard(orig, next, file = 'data/X.json', allow = null) {
     if (probs.length >= 20) return;
     const t = kindOf(a);
     if (t !== kindOf(b)) return bad(p, 'tipe berubah');
-    if (t === 'string') { if (a !== b && !allowS.has(JSON.stringify(p))) bad(p, 'teks di luar whitelist berubah'); return; }
+    if (t === 'string') {
+      if (a === b || allowS.has(JSON.stringify(p))) return;
+      if (allowN.has(JSON.stringify(p))) { if (maskNote(a) !== maskNote(b)) bad(p, 'bagian note di luar isi tag berubah'); return; }
+      bad(p, 'teks di luar whitelist berubah'); return;
+    }
     if (t === 'array') {
       if (key === 'list' && a.every(isCmd) && b.every(isCmd)) return cmpList(a, b, p);
       if (a.length !== b.length) return bad(p, 'panjang array berubah');
