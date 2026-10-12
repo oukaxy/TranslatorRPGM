@@ -573,30 +573,42 @@ const normPluginsPath = (p) => ((p.replace(/\\/g, '/').match(/(?:^|\/)(www\/)?js
 const NAME_CODES = new Set([320, 324, 325]);
 // System: daftar tipe berupa array string.
 /**
- * Diagnostik: hitung perintah Script (kode 355/655) yang berisi kalimat Inggris/Jepang di dalam tanda kutip.
- * Hanya membaca, tidak mengubah apa pun. Dipakai untuk mengetahui apakah teks game bersembunyi di script call.
+ * Diagnostik: cari string mirip kalimat yang TIDAK diambil extractor, dikelompokkan per jenis perintah event
+ * (atau per field data). Hanya membaca. covered = kumpulan baris teks yang sudah diambil dari file ini.
  */
-export function scanScriptCalls(json) {
-  const r = { cmds: 0, hits: 0, samples: [] };
-  const sentence = (s) => JA.test(s) || (/[A-Za-z][A-Za-z']*(?:\s+[A-Za-z][A-Za-z',.!?]*){2,}/.test(s) && detectLang(s) === 'en');
-  const walk = (v) => {
-    if (Array.isArray(v)) { v.forEach(walk); return; }
-    if (!v || typeof v !== 'object') return;
-    if ((v.code === 355 || v.code === 655) && Array.isArray(v.parameters) && typeof v.parameters[0] === 'string') {
-      r.cmds++;
-      for (const m of v.parameters[0].matchAll(/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g)) {
-        const t = (m[1] ?? m[2]).trim();
-        if (t && sentence(t)) { r.hits++; if (r.samples.length < 3) r.samples.push(t.slice(0, 60)); }
+export function scanGaps(path, json, covered) {
+  const base = path.split('/').pop().replace(/\.(json|rvdata2)$/i, ''), groups = new Map();
+  const note = (label, t) => { const g = groups.get(label) || { n: 0, samples: [] }; g.n++; if (g.samples.length < 2) g.samples.push(t.replace(/\s+/g, ' ').slice(0, 50)); groups.set(label, g); };
+  const sentence = (x) => { const t = x.replace(ESC, '').trim(); return !!t && !/[=$@{}]|\w_\w/.test(t) && (JA.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 3); };
+  const seen = (x) => covered.has(x.trim());
+  const label = (c) => `kode ${c.code} (${CODE_NAME[c.code] || 'lainnya'})`;
+  const walk = (v, key, cmd) => {
+    if (typeof v === 'string') {
+      if (seen(v)) return;
+      if (cmd && (cmd.code === 355 || cmd.code === 655)) {
+        for (const m of v.matchAll(/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g)) { const t = (m[1] ?? m[2]).trim(); if (t && sentence(t) && !seen(t)) note(label(cmd), t); }
+        return;
       }
+      if (sentence(v)) note(cmd ? label(cmd) : `${base}.${key}`, v);
       return;
     }
-    for (const k of Object.keys(v)) if (!k.startsWith('__')) walk(v[k]);
+    if (Array.isArray(v)) { v.forEach((x) => walk(x, key, cmd)); return; }
+    if (!v || typeof v !== 'object') return;
+    const c = typeof v.code === 'number' && Array.isArray(v.parameters) ? v : cmd;
+    for (const k of Object.keys(v)) if (!k.startsWith('__')) walk(v[k], /^\d+$/.test(k) ? key : k, c);
   };
-  walk(json);
-  return r;
+  walk(json, '', null);
+  return groups;
 }
 const SYS_LISTS = ['skillTypes', 'weaponTypes', 'armorTypes', 'equipTypes', 'elements'];
 const SYS_LISTS_ACE = ['skill_types', 'weapon_types', 'armor_types', 'elements'];
+/** Baris Comment yang layak diterjemahkan: kalimat (bukan konfigurasi/kode). Dipakai untuk deskripsi pilihan dan sejenisnya. */
+export function isCommentText(s, src = 'ja') {
+  if (!isTranslatable(s, src)) return false;
+  const t = s.replace(ESC, '').trim();
+  if (/[=$@{}]|\w_\w/.test(t)) return false;
+  return JA.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 3;
+}
 export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
   const A = allowSets(allow);
   const base = path.split('/').pop().replace(/\.(json|rvdata2)$/i, ''), ace = /\.rvdata2$/i.test(path), out = [];
@@ -615,6 +627,7 @@ export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
         if (lines.length) add([...p, i], 'block', body === 401 ? 'dialog' : 'scroll', lines.join('\n'), { speaker: P[4] || '', face: !!P[0] }, lines.length);
         i = j - 1;
       } else if (c.code === 102 && Array.isArray(P[0])) P[0].forEach((t, k) => add([...p, i, 'parameters', 0, k], 'choice', 'choice', t));
+      else if ((c.code === 108 || c.code === 408) && typeof P[0] === 'string' && isCommentText(P[0], src)) add([...p, i, 'parameters', 0], 'field', 'comment', P[0]);
       else if (NAME_CODES.has(c.code) && typeof P[1] === 'string') add([...p, i, 'parameters', 1], 'field', 'actorname', P[1]);
       else if (c.code === 357 && A.mz.size && P[3] && typeof P[3] === 'object') {
         for (const k of Object.keys(P[3])) if (typeof P[3][k] === 'string' && !looksStruct(P[3][k]) && A.mz.has(`${P[0]}.${P[1]}.${k}`)) add([...p, i, 'parameters', 3, k], 'field', 'plugin', P[3][k]);
@@ -719,7 +732,7 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
     const parent = getAt(json, p.slice(0, -1)), key = p.at(-1);
     if (typeof parent?.[key] !== 'string') { problems.push(`${e.file} ${e.path}: path tidak cocok dengan file asli`); continue; }
     const old = parent[key];
-    parent[key] = e.kind === 'choice' ? e.translation.replace(/\s*\n\s*/g, ' ') : e.category === 'plugin' ? (e.meta?.prefix || '') + e.translation.replace(/\s*\n\s*/g, ' ').trim() : e.translation;
+    parent[key] = e.kind === 'choice' || e.category === 'comment' ? e.translation.replace(/\s*\n\s*/g, ' ') : e.category === 'plugin' ? (e.meta?.prefix || '') + e.translation.replace(/\s*\n\s*/g, ' ').trim() : e.translation;
     if (e.kind === 'field' && e.category !== 'plugin' && opts.wrap && WRAP_KEYS.test(String(key))) {
       const w = wrapLines(parent[key], opts.wrap.width);
       if (w) { parent[key] = w.join('\n'); if (opts.stats) opts.stats.wrapped++; }
@@ -866,19 +879,19 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
   const { engine: eng, data, plugins } = await collectSources(files);
   if (!data.size) throw new Error(UI.noData);
   const id = 'p' + Date.now().toString(36), orig = [], entries = [], broken = [], counts = {};
-  const scriptDiag = { cmds: 0, hits: 0, files: [], samples: [] };
+  const gaps = new Map();
   let sys = null, i = 0, msgPlugins = [], pluginsSeen = false, pluginsText = '';
   if (plugins) try { pluginsText = await plugins.read(); msgPlugins = detectMessagePlugins(pluginsText); pluginsSeen = true; } catch { /* plugins.js tidak terbaca */ }
   const ingest = async (path, json, text) => {
     orig.push({ key: `${id}:${path}`, projectId: id, path, text });
-    if (/\.rvdata2$/i.test(path) && json && typeof json === 'object') {
-      const d = scanScriptCalls(json);
-      scriptDiag.cmds += d.cmds; scriptDiag.hits += d.hits;
-      if (d.hits) { scriptDiag.files.push([path.split('/').pop(), d.hits]); if (scriptDiag.samples.length < 5) scriptDiag.samples.push(...d.samples.slice(0, 5 - scriptDiag.samples.length)); }
-    }
+    const covered = new Set();
     for (const e of extractFile(path, json, { src, allow })) {
       e.projectId = id; e.hash = await sha256(e.original); entries.push(e);
       counts[e.category] = (counts[e.category] || 0) + 1;
+      e.original.split('\n').forEach((l) => covered.add(l.trim())); if (e.meta?.speaker) covered.add(e.meta.speaker.trim());
+    }
+    if (json && typeof json === 'object') for (const [k, g] of scanGaps(path, json, covered)) {
+      const t = gaps.get(k) || { n: 0, samples: [] }; t.n += g.n; if (t.samples.length < 2) t.samples.push(...g.samples.slice(0, 2 - t.samples.length)); gaps.set(k, t);
     }
   };
   for (const [path, item] of data) {
@@ -899,7 +912,7 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
     else paramNote = pluginsText ? 'js/plugins.js tidak bisa dibaca (bukan array JSON murni), parameter plugin dilewati' : 'js/plugins.js tidak ikut dipilih, parameter plugin dilewati';
   }
   const engine = eng || (sys && (sys.advanced || sys.itemCategories) ? 'MZ' : 'MV');
-  const project = { id, engine, src, tgt: 'id', scriptDiag, msgPlugins, pluginsSeen, allow, paramNote, files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
+  const project = { id, engine, src, tgt: 'id', gaps: [...gaps].sort((a, b) => b[1].n - a[1].n).slice(0, 10), msgPlugins, pluginsSeen, allow, paramNote, files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
   onProgress(`Menyimpan ${entries.length} teks…`, data.size, data.size);
   await dbPutMany('origFiles', orig);
   await dbPutMany('entries', entries);
@@ -1428,13 +1441,11 @@ async function viewProyek() {
   if (p) out.push(card(h('h2', {}, 'Ringkasan'),
     h('p', { class: 'mut' }, `Engine: ${p.engine}\nSumber: ${srcLabel(p.src)}\nFile data: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\nPlugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan)` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`),
     p.paramNote ? h('p', { class: 'err' }, p.paramNote) : '',
-    p.engine === 'VX Ace' ? (() => {
-      const d = p.scriptDiag;
-      if (!d) return h('p', { class: 'mut' }, 'Diagnostik script call: impor ulang proyek ini untuk menghitung.');
-      const top = d.files.sort((a, b) => b[1] - a[1]).slice(0, 5).map(([f, n]) => `${f} (${n})`).join(', ');
-      return h('p', { class: d.hits ? 'err' : 'mut' }, `Diagnostik script call: ${d.cmds} perintah Script, ${d.hits} berisi kalimat Inggris/Jepang.` +
-        (d.hits ? `\nTerbanyak: ${top}\nContoh: ${d.samples.map((x) => `"${x}"`).join(' | ')}\nTeks ada di script call, perlu pembaca khusus.` : '\nNol: teks kemungkinan dari Scripts.rvdata2 (belum dipindai).'));
-    })() : '',
+    (() => {
+      if (!p.gaps) return h('p', { class: 'mut' }, 'Diagnostik teks yang belum terbaca: impor ulang proyek ini untuk menghitung.');
+      if (!p.gaps.length) return h('p', { class: 'mut' }, 'Diagnostik: tidak ada kalimat lain yang terlewat di file data.');
+      return h('p', { class: 'err' }, `Kalimat yang belum terbaca (cek jenisnya):\n${p.gaps.map(([k, g]) => `${k}: ${g.n} | ${g.samples.map((x) => `"${x}"`).join(' / ')}`).join('\n')}`);
+    })(),
     p.total ? '' : h('p', { class: 'err' }, UI.emptyImp),
     Object.entries(p.counts).map(([k, v]) => h('span', { class: 'badge' }, `${k} ${v}`)),
     (() => {
