@@ -1005,7 +1005,7 @@ export async function restoreFromPristine(project, files, cats, onProgress = () 
   const byBase = new Map([...data].map(([k, v]) => [base(k), v]));
   const stored = await dbPrefix('origFiles', project.id + ':'), ents = await dbQuery('entries', 'projectId', project.id);
   const byKey = new Map(ents.map((e) => [`${e.file}|${e.path}`, e]));
-  const res = { matched: 0, restored: 0, created: 0, nofile: 0, bad: 0, badField: 0, badNames: [], skipped: 0 }, newOrig = [], out = [];
+  const res = { matched: 0, restored: 0, created: 0, nofile: 0, bad: 0, badField: 0, badNames: [], skipped: 0 }, newOrig = [], out = [], madeBy = {};
   let i = 0;
   for (const f of stored) {
     onProgress(`Memeriksa ${base(f.path)} (${++i} dari ${stored.length})`, i, stored.length);
@@ -1024,7 +1024,7 @@ export async function restoreFromPristine(project, files, cats, onProgress = () 
       }
       const old = byKey.get(`${f.path}|${e.path}`), hash = await sha256(e.original);
       if (old) { out.push({ ...old, original: e.original, category: e.category, translation: fill ? e.original : '', status: fill ? 'done' : 'pending', error: '', hash }); res.restored++; }
-      else { out.push({ ...e, file: f.path, projectId: project.id, hash, ...(fill ? { translation: e.original, status: 'done' } : {}) }); res.created++; }
+      else { out.push({ ...e, file: f.path, projectId: project.id, hash, ...(fill ? { translation: e.original, status: 'done' } : {}) }); res.created++; madeBy[e.category] = (madeBy[e.category] || 0) + 1; }
     }
     if (changed) newOrig.push({ ...f, text: JSON.stringify(mine) });
   }
@@ -1039,6 +1039,13 @@ export async function restoreFromPristine(project, files, cats, onProgress = () 
   }
   if (newOrig.length) await dbPutMany('origFiles', newOrig);
   if (out.length) await dbPutMany('entries', out);
+  if (res.created) {
+    // perbarui ringkasan proyek (lencana kategori & total) untuk entri yang baru dibuat
+    project.counts = { ...(project.counts || {}) };
+    for (const [c, n] of Object.entries(madeBy)) project.counts[c] = (project.counts[c] || 0) + n;
+    project.total = (project.total || 0) + res.created; project.updatedAt = Date.now();
+    await dbPut('projects', project);
+  }
   return res;
 }
 // ===== 4b. GLOSARIUM & EDIT MANUAL (CSV/JSON) =====
