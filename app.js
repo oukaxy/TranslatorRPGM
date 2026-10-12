@@ -115,7 +115,8 @@ const noteTagRe = (tag) => new RegExp('<' + tag.replace(/[.*+?^${}()|[\]\\]/g, '
 /** String berkutip di kode Ruby (perintah Script): "..." atau '...'. Grup 1 = isi kutip ganda, grup 2 = isi kutip tunggal. */
 const rbLit = () => /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g;
 // Kode escape (\C[2], \!, ...) dan tag plugin ASCII seperti <br>, <WordWrap>, <left>. Tag berisi huruf Jepang tidak ikut.
-const ESC = /\\(?:[A-Za-z]+\[\d+\]|[A-Za-z]|[{}.|!^$<>\\])|<\/?[A-Za-z][ -;=?-~]{0,40}>/g;
+// Selain kode escape pesan, ikut dimasker: pemanggilan fungsi berindeks (if(s[12]), en(s[3]), f(\v[5])), s[n]/v[n], $gameXxx, dan placeholder %1.
+const ESC = /\\(?:[A-Za-z]+\[(?:\d+|#[0-9A-Fa-f]{3,8})\]|[A-Za-z]|[{}.|!^$<>\\])|<\/?[A-Za-z][ -;=?-~]{0,40}>|\b[A-Za-z_]\w*\((?=[^)\n]*(?:\[\d+\]|\\[A-Za-z]+\[))(?:[^()\n]|\([^()\n]*\))*\)|\b[sv]\[\d+\]|\$game[A-Za-z]+(?:\.\w+|\[[^\]\n]*\])*|%\d/g;
 // Plugin message yang punya word-wrap sendiri. Bila aktif, pemecahan baris manual dimatikan.
 const MSG_PLUGIN = /^(YEP_MessageCore|VisuMZ_1_MessageCore)$|word.?wrap|line.?wrap|auto.?wrap|text.?wrap|message.?wrap/i;
 /** Daftar nama plugin message aktif dari isi js/plugins.js. */
@@ -1229,6 +1230,7 @@ export function buildChatParts(project, entries, cfg, perPart = 150, maxChars = 
       `1. Balas HANYA dengan baris terjemahan, satu baris untuk tiap baris sumber, dengan format: [id] terjemahan`,
       `2. Salin nomor id persis. Jangan melewatkan, menggabung, mengurutkan ulang, atau menambah baris. Jumlah baris balasan harus ${us.length}.`,
       `3. Token seperti ⟦0⟧ dan ⟦1⟧ adalah kode game. Salin persis, jangan diterjemahkan atau dihapus. Posisinya boleh dipindah mengikuti tata bahasa, tapi tiap token harus muncul tepat satu kali.`,
+      `3b. Jangan terjemahkan atau ubah apa pun yang berupa kode: nama fungsi/kata kunci (if, en, else, true, false, nil), nama variabel (s[12], v[3], $gameVariables), nama file, atau teks berformat kunci seperti key=value. "if" tidak boleh menjadi "jika". Salin apa adanya. Label seperti "bait:⟦0⟧" hanya kata labelnya yang diterjemahkan ("umpan:⟦0⟧"), tokennya tetap.`,
       `4. Tanda ${NL} berarti pindah baris di dalam satu teks. Pertahankan tanda itu (jangan diganti baris baru sungguhan) dan taruh di tempat yang wajar.`,
       `5. Bagian "|nama" setelah id hanyalah konteks pembicara. Jangan ikut ditulis di balasan dan jangan diterjemahkan sebagai teks.`,
       `6. Tanpa komentar, pembuka, penutup, atau blok kode.`,
@@ -1282,7 +1284,7 @@ export const DEFAULT_CONFIG = {
   temperature: 0.3, batchSize: 30, maxChars: 4000, concurrency: 4, delay: 100, priceIn: 0, priceOut: 0,
   fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '', timeout: 120, extraBody: '', auto: true,
 };
-const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian', auto: 'Japanese or English (each item may be in either language; if an item is already Indonesian, return it unchanged)' };
+const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian', all: 'any language (each item may be Japanese, English, Indonesian, Korean, etc.; if an item is already Indonesian, return it unchanged)', auto: 'Japanese or English (each item may be in either language; if an item is already Indonesian, return it unchanged)' };
 /** Hasil terjemahan yang masih memuat huruf Jepang/Mandarin, Cyrillic, Arab, atau Hangul: tanda terjemahan setengah jalan atau ngaco. */
 export const stray = (t) => JA.test(t) || /[\u0400-\u04FF\u0600-\u06FF\uAC00-\uD7AF]/.test(t);
 const STRAY_MSG = 'Hasil masih bercampur huruf Jepang/asing, bukan bahasa target';
@@ -1399,6 +1401,7 @@ export function buildMessages({ src, tgt, units, context = [], style = '' }) {
   const system = `You translate RPG game text from ${LANG[src]} to ${LANG[tgt]}.
 Rules:
 - Keep every ⟦n⟧ token exactly as given: same count, same form. Never translate, add, or remove them.
+- Never translate or alter anything that looks like code: function names and keywords (if, en, else, true, false, nil), variable names (s[12], v[3], $gameVariables), file names, or key=value strings. "if" must never become "jika"/"if"-equivalents. Copy them verbatim. For labels like "bait:⟦0⟧", translate only the label word and keep the token.
 - Keep line breaks as line breaks and keep the same number of lines when possible.
 - Translate every word into ${LANG[tgt]}. Never leave Japanese, Chinese, or Korean characters in the translation and never mix source-language words into the sentence; romanize a name if you must keep it. Reply only in ${LANG[tgt]}.\n- Translate as natural game dialogue. Keep names consistent. Keep short UI terms short.
 - If "glossary" is given, translate those terms exactly as listed (from -> to).${style.trim() ? `\n- Style guide for all text: ${style.trim().replace(/\s+/g, ' ')}` : ''}
