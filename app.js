@@ -1149,6 +1149,56 @@ export async function rescueSkipped(project, onProgress = () => {}) {
   return res;
 }
 /**
+ * Cocokkan urutan kunci O ke L sebagai subsekuens. Hasilnya indeks di L untuk tiap elemen O,
+ * tetapi hanya bila caranya TUNGGAL; bila ada lebih dari satu cara (ambigu) atau tidak ada, hasilnya null.
+ */
+export function alignUnique(O, L) {
+  const n = O.length, m = L.length; if (!n || n > m) return null;
+  const w = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let j = 0; j <= m; j++) w[0][j] = 1;
+  for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) w[i][j] = Math.min(2, w[i][j - 1] + (O[i - 1] === L[j - 1] ? w[i - 1][j - 1] : 0));
+  if (w[n][m] !== 1) return null;
+  const idx = new Array(n); let i = n, j = m;
+  while (i > 0) { if (w[i][j - 1] > 0) j--; else { idx[i - 1] = j - 1; i--; j--; } }
+  return idx;
+}
+/**
+ * Selamatkan PILIHAN (choice) bertanda "Tidak ada di game asli" lewat posisi, bukan teks.
+ * Dipakai saat teks di game yang sudah diedit/diterjemahkan beda dengan game asli (mis. beda bahasa), sehingga pencocokan teks gagal.
+ * Pilihan dikelompokkan per daftar perintah (file + letak list), diurutkan, lalu dipasangkan lewat nomor opsi dan kode escape.
+ * Hanya dipasangkan bila pasangannya tunggal; selebihnya dibiarkan skipped. Terjemahan dipindah ke entri di posisi game asli.
+ */
+export async function rescueByPosition(project, onProgress = () => {}) {
+  const ents = await dbQuery('entries', 'projectId', project.id);
+  const res = { orphans: 0, moved: 0, left: 0, ambiguous: 0 }, groups = new Map(), toPut = [], toDel = [];
+  for (const e of ents) {
+    if (e.kind !== 'choice') continue;
+    let p; try { p = JSON.parse(e.path); } catch { continue; }
+    if (!Array.isArray(p) || p.length < 5) continue;
+    const orphan = e.status === 'skipped' && e.error === 'Tidak ada di game asli' && typeof e.translation === 'string' && e.translation.trim() !== '';
+    const free = e.status !== 'skipped' && (String(e.translation ?? '').trim() === '' || e.translation === e.original);
+    if (!orphan && !free) continue;
+    const gk = `${e.file}\n${JSON.stringify(p.slice(0, -4))}`;
+    if (!groups.has(gk)) groups.set(gk, { o: [], l: [] });
+    (orphan ? groups.get(gk).o : groups.get(gk).l).push({ e, i: p.at(-4), k: p.at(-1), key: `${p.at(-1)}|${escSig(e.original)}` });
+    if (orphan) res.orphans++;
+  }
+  let n = 0;
+  for (const g of groups.values()) {
+    if (!g.o.length) continue;
+    if (++n % 50 === 0) { onProgress(`Mencocokkan pilihan (${n} kelompok)`); await new Promise((r) => setTimeout(r)); }
+    const by = (a, b) => a.i - b.i || a.k - b.k; g.o.sort(by); g.l.sort(by);
+    const al = alignUnique(g.o.map((x) => x.key), g.l.map((x) => x.key));
+    if (!al) { res.left += g.o.length; res.ambiguous++; continue; }
+    g.o.forEach((o, t) => { toPut.push({ ...g.l[al[t]].e, translation: o.e.translation, status: 'edited', error: '' }); toDel.push(o.e.id); res.moved++; });
+  }
+  if (toPut.length) await dbPutMany('entries', toPut);
+  if (toDel.length) await dbDeleteMany('entries', toDel);
+  const all = await dbQuery('entries', 'projectId', project.id);
+  project.updatedAt = Date.now(); project.total = all.length; await dbPut('projects', project);
+  return res;
+}
+/**
  * Pulihkan teks dari game asli (yang belum diubah) ke proyek, per kategori terpilih. Semua jenis teks ikut:
  * field, dialog/scroll (blok), pilihan, dan nama pembicara.
  * Cara kerja per file yang ada di game asli:
@@ -1901,7 +1951,16 @@ async function viewProyek() {
           smsg.textContent = `Selesai. Entri skipped: ${r.orphans}\nDiselamatkan (teks sama): ${r.exact}\nDiselamatkan (mirip, mohon dicek): ${r.fuzzy}\nMasih tidak cocok: ${r.left}${r.bad ? `\nFile gagal dibaca: ${r.bad}` : ''}`;
         } catch (e) { smsg.className = 'err'; smsg.textContent = e?.message || String(e); }
         b.disabled = false;
-      } }, 'Selamatkan sekarang'), smsg));
+      } }, 'Selamatkan sekarang'),
+      h('p', { class: 'mut' }, 'Kalau pilihan (choice) masih tidak cocok karena teks di game yang diedit beda dengan game asli (mis. beda bahasa), pakai tombol ini. Pilihan dicocokkan lewat posisi dan urutannya, bukan teksnya. Hanya yang pasangannya pasti yang dipindahkan.'),
+      h('button', { onclick: async (ev) => {
+        const b = ev.currentTarget; b.disabled = true; smsg.className = 'mut'; smsg.textContent = 'Mencocokkan lewat urutan…';
+        try {
+          const r = await rescueByPosition(p, (t) => { smsg.textContent = t; });
+          smsg.textContent = `Selesai. Pilihan skipped: ${r.orphans}\nDipindahkan ke posisi game asli: ${r.moved}\nMasih tidak cocok: ${r.left}${r.ambiguous ? ` (${r.ambiguous} kelompok ambigu, dibiarkan)` : ''}`;
+        } catch (e) { smsg.className = 'err'; smsg.textContent = e?.message || String(e); }
+        b.disabled = false;
+      } }, 'Selamatkan pilihan lewat urutan'), smsg));
   }
   return out;
 }
@@ -2205,7 +2264,8 @@ async function viewEkspor() {
       try {
         await dbPutMany('entries', r.bad.map((e) => ({ ...e, status: 'skipped', error: 'Tidak ada di game asli' })));
         const x = await rescueSkipped(p, (t) => { wm.textContent = t; });
-        wm.textContent = `Selesai. Cocok ulang ${x.exact + x.fuzzy} dari ${x.orphans} teks (persis ${x.exact}, mirip ${x.fuzzy}). Belum cocok: ${x.left}${x.bad ? `, file gagal dibaca: ${x.bad}` : ''}.\nTekan Buat patch lagi.`;
+        const y = await rescueByPosition(p, (t) => { wm.textContent = t; });
+        wm.textContent = `Selesai. Cocok lewat teks: ${x.exact + x.fuzzy} dari ${x.orphans} (persis ${x.exact}, mirip ${x.fuzzy}). Pilihan cocok lewat urutan: ${y.moved}. Belum cocok: ${x.left - y.moved}${x.bad ? `, file gagal dibaca: ${x.bad}` : ''}.\nTekan Buat patch lagi.`;
       } catch (e) { wm.className = 'err'; wm.textContent = `Gagal: ${e.message || e}`; }
       wb.disabled = false;
     } }, 'Cocokkan ulang teks yang dilewati');
