@@ -800,7 +800,7 @@ function sync402(list, i, k, oldText, newText) {
   for (let j = i + 1; j < (list?.length || 0); j++) {
     const c = list[j];
     if (c.code === 404 && c.indent === n) break;
-    if (c.code === 402 && c.indent === n && c.parameters?.[0] === k && c.parameters[1] === oldText) c.parameters[1] = newText;
+    if (c.code === 402 && c.indent === n && c.parameters?.[0] === k && c.parameters?.[1] === oldText) c.parameters[1] = newText;
   }
 }
 /**
@@ -1279,6 +1279,30 @@ export function applyImport(entries, rows) {
     out.updates.push({ ...e, translation: t, status: 'edited', error: '' });
   }
   return out;
+}
+/**
+ * Isi kolom translation yang kosong di baris utama dengan nilai dari file pembanding.
+ * Pencocokan lewat id (string, di-trim). Baris utama yang sudah punya terjemahan tidak diubah.
+ * Baris pembanding dengan translation kosong juga tidak dipakai.
+ * @param {object[]} primary baris hasil impor (boleh ada translation kosong)
+ * @param {object[]} secondary baris pembanding (sumber nilai pengisi)
+ * @returns {object[]} baris baru (primary dengan translation yang sudah diisi)
+ */
+export function mergeRows(primary, secondary) {
+  const byId = new Map();
+  for (const r of Array.isArray(secondary) ? secondary : []) {
+    const id = String(r?.id ?? '').trim();
+    if (id !== '' && !byId.has(id)) byId.set(id, r);
+  }
+  const empty = (v) => String(v ?? '').trim() === '';
+  return (Array.isArray(primary) ? primary : []).map((r) => {
+    if (!r || typeof r !== 'object') return r;
+    if (!empty(r.translation)) return r;
+    const s = byId.get(String(r.id ?? '').trim());
+    const t = s?.translation;
+    if (empty(t)) return r;
+    return { ...r, translation: t };
+  });
 }
 
 // ===== 4c. TERJEMAH LEWAT CHAT AI =====
@@ -2109,7 +2133,7 @@ async function viewReview() {
   fill();
   return [card(sel, catSel, find, info), replCard, box];
 }
-let exportUrl = '', editUrl = '', rgUrl = '';
+let exportUrl = '', editUrl = '', editUrlFilled = '', rgUrl = '';
 async function viewEkspor() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
@@ -2146,27 +2170,70 @@ async function viewEkspor() {
     } catch (e) { out.replaceChildren(card(h('p', { class: 'err' }, e.message))); }
     btn.disabled = false;
   } }, 'Buat patch');
-  const editOut = h('div'), editMsg = h('p', { class: 'mut' });
-  const link = (name, mime, text) => {
-    if (editUrl) URL.revokeObjectURL(editUrl);
-    editUrl = URL.createObjectURL(new Blob([text], { type: mime }));
-    editOut.replaceChildren(h('a', { class: 'file', href: editUrl, download: name }, `Unduh ${name}`));
+  const editOut = h('div'), editOutFilled = h('div'), editMsg = h('p', { class: 'mut' });
+  const link = (name, mime, text, filled = false) => {
+    const url = URL.createObjectURL(new Blob([text], { type: mime }));
+    if (filled) {
+      if (editUrlFilled) URL.revokeObjectURL(editUrlFilled);
+      editUrlFilled = url;
+      editOutFilled.replaceChildren(h('a', { class: 'file', href: url, download: name }, `Unduh ${name}`));
+    } else {
+      if (editUrl) URL.revokeObjectURL(editUrl);
+      editUrl = url;
+      editOut.replaceChildren(h('a', { class: 'file', href: url, download: name }, `Unduh ${name}`));
+    }
   };
-  const dump = async (kind) => {
-    const rws = entriesToRows((await dbQuery('entries', 'projectId', p.id)).sort((a, b) => a.id - b.id));
-    if (kind === 'csv') link(`rpgtl-${p.id}.csv`, 'text/csv', toCsv(rws)); else link(`rpgtl-${p.id}.json`, 'application/json', JSON.stringify(rws, null, 1));
+  const isFilled = (e) => (e.status === 'done' || e.status === 'edited') && typeof e.translation === 'string' && e.translation.trim() !== '';
+  const dump = async (kind, filled = false) => {
+    const all = (await dbQuery('entries', 'projectId', p.id)).sort((a, b) => a.id - b.id);
+    const src = filled ? all.filter(isFilled) : all;
+    if (filled && !src.length) { editMsg.className = 'err'; editMsg.textContent = 'Belum ada teks yang sudah terisi.'; return; }
+    const rws = entriesToRows(src), suffix = filled ? '-terisi' : '';
+    if (kind === 'csv') link(`rpgtl-${p.id}${suffix}.csv`, 'text/csv', toCsv(rws), filled);
+    else link(`rpgtl-${p.id}${suffix}.json`, 'application/json', JSON.stringify(rws, null, 1), filled);
+    if (filled) { editMsg.className = 'mut'; editMsg.textContent = `${src.length} entri terisi diekspor.`; }
   };
+  // File pembanding untuk mengisi otomatis kolom translation yang kosong.
+  let prevRows = null, prevName = '';
+  const prevMsg = h('p', { class: 'mut' });
+  const prevClear = h('button', { onclick: () => { prevRows = null; prevName = ''; prevMsg.className = 'mut'; prevMsg.textContent = 'File pembanding dilepas.'; } }, 'Lepas file pembanding');
+  const prevInp = h('input', { type: 'file', accept: '.csv,.json', onchange: async (ev) => {
+    const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
+    prevMsg.className = 'mut'; prevMsg.textContent = 'Membaca file pembanding…';
+    try {
+      const txt = await f.text();
+      const rws = /\.json$/i.test(f.name) ? JSON.parse(txt) : parseCsv(txt);
+      if (!Array.isArray(rws)) throw new Error('Isi file bukan daftar baris');
+      prevRows = rws; prevName = f.name;
+      prevMsg.textContent = `File pembanding siap: ${f.name} (${rws.length} baris). Saat impor, kolom translation yang kosong di file impor diisi dari file ini lewat id.`;
+    } catch (e) { prevRows = null; prevName = ''; prevMsg.className = 'err'; prevMsg.textContent = e.message; }
+  }});
   const importEdit = async (ev) => {
     const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
     editMsg.className = 'mut'; editMsg.textContent = 'Membaca…';
     try {
-      const txt = await f.text(), rws = /\.json$/i.test(f.name) ? JSON.parse(txt) : parseCsv(txt);
+      const txt = await f.text(); let rws = /\.json$/i.test(f.name) ? JSON.parse(txt) : parseCsv(txt);
       if (!Array.isArray(rws)) throw new Error('Isi file bukan daftar baris');
+      const empty = (arr) => arr.filter((r) => String(r?.translation ?? '').trim() === '').length;
+      let filledFromPrev = 0;
+      if (prevRows) {
+        const before = empty(rws);
+        rws = mergeRows(rws, prevRows);
+        filledFromPrev = Math.max(0, before - empty(rws));
+      }
       const r = applyImport(await dbQuery('entries', 'projectId', p.id), rws);
       if (r.updates.length) await dbPutMany('entries', r.updates);
       const ids = (a) => (a.length ? ` (id ${a.slice(0, 8).join(', ')}${a.length > 8 ? ', …' : ''})` : '');
-      editMsg.textContent = [`Diperbarui: ${r.updates.length}`, `Sama dengan sebelumnya: ${r.same}`, `Terjemahan kosong (dilewati): ${r.empty}`,
-        `Teks asli tidak cocok dengan proyek ini: ${r.mismatch.length}${ids(r.mismatch)}`, `Kode escape/tag berubah (ditolak): ${r.badEsc.length}${ids(r.badEsc)}`, `id tidak dikenal: ${r.unknown.length}`].join('\n');
+      editMsg.className = 'mut';
+      editMsg.textContent = [
+        `Diperbarui: ${r.updates.length}`,
+        ...(prevRows ? [`Diisi otomatis dari file pembanding: ${filledFromPrev} baris`] : []),
+        `Sama dengan sebelumnya: ${r.same}`,
+        `Terjemahan kosong (dilewati): ${r.empty}`,
+        `Teks asli tidak cocok dengan proyek ini: ${r.mismatch.length}${ids(r.mismatch)}`,
+        `Kode escape/tag berubah (ditolak): ${r.badEsc.length}${ids(r.badEsc)}`,
+        `id tidak dikenal: ${r.unknown.length}`,
+      ].join('\n');
     } catch (e) { editMsg.className = 'err'; editMsg.textContent = e.message; }
   };
   let chatUrls = [];
@@ -2199,8 +2266,16 @@ async function viewEkspor() {
     } catch (e) { chatMsg.className = 'err'; chatMsg.textContent = e.message; return false; }
   };
   return [card(h('h2', {}, 'Ekspor'), h('p', { class: 'mut' }, `Siap diekspor: ${ready}\nBelum diterjemahkan (tetap asli): ${pend}\nError (tetap asli): ${err}`), btn), out,
-    card(h('h2', {}, 'Edit manual'), h('p', { class: 'mut' }, 'Unduh semua teks sebagai CSV atau JSON, edit kolom translation, lalu impor lagi. Jangan ubah kolom id dan original. Kode escape dan tag harus tetap sama.'),
+    card(h('h2', {}, 'Edit manual'),
+      h('p', { class: 'mut' }, 'Unduh semua teks sebagai CSV atau JSON, edit kolom translation, lalu impor lagi. Jangan ubah kolom id dan original. Kode escape dan tag harus tetap sama.'),
+      h('p', { class: 'mut' }, h('strong', {}, '1) Ekspor semua teks')),
       h('div', { class: 'row' }, h('button', { onclick: () => dump('csv') }, 'Siapkan CSV'), h('button', { onclick: () => dump('json') }, 'Siapkan JSON')), editOut,
+      h('p', { class: 'mut' }, h('strong', {}, '2) Ekspor hanya yang sudah terisi (id asli ikut)')),
+      h('p', { class: 'mut' }, 'Hanya entri berstatus done atau edited yang terjemahannya tidak kosong. Cocok untuk melanjutkan di aplikasi AI lain: hanya id yang sudah benar yang ikut.'),
+      h('div', { class: 'row' }, h('button', { onclick: () => dump('csv', true) }, 'CSV terisi'), h('button', { onclick: () => dump('json', true) }, 'JSON terisi')), editOutFilled,
+      h('p', { class: 'mut' }, h('strong', {}, '3) Impor hasil edit')),
+      h('p', { class: 'mut' }, 'File pembanding (opsional) dipilih dulu. Kolom translation yang kosong di file impor diisi otomatis dari file pembanding lewat id, jadi kamu bisa impor file yang belum lengkap tanpa kehilangan nilai yang sudah ada di file sebelumnya.'),
+      h('label', { class: 'file' }, 'Pilih file pembanding (.csv / .json) — opsional', prevInp), prevClear, prevMsg,
       h('label', { class: 'file' }, 'Impor hasil edit (.csv / .json)', h('input', { type: 'file', accept: '.csv,.json', onchange: importEdit })), editMsg),
     card(h('h2', {}, 'Terjemah lewat chat AI'), h('p', { class: 'mut' }, 'Untuk menerjemahkan di aplikasi AI lain tanpa API. Teks yang belum selesai dipecah jadi bagian-bagian berisi instruksi, gaya, dan glosarium. Kirim satu bagian ke AI (tempel atau unggah file), lalu tempel balasannya di bawah. Bagian dihitung ulang dari teks yang belum selesai tiap kali kamu menyiapkannya.'),
       h('label', {}, 'Teks per bagian'), perPart, h('label', {}, 'Maks karakter per bagian'), perChars, h('button', { class: 'pri', onclick: prepare }, 'Siapkan bagian'), chatOut,
