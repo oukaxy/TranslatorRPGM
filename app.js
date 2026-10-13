@@ -713,6 +713,56 @@ export function readMulti(list, i) {
   }
   return null;
 }
+
+/**
+ * Rentetan Control Variables (122) bertipe Script pada variabel yang sama, mis. sistem diary:
+ *   $122 v1241 += "Today, "   +=  $game_actors[1].name   +=  " licked￥"   += "me down there ￥" ...
+ * Tiap baris = satu potongan string (atau ekspresi seperti $game_actors[1].name). ￥ = penanda ganti baris.
+ * Mengembalikan { n, pieces, text } atau null.
+ */
+const LIT = /^(\s*)(["'])((?:(?!\2)[^\\]|\\[\s\S])*)\2(\s*)$/;
+const EXPR = new RegExp('^\\s*(?:' + ESC.source + ')\\s*$');
+export function readRun(list, i) {
+  const P0 = list?.[i]?.parameters;
+  if (list[i].code !== 122 || P0?.[3] !== 4 || typeof P0[4] !== 'string') return null;
+  const pieces = [];
+  for (let j = i; j < list.length && j < i + 120; j++) {
+    const c = list[j], P = c?.parameters;
+    if (c?.code !== 122 || P?.[3] !== 4 || typeof P[4] !== 'string' || P[0] !== P0[0] || P[1] !== P0[1] || P[2] !== P0[2]) break;
+    const m = LIT.exec(P[4]);
+    if (m) pieces.push({ lead: m[1], q: m[2], body: m[3], trail: m[4] });
+    else if (EXPR.test(P[4])) pieces.push({ expr: P[4].trim() });
+    else break;
+  }
+  if (pieces.filter((x) => !x.expr).length < 2) return null;
+  return { n: pieces.length, pieces, text: pieces.map((x) => (x.expr ? x.expr : x.body)).join('') };
+}
+/** Pecah s menjadi n potongan (di spasi/￥) yang bila digabung persis sama dengan s. */
+function splitN(s, n) {
+  if (n <= 1) return [s];
+  const chunks = s.split(/(?<=[￥ ])/), goal = Math.ceil(s.length / n), out = [];
+  let cur = '';
+  for (const c of chunks) {
+    if (cur && out.length < n - 1 && (cur + c).length > goal) { out.push(cur); cur = c; } else cur += c;
+  }
+  out.push(cur);
+  while (out.length < n) out.push('');
+  return out;
+}
+/** Susun ulang pemisah baris ￥ pada terjemahan sesuai lebar baris aslinya (kecuali asli memakai baris kosong). */
+function wrapRun(t, rn) {
+  const orig = rn.text, exprs = rn.pieces.filter((x) => x.expr).map((x) => x.expr);
+  if (/￥[\s　]*￥|^[\s　]*￥/.test(orig)) return t;
+  const vis = (x) => { for (const e of exprs) x = x.split(e).join('xxxxxx'); return [...x].reduce((a, ch) => a + (ch.charCodeAt(0) > 0xff ? 2 : 1), 0); };
+  const W = Math.max(20, ...orig.split('￥').map((l) => vis(l.trim())));
+  const lines = []; let cur = '';
+  for (const w of t.replace(/￥/g, ' ').split(/\s+/).filter(Boolean)) {
+    const cand = cur ? cur + ' ' + w : w;
+    if (cur && vis(cand) > W) { lines.push(cur); cur = w; } else cur = cand;
+  }
+  if (cur) lines.push(cur);
+  return lines.join('￥') + (/￥[\s　]*$/.test(orig) ? '￥' : '');
+}
 /** Pisahkan terjemahan menjadi tepat n baris (newline, lalu batas \| , lalu rata per kata). */
 function fitLines(t, n) {
   if (n <= 1) return [t.replace(/\s*\n\s*/g, ' ')];
@@ -733,6 +783,8 @@ function fitLines(t, n) {
 export const scriptSentence = (x, src = 'ja') => {
   const t = x.replace(ESC, '').trim();
   if (!t || /[=$@{}]|\w_\w/.test(t)) return false;
+  // perintah/konfigurasi berbentuk [Kunci nilai:Nilai] (mis. [Add 100%:Confuse]) dibaca script, bukan teks pemain
+  if (/^\[[^\]\n]*:[^\]\n]*\]$/.test(t)) return false;
   // nama aset/ID/path (Audio/VOICE/96020201, A101f, face_01.png) bukan teks pemain
   if (!JA.test(t) && (/^[\w\-.\/\\#:]+$/.test(t) || /\.(png|jpg|jpeg|ogg|wav|m4a|mp3|rb|json|txt|ttf|otf)\b/i.test(t))) return false;
   if (src === 'all') return JA.test(t) || /[^\x00-\x7f]/.test(t.replace(/[\p{P}\p{S}\p{Z}]/gu, '')) || (/\s/.test(t) && (t.match(/[A-Za-z']+/g) || []).length >= 2);
@@ -784,7 +836,13 @@ export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
           }
         }
       }
-      else if (c.code === 122 && P[3] === 4 && typeof P[4] === 'string') scriptLits(P[4], [...p, i, 'parameters', 4]);
+      else if (c.code === 122 && P[3] === 4 && typeof P[4] === 'string') {
+        const rn = readRun(list, i), S = rn?.text || '', t = S.trim();
+        if (rn && t && scriptSentence(t, src)) {
+          add([...p, i, '#run', rn.n], 'field', 'script-multi', t, { lead: S.slice(0, S.length - S.trimStart().length), trail: S.slice(S.trimEnd().length) });
+          i += rn.n - 1; // potongan di dalam rentetan tidak diambil lagi satu per satu
+        } else scriptLits(P[4], [...p, i, 'parameters', 4]);
+      }
     }
   };
   const walk = (v, p) => {
@@ -910,6 +968,28 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
       if (!hit) fail(e, `string ke-${nth} tidak ditemukan di file asli`);
       continue;
     }
+    if (e.category === 'script-multi' && p.at(-2) === '#run') {
+      // path = [..., 'list', i, '#run', n]; rentetan Control Variables (122): teks digabung, ekspresi tetap, jumlah baris tetap n
+      const n = p.at(-1), i = p.at(-3), list = getAt(json, p.slice(0, -3)), rn = readRun(list, i);
+      if (!rn || rn.n !== n) { fail(e, 'rentetan script tidak cocok dengan file asli'); continue; }
+      if (nz(rn.text) !== nz(e.original)) { fail(e, 'teks asli di posisi ini berbeda (posisi bergeser)'); continue; }
+      let T = wrapRun(e.translation.replace(/\r/g, '').replace(/\s*\n\s*/g, ' ').trim(), rn);
+      T = (e.meta?.lead || '') + T + (e.meta?.trail || '');
+      const exprs = rn.pieces.filter((x) => x.expr).map((x) => x.expr), segs = []; let pos = 0, bad1 = '';
+      for (const x of exprs) { const k = T.indexOf(x, pos); if (k < 0) { bad1 = `ekspresi ${x} hilang dari terjemahan`; break; } segs.push(T.slice(pos, k)); pos = k + x.length; }
+      segs.push(T.slice(pos));
+      const gaps = [0]; for (const pc of rn.pieces) { if (pc.expr) gaps.push(0); else gaps[gaps.length - 1]++; }
+      if (!bad1 && segs.some((x, g) => !gaps[g] && x.trim())) bad1 = 'teks di antara dua ekspresi tidak punya baris untuk menampungnya';
+      if (bad1) { fail(e, bad1); continue; }
+      const chunks = segs.map((x, g) => (gaps[g] ? splitN(x, gaps[g]) : [])); let g = 0;
+      rn.pieces.forEach((pc, k) => {
+        if (pc.expr) { g++; return; }
+        let body = chunks[g].shift();
+        body = (pc.q === '"' ? body.replace(/"/g, "'") : body.replace(/'/g, '’')).replace(/#(?=[{$@])/g, '').replace(/\\+$/, '');
+        list[i + k].parameters[4] = pc.lead + pc.q + body + pc.q + pc.trail;
+      });
+      continue;
+    }
     if (e.category === 'script-multi') {
       // path = [..., 'list', i, '#ml', n]; isi string yang membentang n baris Script diganti, jumlah baris tetap n
       const n = p.at(-1), i = p.at(-3), list = getAt(json, p.slice(0, -3)), ml = readMulti(list, i);
@@ -1005,13 +1085,15 @@ function splitList(list) {
  * @returns {string[]} daftar masalah (kosong bila lolos), maksimal 20
  */
 export function diffGuard(orig, next, file = 'data/X.json', allow = null) {
-  const probs = [], allowS = new Set(), allowB = new Set(), allowN = new Set(), allowL = new Set(), allowM = new Map();
+  const probs = [], allowS = new Set(), allowB = new Set(), allowN = new Set(), allowL = new Set(), allowM = new Map(), allowR = new Set();
   // Proyek lama menyimpan indeks array System.terms sebagai string; samakan jadi angka.
   const norm = (path) => JSON.stringify(JSON.parse(path).map((k) => (typeof k === 'string' && /^\d+$/.test(k) ? Number(k) : k)));
   for (const e of extractFile(file, orig, { src: 'en', allow })) {
     // note-tag: yang boleh berubah hanya isi tag di dalam string note; path note-nya didaftarkan terpisah
     if (e.category === 'script-multi') {
-      const pp = JSON.parse(e.path), n = pp.at(-1), i = pp.at(-3), lp = pp.slice(0, -3), ml = readMulti(getAt(orig, lp), i);
+      const pp = JSON.parse(e.path), n = pp.at(-1), i = pp.at(-3), lp = pp.slice(0, -3);
+      if (pp.at(-2) === '#run') { for (let k = 0; k < n; k++) allowR.add(norm(JSON.stringify([...lp, i + k, 'parameters', 4]))); continue; }
+      const ml = readMulti(getAt(orig, lp), i);
       if (ml) for (let k = 0; k < n; k++) allowM.set(norm(JSON.stringify([...lp, i + k, 'parameters', 0])), { k, n, at: ml.at, endRe: ml.endRe });
     } else if (e.category === 'script-teks') allowL.add(norm(JSON.stringify(JSON.parse(e.path).slice(0, -2))));
     else if (e.category === 'note-tag') allowN.add(norm(JSON.stringify(JSON.parse(e.path).slice(0, -2))));
@@ -1038,6 +1120,12 @@ export function diffGuard(orig, next, file = 'data/X.json', allow = null) {
     if (t !== kindOf(b)) return bad(p, 'tipe berubah');
     if (t === 'string') {
       if (a === b || allowS.has(JSON.stringify(p))) return;
+      if (allowR.has(JSON.stringify(p))) {
+        const rm = (x) => { const m = LIT.exec(x); return m ? m[1] + m[2] + m[2] + m[4] : EXPR.test(x) ? x : null; };
+        const ma = rm(a), mb = rm(b);
+        if (ma === null || mb === null || ma !== mb) bad(p, 'bagian script di luar isi string berubah');
+        return;
+      }
       const am = allowM.get(JSON.stringify(p));
       if (am) {
         const mask = (x) => am.k === 0 ? (am.endRe.test(x.slice(am.at + 1)) ? null : x.slice(0, am.at + 1)) : am.k === am.n - 1 ? (() => { const m = am.endRe.exec(x); return m ? x.slice(m[0].length) : null; })() : (am.endRe.test(x) ? null : '');
