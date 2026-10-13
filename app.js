@@ -118,7 +118,7 @@ const noteTagRe = (tag) => new RegExp('<' + tag.replace(/[.*+?^${}()|[\]\\]/g, '
 const rbLit = () => /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g;
 // Kode escape (\C[2], \!, ...) dan tag plugin ASCII seperti <br>, <WordWrap>, <left>. Tag berisi huruf Jepang tidak ikut.
 // Selain kode escape pesan, ikut dimasker: pemanggilan fungsi berindeks (if(s[12]), en(s[3]), f(\v[5])), s[n]/v[n], $gameXxx, dan placeholder %1.
-const ESC = /\\(?:[A-Za-z]+\[(?:\d+|#[0-9A-Fa-f]{3,8})\]|[A-Za-z]|[{}.|!^$<>\\])|<\/?[A-Za-z][ -;=?-~]{0,40}>|\b[A-Za-z_]\w*\((?=[^)\n]*(?:\[\d+\]|\\[A-Za-z]+\[))(?:[^()\n]|\([^()\n]*\))*\)|\b[sv]\[\d+\]|\$game[A-Za-z]+(?:\.\w+|\[[^\]\n]*\])*|%\d|#\{[^}\n]*\}|\$\{[^}\n]*\}|\{\{[^}\n]*\}\}|\{\d+\}/g;
+const ESC = /\\(?:[A-Za-z]+\[(?:\d+|#[0-9A-Fa-f]{3,8})\]|[A-Za-z]|[{}.|!^$<>\\])|<\/?[A-Za-z][ -;=?-~]{0,40}>|\b[A-Za-z_]\w*\((?=[^)\n]*(?:\[\d+\]|\\[A-Za-z]+\[))(?:[^()\n]|\([^()\n]*\))*\)|\b[sv]\[\d+\]|\$game[A-Za-z]+(?:\.\w+|\[[^\]\n]*\])*|%\d|#\{[^}\n]*\}|\$\{[^}\n]*\}|\{\{[^}\n]*\}\}|\{\d+\}|[¥￥]/g;
 // Plugin message yang punya word-wrap sendiri. Bila aktif, pemecahan baris manual dimatikan.
 const MSG_PLUGIN = /^(YEP_MessageCore|VisuMZ_1_MessageCore)$|word.?wrap|line.?wrap|auto.?wrap|text.?wrap|message.?wrap/i;
 /** Daftar nama plugin message aktif dari isi js/plugins.js. */
@@ -730,10 +730,12 @@ function fitLines(t, n) {
   return out;
 }
 /** Apakah string di dalam script mirip kalimat untuk pemain (bukan kunci/kode). */
-const scriptSentence = (x, src = 'ja') => {
+export const scriptSentence = (x, src = 'ja') => {
   const t = x.replace(ESC, '').trim();
   if (!t || /[=$@{}]|\w_\w/.test(t)) return false;
-  if (src === 'all') return /[^\x00-\x7f]/.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 2;
+  // nama aset/ID/path (Audio/VOICE/96020201, A101f, face_01.png) bukan teks pemain
+  if (!JA.test(t) && (/^[\w\-.\/\\#:]+$/.test(t) || /\.(png|jpg|jpeg|ogg|wav|m4a|mp3|rb|json|txt|ttf|otf)\b/i.test(t))) return false;
+  if (src === 'all') return JA.test(t) || /[^\x00-\x7f]/.test(t.replace(/[\p{P}\p{S}\p{Z}]/gu, '')) || (/\s/.test(t) && (t.match(/[A-Za-z']+/g) || []).length >= 2);
   return (JA.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 3) && detectLang(t) !== 'id';
 };
 export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
