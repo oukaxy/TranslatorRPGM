@@ -18,6 +18,8 @@ export const UI = {
   badJson: 'Respons model tidak valid. Coba terjemahkan ulang',
   emptyTr: 'Terjemahan kosong. Coba terjemahkan ulang',
   tokenBad: 'Kode escape berubah. Coba terjemahkan ulang',
+  codeAdded: 'AI menulis kode game sendiri (bukan token). Coba terjemahkan ulang',
+  codeWord: 'Kata kunci kode (if, else, true, dll) hilang atau diterjemahkan. Coba terjemahkan ulang',
   timeout: 'Provider terlalu lama menjawab. Coba lagi atau naikkan batas waktu di Pengaturan',
   tooMany: 'Tiga batch gagal berturut-turut. Periksa Pengaturan atau koneksi, lalu lanjutkan',
   exportEmpty: 'Belum ada terjemahan yang bisa diekspor. Terjemahkan dulu di tab Translate',
@@ -116,7 +118,7 @@ const noteTagRe = (tag) => new RegExp('<' + tag.replace(/[.*+?^${}()|[\]\\]/g, '
 const rbLit = () => /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g;
 // Kode escape (\C[2], \!, ...) dan tag plugin ASCII seperti <br>, <WordWrap>, <left>. Tag berisi huruf Jepang tidak ikut.
 // Selain kode escape pesan, ikut dimasker: pemanggilan fungsi berindeks (if(s[12]), en(s[3]), f(\v[5])), s[n]/v[n], $gameXxx, dan placeholder %1.
-const ESC = /\\(?:[A-Za-z]+\[(?:\d+|#[0-9A-Fa-f]{3,8})\]|[A-Za-z]|[{}.|!^$<>\\])|<\/?[A-Za-z][ -;=?-~]{0,40}>|\b[A-Za-z_]\w*\((?=[^)\n]*(?:\[\d+\]|\\[A-Za-z]+\[))(?:[^()\n]|\([^()\n]*\))*\)|\b[sv]\[\d+\]|\$game[A-Za-z]+(?:\.\w+|\[[^\]\n]*\])*|%\d/g;
+const ESC = /\\(?:[A-Za-z]+\[(?:\d+|#[0-9A-Fa-f]{3,8})\]|[A-Za-z]|[{}.|!^$<>\\])|<\/?[A-Za-z][ -;=?-~]{0,40}>|\b[A-Za-z_]\w*\((?=[^)\n]*(?:\[\d+\]|\\[A-Za-z]+\[))(?:[^()\n]|\([^()\n]*\))*\)|\b[sv]\[\d+\]|\$game[A-Za-z]+(?:\.\w+|\[[^\]\n]*\])*|%\d|#\{[^}\n]*\}|\$\{[^}\n]*\}|\{\{[^}\n]*\}\}|\{\d+\}/g;
 // Plugin message yang punya word-wrap sendiri. Bila aktif, pemecahan baris manual dimatikan.
 const MSG_PLUGIN = /^(YEP_MessageCore|VisuMZ_1_MessageCore)$|word.?wrap|line.?wrap|auto.?wrap|text.?wrap|message.?wrap/i;
 /** Daftar nama plugin message aktif dari isi js/plugins.js. */
@@ -160,6 +162,30 @@ export function unmaskText(text, tokens) {
   const seen = new Array(tokens.length).fill(0); let ok = true;
   const out = text.replace(/⟦(\d+)⟧/g, (m, n) => { if (tokens[n] === undefined) { ok = false; return m; } seen[n]++; return tokens[n]; });
   return { ok: ok && seen.every((c) => c === 1), text: (tokens.lead || '') + out + (tokens.trail || '') };
+}
+// Kata kunci kode yang tidak boleh hilang/diterjemahkan, hanya diperiksa bila teks asli terlihat seperti kode (ada operator, if(...), atau x = y).
+const CODE_WORDS = /\b(?:if|elsif|else|unless|while|true|false|nil|null|return)\b/g;
+const CODEY = /[=!<>]=|&&|\|\||\b(?:if|elsif|unless|while)\b\s*[($!\\]|\b[A-Za-z_]\w*\s*=\s*[^\s=]/;
+/** True bila teks asli berbau kode dan jumlah kata kuncinya di terjemahan lebih sedikit. */
+export function kwLost(orig, tr) {
+  if (!CODEY.test(orig)) return false;
+  const cnt = (x) => { const m = {}; for (const w of String(x).match(CODE_WORDS) || []) m[w] = (m[w] || 0) + 1; return m; };
+  const a = cnt(orig), b = cnt(tr);
+  return Object.keys(a).some((w) => (b[w] || 0) < a[w]);
+}
+/**
+ * Pengaman kode untuk balasan AI (teks masih bertoken ⟦n⟧): tolak bila AI menulis kode game mentah sendiri
+ * (yang seharusnya hanya ada lewat token) atau kata kunci kode asli hilang/diterjemahkan. Hasil '' bila aman.
+ */
+export function codeProblem(maskedOrig, maskedTr) {
+  if (new RegExp(ESC.source).test(String(maskedTr))) return UI.codeAdded;
+  return kwLost(maskedOrig, maskedTr) ? UI.codeWord : '';
+}
+/** Audit: terjemahan yang kode game atau kata kunci kodenya tidak sama dengan teks asli. */
+export function codeDiff(e) {
+  const t = String(e.translation ?? '').trim();
+  if (!t || e.status === 'skipped' || e.status === 'pending') return false;
+  return escSig(e.original) !== escSig(t) || kwLost(stripEscapes(e.original), stripEscapes(t));
 }
 /** Teks tanpa kode escape (untuk mengukur panjang baris yang terlihat). */
 export const stripEscapes = (s) => s.replace(ESC, '');
@@ -1396,6 +1422,9 @@ export function buildChatParts(project, entries, cfg, perPart = 150, maxChars = 
       `2. Salin nomor id persis. Jangan melewatkan, menggabung, mengurutkan ulang, atau menambah baris. Jumlah baris balasan harus ${us.length}.`,
       `3. Token seperti ⟦0⟧ dan ⟦1⟧ adalah kode game. Salin persis, jangan diterjemahkan atau dihapus. Posisinya boleh dipindah mengikuti tata bahasa, tapi tiap token harus muncul tepat satu kali.`,
       `3b. Jangan terjemahkan atau ubah apa pun yang berupa kode: nama fungsi/kata kunci (if, en, else, true, false, nil), nama variabel (s[12], v[3], $gameVariables), nama file, atau teks berformat kunci seperti key=value. "if" tidak boleh menjadi "jika". Salin apa adanya. Label seperti "bait:⟦0⟧" hanya kata labelnya yang diterjemahkan ("umpan:⟦0⟧"), tokennya tetap.`,
+      `3c. Token ⟦n⟧ mewakili kode game (warna, nama, variabel, ikon, fungsi). Anggap tiap token satu kata utuh: tetap menempel pada kata yang sama seperti di sumber (mis. "⟦0⟧Potion" jadi "⟦0⟧Ramuan", tanpa spasi atau tanda baca tambahan), jangan dipecah, digabung, atau diganti.`,
+      `3d. Jangan menulis kode game sendiri: tidak ada kode \\C[2], \\V[1], \\N[1], tag <...>, atau %1 kecuali yang sudah berupa token ⟦n⟧ di sumber. Kalau sumber tidak punya kode, terjemahan juga tidak.`,
+      `3e. Baris yang isinya cuma kode, angka, nama variabel/file/switch, atau pasangan key=value: salin persis. Jangan "memperbaiki", merapikan, atau mengubah tanda kurung, operator, angka, dan besar kecil huruf pada kode. Identifier seperti CamelCase, snake_case, atau HURUF_BESAR tidak diterjemahkan.`,
       `4. Tanda ${NL} berarti pindah baris di dalam satu teks. Pertahankan tanda itu (jangan diganti baris baru sungguhan) dan taruh di tempat yang wajar.`,
       `5. Bagian "|nama" setelah id hanyalah konteks pembicara. Jangan ikut ditulis di balasan dan jangan diterjemahkan sebagai teks.`,
       `6. Tanpa komentar, pembuka, penutup, atau blok kode.`,
@@ -1435,8 +1464,8 @@ export function applyChatRows(entries, rows) {
     const t = String(r.text).replace(new RegExp(`\\s*${NL}\\s*`, 'g'), '\n').trim();
     const lead = (e0.original.match(/^\s*/) || [''])[0].replace(/\r/g, ''), trail = (e0.original.match(/\s*$/) || [''])[0].replace(/\r/g, '');
     if (!t) { out.empty.push(r.id); continue; }
-    const u = unmaskText(t, maskText(e0.original).tokens);
-    if (!u.ok) { out.badToken.push(r.id); continue; }
+    const mk = maskText(e0.original), u = unmaskText(t, mk.tokens);
+    if (!u.ok || codeProblem(mk.text.replace(/\r?\n/g, '\n'), t)) { out.badToken.push(r.id); continue; }
     seen.add(e0.original); out.texts++;
     for (const e of byOrig.get(e0.original)) if (TODO.has(e.status)) out.updates.push({ ...e, translation: lead + u.text + trail, status: 'done', error: '' });
   }
@@ -1567,6 +1596,9 @@ export function buildMessages({ src, tgt, units, context = [], style = '' }) {
 Rules:
 - Keep every ⟦n⟧ token exactly as given: same count, same form. Never translate, add, or remove them.
 - Never translate or alter anything that looks like code: function names and keywords (if, en, else, true, false, nil), variable names (s[12], v[3], $gameVariables), file names, or key=value strings. "if" must never become "jika"/"if"-equivalents. Copy them verbatim. For labels like "bait:⟦0⟧", translate only the label word and keep the token.
+- A ⟦n⟧ token stands for one game code (color, name, variable, icon, function call). Treat it as an opaque word: keep it attached to the same neighbouring word as in the source ("⟦0⟧Potion" -> "⟦0⟧Ramuan", no added space or punctuation), never split, merge, or replace it.
+- Never write game codes yourself: no backslash codes (\\C[2], \\V[1], \\N[1]), no <tags>, no %1 placeholders unless they appear as ⟦n⟧ tokens in the source. If the source has none, the translation has none.
+- If an item is only code, a number, a variable/file/switch name, or key=value pairs, copy it unchanged. Do not fix, normalise, or reformat code: keep brackets, parentheses, operators, digits, and letter case exactly. Never translate identifiers (CamelCase, snake_case, ALL_CAPS).
 - Keep line breaks as line breaks and keep the same number of lines when possible.
 - Translate every word into ${LANG[tgt]}. Never leave Japanese, Chinese, or Korean characters in the translation and never mix source-language words into the sentence; romanize a name if you must keep it. Reply only in ${LANG[tgt]}.\n- Translate as natural game dialogue. Keep names consistent. Keep short UI terms short.
 - If "glossary" is given, translate those terms exactly as listed (from -> to).${style.trim() ? `\n- Style guide for all text: ${style.trim().replace(/\s+/g, ' ')}` : ''}
@@ -1720,7 +1752,7 @@ export async function runTranslation(project, cfg, o = {}) {
   const run = async (batch) => {
     const r = await translateBatch(batch, {
       chat: guarded, retry: { signal }, src: project.src, tgt: project.tgt, context: batch[0].ctx, style: cfg.style,
-      check: (id, t) => (!t.trim() ? UI.emptyTr : !unmaskText(t, byId.get(id).tokens).ok ? UI.tokenBad : stray(t) ? STRAY_MSG : ''),
+      check: (id, t) => (!t.trim() ? UI.emptyTr : !unmaskText(t, byId.get(id).tokens).ok ? UI.tokenBad : stray(t) ? STRAY_MSG : codeProblem(byId.get(id).text, t)),
       onUsage: (u) => { stat.tokensIn += u?.prompt_tokens || 0; stat.tokensOut += u?.completion_tokens || 0; },
     });
     stat.expOut += batch.reduce((a, u) => a + u.text.length + 5, 0); stat.nb++;
@@ -1756,7 +1788,7 @@ export async function retranslateEntry(project, cfg, e, chat) {
   const terms = termsFor(parseGlossary(cfg.glossary), `${e.original}\n${e.meta?.speaker || ''}`), notes = notesFor(parseNotes(cfg.charNotes), e.meta?.speaker || '');
   const r = await translateBatch([{ id: 0, text: m.text, speaker: e.meta?.speaker || '', limit: limitFor(e, effCfg(project, cfg)), terms, notes }], {
     chat: call, src: project.src, tgt: project.tgt, context: [], style: cfg.style,
-    check: (id, t) => (t.trim() ? (unmaskText(t, m.tokens).ok ? '' : UI.tokenBad) : UI.emptyTr),
+    check: (id, t) => (t.trim() ? (unmaskText(t, m.tokens).ok ? codeProblem(m.text, t) : UI.tokenBad) : UI.emptyTr),
   });
   if (!r.ok.size) throw new LlmError(r.fail.get(0) || UI.badJson);
   const text = unmaskText(r.ok.get(0), m.tokens).text, u = { ...e, translation: text, status: 'done', error: '' };
@@ -2117,7 +2149,7 @@ async function viewSettings() {
     h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')), msg),
   card(h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn)];
 }
-const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped']];
+const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)']];
 /** Filter khusus: cari teks asli yang memuat kode/fungsi tertentu. Dicocokkan ke teks asli (kode game ada di sana). */
 const FUNC_FILTERS = [
   ['any', 'Semua jenis kode/fungsi', null],
@@ -2190,7 +2222,7 @@ async function viewReview() {
   };
   const fill = () => {
     const fnRe = fnTest(fn);
-    const list = rows.filter((e) => (filter === 'all' || e.status === filter) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
+    const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : e.status === filter)) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
     const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE)); page = Math.min(page, pages - 1);
     info.textContent = qErr ? qErr : `${list.length} teks`; info.className = qErr ? 'err' : 'mut';
     const go = (n) => () => { page = n; fill(); scrollTo(0, 0); };
@@ -2198,7 +2230,7 @@ async function viewReview() {
       h('div', { class: 'row' }, h('button', { onclick: go(page - 1), ...(page ? {} : { disabled: '' }) }, 'Sebelumnya'),
         h('button', { onclick: go(page + 1), ...(page < pages - 1 ? {} : { disabled: '' }) }, `Berikutnya (${page + 1}/${pages})`)));
   };
-  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1));
+  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); sCnt.set('codediff', rows.filter(codeDiff).length);
   const sel = h('select', { 'aria-label': 'Filter status', onchange: (e) => { filter = e.target.value; page = 0; fill(); } }, FILTERS.map(([v, t]) => h('option', { value: v }, v === 'all' ? `${t} (${rows.length})` : `${t} (${sCnt.get(v) || 0})`)));
   const fnSel = h('select', { 'aria-label': 'Filter kode atau fungsi', onchange: (e) => { fn = e.target.value; page = 0; fill(); } }, FUNC_FILTERS.map(([v, t]) => { const re = fnTest(v); return h('option', { value: v }, re ? `${t} (${rows.filter((x) => re.test(x.original)).length})` : t); }));
   const modeSel = h('select', { 'aria-label': 'Mode pencarian', onchange: (e) => { mode = e.target.value; setQuery(qRaw); } },
