@@ -110,7 +110,7 @@ export const DB_FIELDS = {
   Enemies: ['name'], States: ['name', 'message1', 'message2', 'message3', 'message4'],
 };
 /** Semua kategori yang bisa dihasilkan extractor (dipakai menu Pulihkan, karena proyek hasil impor game yang sudah diubah mungkin belum punya kategori itu). */
-export const ALL_CATS = ['dialog', 'scroll', 'choice', 'speaker', 'actorname', 'system', 'map', 'plugin', ...Object.keys(DB_FIELDS).map((k) => k.toLowerCase()), 'comment', 'comment-teks', 'comment-label', 'note-tag', 'script-teks'];
+export const ALL_CATS = ['dialog', 'scroll', 'choice', 'speaker', 'actorname', 'system', 'map', 'plugin', ...Object.keys(DB_FIELDS).map((k) => k.toLowerCase()), 'comment', 'comment-teks', 'comment-label', 'note-tag', 'script-teks', 'script-multi'];
 /** Tag di field note database yang isinya teks tampil (hanya isi tag yang diterjemahkan, nama tag dan tanda <> tetap). */
 export const NOTE_TAGS = ['図鑑特徴'];
 const noteTagRe = (tag) => new RegExp('<' + tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[:：]([\\s\\S]*?)>', 'g');
@@ -690,6 +690,45 @@ export function isCommentText(s, src = 'ja') {
   const long = ja ? t.length >= 10 || /[。！？…」』]$/.test(t) : words >= 4;
   return esc ? 'comment' : long ? 'comment-teks' : 'comment-label';
 }
+
+/**
+ * String Ruby yang dipecah di beberapa baris Script (355 + 655...), mis.
+ *   355: text = "      655: kalimat 1 \|      655: kalimat 2."      655: ...
+ * Mengembalikan { n (jumlah baris), q (jenis kutip), at (posisi kutip buka di baris pertama), segs (isi tiap baris), tail (kode setelah kutip tutup) } atau null.
+ */
+export function readMulti(list, i) {
+  const c = list?.[i];
+  if (!c || (c.code !== 355 && c.code !== 655) || typeof c.parameters?.[0] !== 'string') return null;
+  const s = c.parameters[0], rest = s.replace(rbLit(), (m) => ' '.repeat(m.length)), m = /["']/.exec(rest);
+  if (!m || rest.slice(0, m.index).includes('#')) return null; // kutip di dalam komentar bukan string
+  const q = m[0], at = m.index, endRe = q === '"' ? /^((?:[^"\\]|\\[\s\S])*)"/ : /^((?:[^'\\]|\\[\s\S])*)'/;
+  if (endRe.test(s.slice(at + 1))) return null;
+  const segs = [s.slice(at + 1)];
+  for (let j = i + 1; j < list.length && j <= i + 60; j++) {
+    const d = list[j];
+    if (d?.code !== 655 || typeof d.parameters?.[0] !== 'string') return null;
+    const t = d.parameters[0], em = endRe.exec(t);
+    if (em) { segs.push(em[1]); return { n: j - i + 1, q, at, segs, tail: t.slice(em[0].length), endRe }; }
+    segs.push(t);
+  }
+  return null;
+}
+/** Pisahkan terjemahan menjadi tepat n baris (newline, lalu batas \| , lalu rata per kata). */
+function fitLines(t, n) {
+  if (n <= 1) return [t.replace(/\s*\n\s*/g, ' ')];
+  const byNl = t.split('\n').map((x) => x.trimEnd());
+  if (byNl.length === n) return byNl;
+  const byBar = t.split(/(?<=\\\|)\s*/).filter((x, k, a) => x !== '' || k < a.length - 1);
+  if (byBar.length === n) return byBar.map((x) => x.trim());
+  const words = t.split(/\s+/).filter(Boolean), total = words.join(' ').length, goal = Math.ceil(total / n), out = [];
+  let cur = '';
+  for (const w of words) {
+    if (cur && out.length < n - 1 && (cur + ' ' + w).length > goal) { out.push(cur); cur = w; } else cur = cur ? cur + ' ' + w : w;
+  }
+  out.push(cur);
+  while (out.length < n) out.push('');
+  return out;
+}
 /** Apakah string di dalam script mirip kalimat untuk pemain (bukan kunci/kode). */
 const scriptSentence = (x, src = 'ja') => {
   const t = x.replace(ESC, '').trim();
@@ -732,7 +771,17 @@ export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
       } else if (c.code === 356 && A.mv.size && typeof P[0] === 'string') {
         const m = P[0].match(/^(\S+)\s+(\S[\s\S]*)$/);
         if (m && A.mv.has(m[1])) add([...p, i, 'parameters', 0], 'field', 'plugin', m[2], { prefix: P[0].slice(0, P[0].length - m[2].length) });
-      } else if ((c.code === 355 || c.code === 655) && typeof P[0] === 'string') scriptLits(P[0], [...p, i, 'parameters', 0]);
+      } else if ((c.code === 355 || c.code === 655) && typeof P[0] === 'string') {
+        scriptLits(P[0], [...p, i, 'parameters', 0]);
+        const ml = readMulti(list, i);
+        if (ml) {
+          const S = ml.segs.join('\n'), t = S.trim();
+          if (t && scriptSentence(t, src)) {
+            add([...p, i, '#ml', ml.n], 'field', 'script-multi', t, { lead: S.slice(0, S.length - S.trimStart().length), trail: S.slice(S.trimEnd().length) });
+            i += ml.n - 1; // baris di dalam string tidak dipindai lagi sebagai script biasa
+          }
+        }
+      }
       else if (c.code === 122 && P[3] === 4 && typeof P[4] === 'string') scriptLits(P[4], [...p, i, 'parameters', 4]);
     }
   };
@@ -859,6 +908,27 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
       if (!hit) fail(e, `string ke-${nth} tidak ditemukan di file asli`);
       continue;
     }
+    if (e.category === 'script-multi') {
+      // path = [..., 'list', i, '#ml', n]; isi string yang membentang n baris Script diganti, jumlah baris tetap n
+      const n = p.at(-1), i = p.at(-3), list = getAt(json, p.slice(0, -3)), ml = readMulti(list, i);
+      if (!ml || ml.n !== n) { fail(e, 'string script multi-baris tidak cocok dengan file asli'); continue; }
+      if (nz(ml.segs.join(' ')) !== nz(e.original)) { fail(e, 'teks asli di posisi ini berbeda (posisi bergeser)'); continue; }
+      const dq = ml.q === '"', lead = (e.meta?.lead || '').split('\n'), trail = (e.meta?.trail || '').split('\n');
+      const C = n - (lead.length - 1) - (trail.length - 1);
+      if (C < 1) { fail(e, 'struktur baris string tidak valid'); continue; }
+      let t = e.translation.replace(/\r/g, '').trim();
+      t = dq ? t.replace(/"/g, "'") : t.replace(/'/g, '’');
+      t = t.replace(/#(?=[{$@])/g, '');
+      const body = fitLines(t, C).map((x) => x.replace(/\\+$/, ''));
+      const segs = [...lead.slice(0, -1), lead.at(-1) + body[0], ...body.slice(1)];
+      segs[segs.length - 1] += trail[0]; segs.push(...trail.slice(1));
+      if (segs.length !== n) { fail(e, 'jumlah baris hasil tidak sama dengan aslinya'); continue; }
+      segs.forEach((x, k) => {
+        const par = list[i + k].parameters;
+        par[0] = k === 0 ? par[0].slice(0, ml.at + 1) + x : k === n - 1 ? x + ml.q + ml.tail : x;
+      });
+      continue;
+    }
     if (e.category === 'note-tag') {
       // path = [..., indeks, 'note', namaTag, urutan]; hanya isi tag ke-urutan yang diganti
       const noteP = p.slice(0, -2), tag = p.at(-2), nth = p.at(-1), holder = getAt(json, noteP.slice(0, -1)), nk = noteP.at(-1);
@@ -933,12 +1003,15 @@ function splitList(list) {
  * @returns {string[]} daftar masalah (kosong bila lolos), maksimal 20
  */
 export function diffGuard(orig, next, file = 'data/X.json', allow = null) {
-  const probs = [], allowS = new Set(), allowB = new Set(), allowN = new Set(), allowL = new Set();
+  const probs = [], allowS = new Set(), allowB = new Set(), allowN = new Set(), allowL = new Set(), allowM = new Map();
   // Proyek lama menyimpan indeks array System.terms sebagai string; samakan jadi angka.
   const norm = (path) => JSON.stringify(JSON.parse(path).map((k) => (typeof k === 'string' && /^\d+$/.test(k) ? Number(k) : k)));
   for (const e of extractFile(file, orig, { src: 'en', allow })) {
     // note-tag: yang boleh berubah hanya isi tag di dalam string note; path note-nya didaftarkan terpisah
-    if (e.category === 'script-teks') allowL.add(norm(JSON.stringify(JSON.parse(e.path).slice(0, -2))));
+    if (e.category === 'script-multi') {
+      const pp = JSON.parse(e.path), n = pp.at(-1), i = pp.at(-3), lp = pp.slice(0, -3), ml = readMulti(getAt(orig, lp), i);
+      if (ml) for (let k = 0; k < n; k++) allowM.set(norm(JSON.stringify([...lp, i + k, 'parameters', 0])), { k, n, at: ml.at, endRe: ml.endRe });
+    } else if (e.category === 'script-teks') allowL.add(norm(JSON.stringify(JSON.parse(e.path).slice(0, -2))));
     else if (e.category === 'note-tag') allowN.add(norm(JSON.stringify(JSON.parse(e.path).slice(0, -2))));
     else (e.kind === 'block' ? allowB : allowS).add(norm(e.path));
   }
@@ -963,6 +1036,13 @@ export function diffGuard(orig, next, file = 'data/X.json', allow = null) {
     if (t !== kindOf(b)) return bad(p, 'tipe berubah');
     if (t === 'string') {
       if (a === b || allowS.has(JSON.stringify(p))) return;
+      const am = allowM.get(JSON.stringify(p));
+      if (am) {
+        const mask = (x) => am.k === 0 ? (am.endRe.test(x.slice(am.at + 1)) ? null : x.slice(0, am.at + 1)) : am.k === am.n - 1 ? (() => { const m = am.endRe.exec(x); return m ? x.slice(m[0].length) : null; })() : (am.endRe.test(x) ? null : '');
+        const ma = mask(a), mb = mask(b);
+        if (ma === null || mb === null || ma !== mb) bad(p, 'bagian script di luar isi string berubah');
+        return;
+      }
       if (allowL.has(JSON.stringify(p))) { if (maskLit(a) !== maskLit(b)) bad(p, 'bagian script di luar isi string berubah'); return; }
       if (allowN.has(JSON.stringify(p))) { if (maskNote(a) !== maskNote(b)) bad(p, 'bagian note di luar isi tag berubah'); return; }
       bad(p, 'teks di luar whitelist berubah'); return;
@@ -2035,7 +2115,7 @@ async function viewTranslate() {
   const cfg = await loadConfig(), all = await dbQuery('entries', 'projectId', p.id);
   // Kategori yang masih punya teks belum diterjemahkan (pending/error). Default: semua terpilih.
   const todoBy = new Map(); all.filter((e) => TODO.has(e.status)).forEach((e) => todoBy.set(e.category, (todoBy.get(e.category) || 0) + 1));
-  if (catSel.pid !== p.id || !catSel.set) { catSel.pid = p.id; catSel.set = new Set([...todoBy.keys()].filter((k) => k !== 'comment-label' && k !== 'comment-teks' && k !== 'script-teks')); }
+  if (catSel.pid !== p.id || !catSel.set) { catSel.pid = p.id; catSel.set = new Set([...todoBy.keys()].filter((k) => k !== 'comment-label' && k !== 'comment-teks' && k !== 'script-teks' && k !== 'script-multi')); }
   for (const k of [...catSel.set]) if (!todoBy.has(k)) catSel.set.delete(k);
   const pickedAll = [...todoBy.keys()].every((k) => catSel.set.has(k));
   const scoped = pickedAll ? all : all.filter((e) => !TODO.has(e.status) || catSel.set.has(e.category));
