@@ -1517,8 +1517,12 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
       const fatal = s !== 429 && s < 500 && !split;
       throw new LlmError(`Provider menolak permintaan (${s}). ${d || (fatal ? 'Periksa model di Pengaturan' : 'Coba lagi nanti')}`.trim(), { status: s, fatal, retryAfter, split, noRetry: split });
     }
-    const j = await res.json().catch((e) => { if (timedOut) throw new LlmError(UI.timeout); return null; }), text = j?.choices?.[0]?.message?.content;
-    if (typeof text !== 'string' || !text.trim()) throw new LlmError(UI.badResp);
+    const j = await res.json().catch((e) => { if (timedOut) throw new LlmError(UI.timeout); return null; }), content = j?.choices?.[0]?.message?.content;
+    let text = content;
+    if (typeof text !== 'string') throw new LlmError(UI.badResp);
+    // Model penalar (mis. MiniMax) menaruh proses berpikir di <think>…</think>; buang supaya JSON balasan terbaca.
+    text = text.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '').trim();
+    if (!text) throw new LlmError(UI.badResp);
     return { text, usage: j.usage || null };
   } finally { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); }
 }
