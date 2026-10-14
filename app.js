@@ -109,9 +109,19 @@ export const DB_FIELDS = {
   Items: ['name', 'description'], Weapons: ['name', 'description'], Armors: ['name', 'description'],
   Enemies: ['name'], States: ['name', 'message1', 'message2', 'message3', 'message4'],
 };
+/**
+ * Kategori untuk satu field database. Skills/Items/Weapons/Armors dipecah jadi `-label` (name) dan `-deskripsi` (description);
+ * Classes/Enemies/States (name) dan Actors (nickname) jadi `-label`. Field lain (message, profile, dll.) tetap memakai nama file.
+ */
+const DESC_SPLIT = new Set(['Skills', 'Items', 'Weapons', 'Armors']);
+export function dbCat(base, field) {
+  const b = base.toLowerCase();
+  if (DESC_SPLIT.has(base)) return field === 'name' ? `${b}-label` : field === 'description' ? `${b}-deskripsi` : b;
+  if ((field === 'name' && ['Classes', 'Enemies', 'States'].includes(base)) || (base === 'Actors' && field === 'nickname')) return `${b}-label`;
+  return b;
+}
 /** Semua kategori yang bisa dihasilkan extractor (dipakai menu Pulihkan, karena proyek hasil impor game yang sudah diubah mungkin belum punya kategori itu). */
-export const ALL_CATS = ['dialog', 'scroll', 'choice', 'speaker', 'actorname', 'system', 'map', 'plugin', ...Object.keys(DB_FIELDS).map((k) => k.toLowerCase()), 'comment', 'comment-teks', 'comment-label', 'note-tag', 'script-teks', 'script-multi'];
-/** Tag di field note database yang isinya teks tampil (hanya isi tag yang diterjemahkan, nama tag dan tanda <> tetap). */
+export const ALL_CATS = ['dialog', 'scroll', 'choice', 'speaker', 'actorname', 'system', 'map', 'plugin', ...new Set(Object.entries(DB_FIELDS).flatMap(([k, fs]) => fs.map((f) => dbCat(k, f)))), 'comment', 'comment-teks', 'comment-label', 'note-tag', 'script-teks', 'script-multi'];
 export const NOTE_TAGS = ['図鑑特徴'];
 const noteTagRe = (tag) => new RegExp('<' + tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[:：]([\\s\\S]*?)>', 'g');
 /** String berkutip di kode Ruby (perintah Script): "..." atau '...'. Grup 1 = isi kutip ganda, grup 2 = isi kutip tunggal. */
@@ -867,7 +877,7 @@ export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
   });
   else if (DB_FIELDS[base]) (json || []).forEach((it, i) => {
     if (!it) return;
-    DB_FIELDS[base].forEach((f) => add([i, f], 'field', base.toLowerCase(), it[f]));
+    DB_FIELDS[base].forEach((f) => add([i, f], 'field', dbCat(base, f), it[f]));
     if (typeof it.note !== 'string') return;
     for (const tag of NOTE_TAGS) {
       let n = 0;
@@ -1260,7 +1270,7 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
     else paramNote = pluginsText ? 'js/plugins.js tidak bisa dibaca (bukan array JSON murni), parameter plugin dilewati' : 'js/plugins.js tidak ikut dipilih, parameter plugin dilewati';
   }
   const engine = eng || (sys && (sys.advanced || sys.itemCategories) ? 'MZ' : 'MV');
-  const project = { id, engine, src, tgt: 'id', scriptsDiag, gaps: [...gaps].sort((a, b) => b[1].n - a[1].n).slice(0, 10), msgPlugins, pluginsSeen, allow, paramNote, files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
+  const project = { id, engine, src, tgt: 'id', scriptsDiag, gaps: [...gaps].sort((a, b) => b[1].n - a[1].n).slice(0, 10), msgPlugins, pluginsSeen, allow, paramNote, catV: 2, files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
   onProgress(`Menyimpan ${entries.length} teks…`, data.size, data.size);
   await dbPutMany('origFiles', orig);
   await dbPutMany('entries', entries);
@@ -1281,119 +1291,6 @@ const diceP = (p, q) => {
 };
 /** Kemiripan Dice 0..1 antara dua teks (spasi diabaikan). */
 export const similarity = (a, b) => diceP(prep({ original: a }), prep({ original: b }));
-/**
- * Cocokkan entri yatim (terjemahan masih ada, tapi posisinya hilang) ke teks baru dari game asli.
- * Urutan: teks sama persis (spasi diabaikan), lalu mirip >= minSim dengan kode escape yang sama.
- * Dipercepat dengan indeks, bigram dihitung sekali, dan batas panjang; tick dipanggil berkala agar UI tidak macet.
- * @returns {Promise<{o:object,c:object,exact:boolean}[]>} pasangan yang cocok; yang tidak cocok tidak muncul
- */
-export async function matchOrphans(orphans, cands, minSim = 0.8, tick = null) {
-  const used = new Set(), out = [], exactIdx = new Map(), bucket = new Map();
-  for (const c of cands) {
-    const p = prep(c), k = `${c.category}\n${p.n}`; (exactIdx.get(k) || exactIdx.set(k, []).get(k)).push(p);
-    const bk = `${c.category}\n${p.sig}`; (bucket.get(bk) || bucket.set(bk, []).get(bk)).push(p);
-  }
-  const rest = []; let n = 0;
-  for (const o of orphans) {
-    const p = prep(o), hit = (exactIdx.get(`${o.category}\n${p.n}`) || []).find((q) => !used.has(q));
-    if (hit) { used.add(hit); out.push({ o, c: hit.x, exact: true }); } else rest.push(p);
-    if (tick && ++n % 200 === 0) await tick(n, orphans.length * 2);
-  }
-  n = 0;
-  for (const p of rest) {
-    let best = null, bs = minSim;
-    for (const q of bucket.get(`${p.x.category}\n${p.sig}`) || []) {
-      if (used.has(q)) continue;
-      const m = Math.max(p.len, q.len); if (!m || 2 * Math.min(p.len, q.len) / (p.len + q.len) < bs) continue;
-      const sc = diceP(p, q); if (sc >= bs) { bs = sc; best = q; if (sc === 1) break; }
-    }
-    if (best) { used.add(best); out.push({ o: p.x, c: best.x, exact: false }); }
-    if (tick && ++n % 20 === 0) await tick(orphans.length + n, orphans.length * 2);
-  }
-  return out;
-}
-/**
- * Selamatkan entri bertanda "Tidak ada di game asli": terjemahannya masih tersimpan, hanya posisinya yang tidak cocok.
- * Teks dicocokkan ulang ke file asli proyek yang sekarang (hasil Pulihkan), tanpa perlu memilih game asli lagi.
- */
-export async function rescueSkipped(project, onProgress = () => {}) {
-  const stored = await dbPrefix('origFiles', project.id + ':'), ents = await dbQuery('entries', 'projectId', project.id);
-  const res = { orphans: 0, exact: 0, fuzzy: 0, left: 0, bad: 0 }, toPut = [], byFile = new Map(), live = new Map();
-  for (const e of ents) {
-    if (e.status !== 'skipped') { if (!live.has(e.file)) live.set(e.file, new Set()); live.get(e.file).add(`${e.category}\n${e.path}`); continue; }
-    if (e.error !== 'Tidak ada di game asli' || typeof e.translation !== 'string' || !e.translation.trim()) continue;
-    if (!byFile.has(e.file)) byFile.set(e.file, []); byFile.get(e.file).push(e); res.orphans++;
-  }
-  let i = 0;
-  for (const f of stored) {
-    const orphans = byFile.get(f.path); if (!orphans) continue;
-    const name = f.path.split('/').pop(), head = `Mencocokkan ${name} (${++i} dari ${byFile.size}, ${orphans.length} teks)`;
-    onProgress(head); await new Promise((r) => setTimeout(r));
-    let json; try { json = /(^|\/)js\/plugins\.js$/.test(f.path) ? parsePluginsJs(f.text)?.arr : JSON.parse(f.text); if (!json) throw new Error('x'); } catch { res.bad += orphans.length; continue; }
-    const lv = live.get(f.path) || new Set();
-    const cands = extractFile(f.path, json, { src: project.src, allow: project.allow }).filter((c) => !lv.has(`${c.category}\n${c.path}`));
-    const ms = await matchOrphans(orphans, cands, 0.8, async (d, t) => { onProgress(`${head}: ${d}/${t}`); await new Promise((r) => setTimeout(r)); });
-    for (const { o, c, exact } of ms) {
-      toPut.push({ ...o, path: c.path, kind: c.kind, meta: c.meta, lineCount: c.lineCount, order: c.order, original: c.original, hash: await sha256(c.original), status: 'edited', error: '' });
-      exact ? res.exact++ : res.fuzzy++;
-    }
-    res.left += orphans.length - ms.length;
-  }
-  if (toPut.length) await dbPutMany('entries', toPut);
-  const all = await dbQuery('entries', 'projectId', project.id);
-  project.updatedAt = Date.now(); project.total = all.length; await dbPut('projects', project);
-  return res;
-}
-/**
- * Cocokkan urutan kunci O ke L sebagai subsekuens. Hasilnya indeks di L untuk tiap elemen O,
- * tetapi hanya bila caranya TUNGGAL; bila ada lebih dari satu cara (ambigu) atau tidak ada, hasilnya null.
- */
-export function alignUnique(O, L) {
-  const n = O.length, m = L.length; if (!n || n > m) return null;
-  const w = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-  for (let j = 0; j <= m; j++) w[0][j] = 1;
-  for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) w[i][j] = Math.min(2, w[i][j - 1] + (O[i - 1] === L[j - 1] ? w[i - 1][j - 1] : 0));
-  if (w[n][m] !== 1) return null;
-  const idx = new Array(n); let i = n, j = m;
-  while (i > 0) { if (w[i][j - 1] > 0) j--; else { idx[i - 1] = j - 1; i--; j--; } }
-  return idx;
-}
-/**
- * Selamatkan PILIHAN (choice) bertanda "Tidak ada di game asli" lewat posisi, bukan teks.
- * Dipakai saat teks di game yang sudah diedit/diterjemahkan beda dengan game asli (mis. beda bahasa), sehingga pencocokan teks gagal.
- * Pilihan dikelompokkan per daftar perintah (file + letak list), diurutkan, lalu dipasangkan lewat nomor opsi dan kode escape.
- * Hanya dipasangkan bila pasangannya tunggal; selebihnya dibiarkan skipped. Terjemahan dipindah ke entri di posisi game asli.
- */
-export async function rescueByPosition(project, onProgress = () => {}) {
-  const ents = await dbQuery('entries', 'projectId', project.id);
-  const res = { orphans: 0, moved: 0, left: 0, ambiguous: 0 }, groups = new Map(), toPut = [], toDel = [];
-  for (const e of ents) {
-    if (e.kind !== 'choice') continue;
-    let p; try { p = JSON.parse(e.path); } catch { continue; }
-    if (!Array.isArray(p) || p.length < 5) continue;
-    const orphan = e.status === 'skipped' && e.error === 'Tidak ada di game asli' && typeof e.translation === 'string' && e.translation.trim() !== '';
-    const free = e.status !== 'skipped' && (String(e.translation ?? '').trim() === '' || e.translation === e.original);
-    if (!orphan && !free) continue;
-    const gk = `${e.file}\n${JSON.stringify(p.slice(0, -4))}`;
-    if (!groups.has(gk)) groups.set(gk, { o: [], l: [] });
-    (orphan ? groups.get(gk).o : groups.get(gk).l).push({ e, i: p.at(-4), k: p.at(-1), key: `${p.at(-1)}|${escSig(e.original)}` });
-    if (orphan) res.orphans++;
-  }
-  let n = 0;
-  for (const g of groups.values()) {
-    if (!g.o.length) continue;
-    if (++n % 50 === 0) { onProgress(`Mencocokkan pilihan (${n} kelompok)`); await new Promise((r) => setTimeout(r)); }
-    const by = (a, b) => a.i - b.i || a.k - b.k; g.o.sort(by); g.l.sort(by);
-    const al = alignUnique(g.o.map((x) => x.key), g.l.map((x) => x.key));
-    if (!al) { res.left += g.o.length; res.ambiguous++; continue; }
-    g.o.forEach((o, t) => { toPut.push({ ...g.l[al[t]].e, translation: o.e.translation, status: 'edited', error: '' }); toDel.push(o.e.id); res.moved++; });
-  }
-  if (toPut.length) await dbPutMany('entries', toPut);
-  if (toDel.length) await dbDeleteMany('entries', toDel);
-  const all = await dbQuery('entries', 'projectId', project.id);
-  project.updatedAt = Date.now(); project.total = all.length; await dbPut('projects', project);
-  return res;
-}
 /**
  * Pulihkan teks dari game asli (yang belum diubah) ke proyek, per kategori terpilih. Semua jenis teks ikut:
  * field, dialog/scroll (blok), pilihan, dan nama pembicara.
@@ -1474,7 +1371,7 @@ export async function restoreFromPristine(project, files, cats, onProgress = () 
   await dbPut('projects', project);
   return res;
 }
-// ===== 4b. GLOSARIUM & EDIT MANUAL (CSV/JSON) =====
+// ===== 4b. GLOSARIUM =====
 /** Glosarium: satu baris "sumber = terjemahan". Baris berawalan # diabaikan. Diurut dari istilah terpanjang. */
 export function parseGlossary(text = '') {
   const out = [];
@@ -1500,72 +1397,6 @@ export function parseNotes(text = '') {
 export const notesFor = (notes, speaker) => (speaker ? notes.filter(([n]) => speaker.includes(n)) : []);
 export const DEFAULT_STYLE = 'Indonesia santai ala dialog game atau subtitle anime (aku/kamu, nggak). Karakter formal (bangsawan, pelayan, narator, sistem) boleh baku. Ikuti register sumber: bila kasar, vulgar, atau mesum, terjemahkan setara; jangan dihaluskan, disensor, atau dikomentari. Teks UI ringkas dan netral.';
 const cacheKey = (project, cfg, original, terms = [], notes = []) => sha256(`${project.src}|${project.tgt}|${cfg.model}|${original}${terms.length ? `|g:${terms.map((t) => t.join('=')).join(';')}` : ''}${notes.length ? `|n:${notes.map((t) => t.join('=')).join(';')}` : ''}`);
-export const CSV_COLS = ['id', 'file', 'category', 'speaker', 'status', 'original', 'translation'];
-export const entriesToRows = (entries) => entries.map((e) => ({ id: e.id, file: e.file, category: e.category, speaker: e.meta?.speaker || '', status: e.status, original: e.original, translation: e.translation || '' }));
-/** CSV UTF-8 dengan BOM (agar Excel membaca huruf Jepang). Semua field dikutip. */
-export const toCsv = (rows) => '\uFEFF' + [CSV_COLS.join(','), ...rows.map((r) => CSV_COLS.map((k) => `"${String(r[k] ?? '').replace(/"/g, '""')}"`).join(','))].join('\r\n') + '\r\n';
-/** Baca CSV (kutip ganda, baris baru di dalam kutip, pemisah koma atau titik koma ala Excel regional). */
-export function parseCsv(text) {
-  text = String(text).replace(/^\uFEFF/, '');
-  const first = text.split(/\r?\n/, 1)[0], d = first.split(';').length > first.split(',').length ? ';' : ',';
-  const rows = []; let row = [], f = '', q = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (q) { if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
-    else if (c === '"') q = true;
-    else if (c === d) { row.push(f); f = ''; }
-    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(f); f = ''; rows.push(row); row = []; }
-    else f += c;
-  }
-  if (f !== '' || row.length) { row.push(f); rows.push(row); }
-  const [head, ...body] = rows; if (!head) return [];
-  return body.filter((r) => r.some((x) => x !== '')).map((r) => Object.fromEntries(head.map((k, j) => [k.trim(), r[j] ?? ''])));
-}
-/**
- * Terapkan hasil edit manual. Baris dicocokkan lewat id dan harus punya teks asli yang sama dengan proyek ini.
- * Baris ditolak bila id asing, teks asli beda, atau kode escape/tag tidak sama dengan aslinya.
- * @returns {{updates:object[], same:number, empty:number, unknown:any[], mismatch:any[], badEsc:any[]}}
- */
-export function applyImport(entries, rows) {
-  const byId = new Map(entries.map((e) => [String(e.id), e])), nl = (s) => String(s ?? '').replace(/\r\n/g, '\n').trim();
-  const sig = (s) => (s.match(ESC) || []).sort().join('\u0001');
-  const out = { updates: [], same: 0, empty: 0, unknown: [], mismatch: [], badEsc: [] };
-  for (const r of Array.isArray(rows) ? rows : []) {
-    const e = byId.get(String(r?.id ?? '').trim());
-    if (!e) { out.unknown.push(r?.id); continue; }
-    if (nl(r.original) !== nl(e.original)) { out.mismatch.push(e.id); continue; }
-    const t = String(r.translation ?? '').replace(/\r\n/g, '\n');
-    if (!t.trim()) { out.empty++; continue; }
-    if (t === e.translation) { out.same++; continue; }
-    if (sig(t) !== sig(e.original)) { out.badEsc.push(e.id); continue; }
-    out.updates.push({ ...e, translation: t, status: 'edited', error: '' });
-  }
-  return out;
-}
-/**
- * Isi kolom translation yang kosong di baris utama dengan nilai dari file pembanding.
- * Pencocokan lewat id (string, di-trim). Baris utama yang sudah punya terjemahan tidak diubah.
- * Baris pembanding dengan translation kosong juga tidak dipakai.
- * @param {object[]} primary baris hasil impor (boleh ada translation kosong)
- * @param {object[]} secondary baris pembanding (sumber nilai pengisi)
- * @returns {object[]} baris baru (primary dengan translation yang sudah diisi)
- */
-export function mergeRows(primary, secondary) {
-  const byId = new Map();
-  for (const r of Array.isArray(secondary) ? secondary : []) {
-    const id = String(r?.id ?? '').trim();
-    if (id !== '' && !byId.has(id)) byId.set(id, r);
-  }
-  const empty = (v) => String(v ?? '').trim() === '';
-  return (Array.isArray(primary) ? primary : []).map((r) => {
-    if (!r || typeof r !== 'object') return r;
-    if (!empty(r.translation)) return r;
-    const s = byId.get(String(r.id ?? '').trim());
-    const t = s?.translation;
-    if (empty(t)) return r;
-    return { ...r, translation: t };
-  });
-}
 
 // ===== 4c. TERJEMAH LEWAT CHAT AI =====
 const NL = '⏎', LANG_NAME = { all: 'bahasa apa pun (tiap baris bisa Jepang, Inggris, Indonesia, Korea, dll; baris yang sudah berbahasa Indonesia salin apa adanya)', ja: 'Jepang', en: 'Inggris', id: 'Indonesia', auto: 'Jepang atau Inggris (tiap baris bisa salah satunya; baris yang sudah berbahasa Indonesia salin apa adanya)' };
@@ -1975,9 +1806,26 @@ const h = (tag, props = {}, ...kids) => {
   return e;
 };
 const card = (...k) => h('div', { class: 'card' }, ...k);
+/** Proyek lama: pecah kategori database (items -> items-label/items-deskripsi, dst.). Sekali jalan per proyek. */
+async function migrateCats(p) {
+  if (p.catV >= 2) return p;
+  const rows = await dbQuery('entries', 'projectId', p.id), upd = [], counts = {};
+  for (const e of rows) {
+    const base = String(e.file).split('/').pop().replace(/\.(json|rvdata2)$/i, '');
+    if (e.kind === 'field' && DB_FIELDS[base] && e.category === base.toLowerCase()) {
+      let key = ''; try { key = String(JSON.parse(e.path).at(-1)); } catch { /* path rusak */ }
+      const c = dbCat(base, key); if (c !== e.category) { e.category = c; upd.push(e); }
+    }
+    counts[e.category] = (counts[e.category] || 0) + 1;
+  }
+  if (upd.length) await dbPutMany('entries', upd);
+  p.counts = counts; p.catV = 2; await dbPut('projects', p);
+  return p;
+}
 async function currentProject() {
   const cur = await dbGet('settings', 'current');
-  return cur ? dbGet('projects', cur.value) : null;
+  const p = cur ? await dbGet('projects', cur.value) : null;
+  return p ? migrateCats(p) : null;
 }
 let importNote = null;
 const CODE_NAME = { 101: 'Show Text', 401: 'baris Show Text', 102: 'Show Choices', 402: 'cabang pilihan', 105: 'Scroll Text', 405: 'baris Scroll Text', 108: 'Comment', 408: 'lanjutan Comment', 355: 'Script', 655: 'lanjutan Script', 356: 'Plugin Command', 357: 'Plugin Command MZ' };
@@ -2143,26 +1991,6 @@ async function viewProyek() {
       cats.map((c) => { const cb = h('input', { type: 'checkbox', ...(pickC.has(c) ? { checked: '' } : {}), onchange: (e) => { e.target.checked ? pickC.add(c) : pickC.delete(c); } }); boxes.push(cb); return h('label', { class: 'row' }, cb, ` ${c}`); }),
       h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: '', onchange: (e) => { fillOpt.on = e.target.checked; } }), ' Isi kolom terjemahan dengan teks asli (status done) supaya semua file ikut di patch dan kembali seperti game asli. Matikan kalau mau hasilnya pending lalu diterjemahkan ulang'),
       pickR('Pilih folder data asli', { webkitdirectory: '', multiple: '' }), pickR('Pilih zip game asli', { accept: '.zip' }), pickR('Pilih Game.rgss3a asli', {}), rbar, rmsg));
-    const smsg = h('p', { class: 'mut' });
-    out.push(card(h('h2', {}, 'Selamatkan teks Tidak ada di game asli'),
-      h('p', { class: 'mut' }, 'Dipakai setelah Pulihkan bila ada dialog bertanda skipped. Terjemahannya masih tersimpan; tombol ini mencocokkan ulang posisinya ke file asli proyek yang sekarang (spasi/baris baru diabaikan, lalu yang mirip >= 80% dengan kode escape sama). Yang cocok jadi berstatus edited dan ikut diekspor. Cek hasilnya di tab Review.'),
-      h('button', { onclick: async (ev) => {
-        const b = ev.currentTarget; b.disabled = true; smsg.className = 'mut'; smsg.textContent = 'Mencocokkan…';
-        try {
-          const r = await rescueSkipped(p, (t) => { smsg.textContent = t; });
-          smsg.textContent = `Selesai. Entri skipped: ${r.orphans}\nDiselamatkan (teks sama): ${r.exact}\nDiselamatkan (mirip, mohon dicek): ${r.fuzzy}\nMasih tidak cocok: ${r.left}${r.bad ? `\nFile gagal dibaca: ${r.bad}` : ''}`;
-        } catch (e) { smsg.className = 'err'; smsg.textContent = e?.message || String(e); }
-        b.disabled = false;
-      } }, 'Selamatkan sekarang'),
-      h('p', { class: 'mut' }, 'Kalau pilihan (choice) masih tidak cocok karena teks di game yang diedit beda dengan game asli (mis. beda bahasa), pakai tombol ini. Pilihan dicocokkan lewat posisi dan urutannya, bukan teksnya. Hanya yang pasangannya pasti yang dipindahkan.'),
-      h('button', { onclick: async (ev) => {
-        const b = ev.currentTarget; b.disabled = true; smsg.className = 'mut'; smsg.textContent = 'Mencocokkan lewat urutan…';
-        try {
-          const r = await rescueByPosition(p, (t) => { smsg.textContent = t; });
-          smsg.textContent = `Selesai. Pilihan skipped: ${r.orphans}\nDipindahkan ke posisi game asli: ${r.moved}\nMasih tidak cocok: ${r.left}${r.ambiguous ? ` (${r.ambiguous} kelompok ambigu, dibiarkan)` : ''}`;
-        } catch (e) { smsg.className = 'err'; smsg.textContent = e?.message || String(e); }
-        b.disabled = false;
-      } }, 'Selamatkan pilihan lewat urutan'), smsg));
   }
   return out;
 }
@@ -2450,7 +2278,7 @@ async function viewReview() {
   fill();
   return [card(find, modeSel, sel, catSel, fnSel, info), replCard, box];
 }
-let exportUrl = '', editUrl = '', editUrlFilled = '', rgUrl = '';
+let exportUrl = '', rgUrl = '';
 async function viewEkspor() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
@@ -2458,22 +2286,12 @@ async function viewEkspor() {
   const n = (f) => rows.filter(f).length, out = h('div');
   const ready = n((e) => (e.status === 'done' || e.status === 'edited') && e.translation.trim()), pend = n((e) => e.status === 'pending' || e.status === 'translating'), err = n((e) => e.status === 'error');
   const rgMsg = h('p', { class: 'mut' }), rgOut = h('div');
-  // Entri yang posisinya tidak cocok: tampilkan, lalu tawarkan pencocokan ulang lewat teks asli (fitur Selamatkan)
+  // Entri yang posisinya tidak cocok: tampilkan peringatan saja
   const warnCard = (r) => {
     if (!r.bad?.length) return '';
-    const wm = h('p', { class: 'mut' }), wb = h('button', { onclick: async () => {
-      wb.disabled = true; wm.className = 'mut'; wm.textContent = 'Mencocokkan ulang…';
-      try {
-        await dbPutMany('entries', r.bad.map((e) => ({ ...e, status: 'skipped', error: 'Tidak ada di game asli' })));
-        const x = await rescueSkipped(p, (t) => { wm.textContent = t; });
-        const y = await rescueByPosition(p, (t) => { wm.textContent = t; });
-        wm.textContent = `Selesai. Cocok lewat teks: ${x.exact + x.fuzzy} dari ${x.orphans} (persis ${x.exact}, mirip ${x.fuzzy}). Pilihan cocok lewat urutan: ${y.moved}. Belum cocok: ${x.left - y.moved}${x.bad ? `, file gagal dibaca: ${x.bad}` : ''}.\nTekan Buat patch lagi.`;
-      } catch (e) { wm.className = 'err'; wm.textContent = `Gagal: ${e.message || e}`; }
-      wb.disabled = false;
-    } }, 'Cocokkan ulang teks yang dilewati');
     return card(h('h2', {}, `${r.bad.length} teks dilewati`),
-      h('p', { class: 'mut' }, 'Posisinya tidak cocok dengan file asli proyek sekarang, jadi teks ini tetap asli di patch. Teks lainnya tetap ikut diekspor. Tombol di bawah menandainya lalu mencocokkannya ulang lewat teks asli; terjemahannya tidak dihapus.'),
-      r.warnings.slice(0, 10).map((x) => h('p', { class: 'mut' }, x)), r.warnings.length > 10 ? h('p', { class: 'mut' }, `…dan ${r.warnings.length - 10} lainnya (lengkap di patch-report.txt)`) : '', wb, wm);
+      h('p', { class: 'mut' }, 'Posisinya tidak cocok dengan file asli proyek sekarang, jadi teks ini tetap asli di patch. Teks lainnya tetap ikut diekspor.'),
+      r.warnings.slice(0, 10).map((x) => h('p', { class: 'mut' }, x)), r.warnings.length > 10 ? h('p', { class: 'mut' }, `…dan ${r.warnings.length - 10} lainnya (lengkap di patch-report.txt)`) : '');
   };
   const btn = h('button', { class: 'pri', onclick: async () => {
     btn.disabled = true; out.replaceChildren(h('p', { class: 'mut' }, 'Memeriksa dengan diff guard…'));
@@ -2504,72 +2322,6 @@ async function viewEkspor() {
     } catch (e) { out.replaceChildren(card(h('p', { class: 'err' }, e.message))); }
     btn.disabled = false;
   } }, 'Buat patch');
-  const editOut = h('div'), editOutFilled = h('div'), editMsg = h('p', { class: 'mut' });
-  const link = (name, mime, text, filled = false) => {
-    const url = URL.createObjectURL(new Blob([text], { type: mime }));
-    if (filled) {
-      if (editUrlFilled) URL.revokeObjectURL(editUrlFilled);
-      editUrlFilled = url;
-      editOutFilled.replaceChildren(h('a', { class: 'file', href: url, download: name }, `Unduh ${name}`));
-    } else {
-      if (editUrl) URL.revokeObjectURL(editUrl);
-      editUrl = url;
-      editOut.replaceChildren(h('a', { class: 'file', href: url, download: name }, `Unduh ${name}`));
-    }
-  };
-  const isFilled = (e) => (e.status === 'done' || e.status === 'edited') && typeof e.translation === 'string' && e.translation.trim() !== '';
-  const dump = async (kind, filled = false) => {
-    const all = (await dbQuery('entries', 'projectId', p.id)).sort((a, b) => a.id - b.id);
-    const src = filled ? all.filter(isFilled) : all;
-    if (filled && !src.length) { editMsg.className = 'err'; editMsg.textContent = 'Belum ada teks yang sudah terisi.'; return; }
-    const rws = entriesToRows(src), suffix = filled ? '-terisi' : '';
-    if (kind === 'csv') link(`rpgtl-${p.id}${suffix}.csv`, 'text/csv', toCsv(rws), filled);
-    else link(`rpgtl-${p.id}${suffix}.json`, 'application/json', JSON.stringify(rws, null, 1), filled);
-    if (filled) { editMsg.className = 'mut'; editMsg.textContent = `${src.length} entri terisi diekspor.`; }
-  };
-  // File pembanding untuk mengisi otomatis kolom translation yang kosong.
-  let prevRows = null, prevName = '';
-  const prevMsg = h('p', { class: 'mut' });
-  const prevClear = h('button', { onclick: () => { prevRows = null; prevName = ''; prevMsg.className = 'mut'; prevMsg.textContent = 'File pembanding dilepas.'; } }, 'Lepas file pembanding');
-  const prevInp = h('input', { type: 'file', accept: '.csv,.json', onchange: async (ev) => {
-    const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
-    prevMsg.className = 'mut'; prevMsg.textContent = 'Membaca file pembanding…';
-    try {
-      const txt = await f.text();
-      const rws = /\.json$/i.test(f.name) ? JSON.parse(txt) : parseCsv(txt);
-      if (!Array.isArray(rws)) throw new Error('Isi file bukan daftar baris');
-      prevRows = rws; prevName = f.name;
-      prevMsg.textContent = `File pembanding siap: ${f.name} (${rws.length} baris). Saat impor, kolom translation yang kosong di file impor diisi dari file ini lewat id.`;
-    } catch (e) { prevRows = null; prevName = ''; prevMsg.className = 'err'; prevMsg.textContent = e.message; }
-  }});
-  const importEdit = async (ev) => {
-    const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
-    editMsg.className = 'mut'; editMsg.textContent = 'Membaca…';
-    try {
-      const txt = await f.text(); let rws = /\.json$/i.test(f.name) ? JSON.parse(txt) : parseCsv(txt);
-      if (!Array.isArray(rws)) throw new Error('Isi file bukan daftar baris');
-      const empty = (arr) => arr.filter((r) => String(r?.translation ?? '').trim() === '').length;
-      let filledFromPrev = 0;
-      if (prevRows) {
-        const before = empty(rws);
-        rws = mergeRows(rws, prevRows);
-        filledFromPrev = Math.max(0, before - empty(rws));
-      }
-      const r = applyImport(await dbQuery('entries', 'projectId', p.id), rws);
-      if (r.updates.length) await dbPutMany('entries', r.updates);
-      const ids = (a) => (a.length ? ` (id ${a.slice(0, 8).join(', ')}${a.length > 8 ? ', …' : ''})` : '');
-      editMsg.className = 'mut';
-      editMsg.textContent = [
-        `Diperbarui: ${r.updates.length}`,
-        ...(prevRows ? [`Diisi otomatis dari file pembanding: ${filledFromPrev} baris`] : []),
-        `Sama dengan sebelumnya: ${r.same}`,
-        `Terjemahan kosong (dilewati): ${r.empty}`,
-        `Teks asli tidak cocok dengan proyek ini: ${r.mismatch.length}${ids(r.mismatch)}`,
-        `Kode escape/tag berubah (ditolak): ${r.badEsc.length}${ids(r.badEsc)}`,
-        `id tidak dikenal: ${r.unknown.length}`,
-      ].join('\n');
-    } catch (e) { editMsg.className = 'err'; editMsg.textContent = e.message; }
-  };
   let chatUrls = [];
   const chatOut = h('div'), chatMsg = h('p', { class: 'mut' }), perPart = h('input', { type: 'number', value: '150', min: '10', max: '100000' }), perChars = h('input', { type: 'number', value: '6000', min: '1000', max: '1000000' });
   const paste = h('textarea', { rows: '5', spellcheck: 'false', placeholder: 'Tempel balasan AI di sini…' });
@@ -2600,17 +2352,6 @@ async function viewEkspor() {
     } catch (e) { chatMsg.className = 'err'; chatMsg.textContent = e.message; return false; }
   };
   return [card(h('h2', {}, 'Ekspor'), h('p', { class: 'mut' }, `Siap diekspor: ${ready}\nBelum diterjemahkan (tetap asli): ${pend}\nError (tetap asli): ${err}`), btn), out,
-    card(h('h2', {}, 'Edit manual'),
-      h('p', { class: 'mut' }, 'Unduh semua teks sebagai CSV atau JSON, edit kolom translation, lalu impor lagi. Jangan ubah kolom id dan original. Kode escape dan tag harus tetap sama.'),
-      h('p', { class: 'mut' }, h('strong', {}, '1) Ekspor semua teks')),
-      h('div', { class: 'row' }, h('button', { onclick: () => dump('csv') }, 'Siapkan CSV'), h('button', { onclick: () => dump('json') }, 'Siapkan JSON')), editOut,
-      h('p', { class: 'mut' }, h('strong', {}, '2) Ekspor hanya yang sudah terisi (id asli ikut)')),
-      h('p', { class: 'mut' }, 'Hanya entri berstatus done atau edited yang terjemahannya tidak kosong. Cocok untuk melanjutkan di aplikasi AI lain: hanya id yang sudah benar yang ikut.'),
-      h('div', { class: 'row' }, h('button', { onclick: () => dump('csv', true) }, 'CSV terisi'), h('button', { onclick: () => dump('json', true) }, 'JSON terisi')), editOutFilled,
-      h('p', { class: 'mut' }, h('strong', {}, '3) Impor hasil edit')),
-      h('p', { class: 'mut' }, 'File pembanding (opsional) dipilih dulu. Kolom translation yang kosong di file impor diisi otomatis dari file pembanding lewat id, jadi kamu bisa impor file yang belum lengkap tanpa kehilangan nilai yang sudah ada di file sebelumnya.'),
-      h('label', { class: 'file' }, 'Pilih file pembanding (.csv / .json) — opsional', prevInp), prevClear, prevMsg,
-      h('label', { class: 'file' }, 'Impor hasil edit (.csv / .json)', h('input', { type: 'file', accept: '.csv,.json', onchange: importEdit })), editMsg),
     card(h('h2', {}, 'Terjemah lewat chat AI'), h('p', { class: 'mut' }, 'Untuk menerjemahkan di aplikasi AI lain tanpa API. Teks yang belum selesai dipecah jadi bagian-bagian berisi instruksi, gaya, dan glosarium. Kirim satu bagian ke AI (tempel atau unggah file), lalu tempel balasannya di bawah. Bagian dihitung ulang dari teks yang belum selesai tiap kali kamu menyiapkannya.'),
       h('label', {}, 'Teks per bagian'), perPart, h('label', {}, 'Maks karakter per bagian'), perChars, h('button', { class: 'pri', onclick: prepare }, 'Siapkan bagian'), chatOut,
       h('label', {}, 'Balasan AI'), paste,
