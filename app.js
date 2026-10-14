@@ -128,7 +128,7 @@ const noteTagRe = (tag) => new RegExp('<' + tag.replace(/[.*+?^${}()|[\]\\]/g, '
 const rbLit = () => /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g;
 // Kode escape (\C[2], \!, ...) dan tag plugin ASCII seperti <br>, <WordWrap>, <left>. Tag berisi huruf Jepang tidak ikut.
 // Selain kode escape pesan, ikut dimasker: pemanggilan fungsi berindeks (if(s[12]), en(s[3]), f(\v[5])), s[n]/v[n], $gameXxx, dan placeholder %1.
-const ESC = /\\(?:[A-Za-z]+\[(?:\d+|#[0-9A-Fa-f]{3,8})\]|[A-Za-z]|[{}.|!^$<>\\])|<\/?[A-Za-z][ -;=?-~]{0,40}>|\b[A-Za-z_]\w*\((?=[^)\n]*(?:\[\d+\]|\\[A-Za-z]+\[))(?:[^()\n]|\([^()\n]*\))*\)|\b[sv]\[\d+\]|\$game[A-Za-z]+(?:\.\w+|\[[^\]\n]*\])*|%\d|#\{[^}\n]*\}|\$\{[^}\n]*\}|\{\{[^}\n]*\}\}|\{\d+\}|[¥￥]/g;
+const ESC = /\\[A-Za-z]{1,12}<[^>\n\u3000-\u9fff\uff00-\uffef]*>|\\[Ff][RrIiBb](?![A-Za-z])|\\(?:[A-Za-z]+\[(?:\d+|#[0-9A-Fa-f]{3,8}|[0-9A-Fa-f]{6}|auto)\]|[A-Za-z]|[{}.|!^$<>\\])|<\/?[A-Za-z][ -;=?-~]{0,40}>|\b[A-Za-z_]\w*\((?=[^)\n]*(?:\[\d+\]|\\[A-Za-z]+\[))(?:[^()\n]|\([^()\n]*\))*\)|\b[sv]\[\d+\]|\$game[A-Za-z]+(?:\.\w+|\[[^\]\n]*\])*|%\d|#\{[^}\n]*\}|\$\{[^}\n]*\}|\{\{[^}\n]*\}\}|\{\d+\}|[¥￥]/g;
 // Plugin message yang punya word-wrap sendiri. Bila aktif, pemecahan baris manual dimatikan.
 const MSG_PLUGIN = /^(YEP_MessageCore|VisuMZ_1_MessageCore)$|word.?wrap|line.?wrap|auto.?wrap|text.?wrap|message.?wrap/i;
 /** Daftar nama plugin message aktif dari isi js/plugins.js. */
@@ -2209,17 +2209,17 @@ async function viewReview() {
     const st = h('span', { class: 'badge' }, e.status), warn = h('span', { class: 'badge warn' }, 'baris panjang'), msg = h('p', { class: 'err' }, e.error);
     warn.hidden = !longLine(e.translation);
     const ta = h('textarea', { rows: String(Math.max(2, e.original.split('\n').length + 1)) }, e.translation);
-    const sync = () => { st.textContent = e.status; warn.hidden = !longLine(e.translation); msg.textContent = e.error; };
+    const sync = () => { st.textContent = e.status; warn.hidden = !longLine(e.translation); msg.className = 'err'; msg.textContent = e.error; };
     ta.addEventListener('change', async () => {
       const u = { ...e, translation: ta.value, status: ta.value.trim() ? 'edited' : 'pending', error: '' };
       await dbPut('entries', u); Object.assign(e, u); sync();
     });
     const rt = h('button', { class: 'sm', onclick: async () => {
-      rt.disabled = true; msg.className = 'mut'; msg.textContent = 'Menerjemahkan…';
+      rt.disabled = true; msg.className = 'mut'; msg.textContent = 'Menerjemahkan…'; e.error = '';
       try {
         const cfg = await loadConfig(); if (!cfg.apiKey) throw new Error(UI.noKey);
-        Object.assign(e, await retranslateEntry(p, cfg, e)); ta.value = e.translation; msg.textContent = '';
-      } catch (x) { msg.className = 'err'; msg.textContent = x.message; }
+        Object.assign(e, await retranslateEntry(p, cfg, e)); ta.value = e.translation; e.error = '';
+      } catch (x) { e.error = x.message || String(x); }
       rt.disabled = false; sync();
     } }, 'Terjemah ulang');
     return card(h('div', { class: 'rowhead' }, h('div', {}, h('span', { class: 'badge' }, e.category), st, warn), rt), h('p', { class: 'mut' }, e.original), ta, msg);
