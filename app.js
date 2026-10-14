@@ -2221,6 +2221,7 @@ async function viewReview() {
     return card(h('div', { class: 'rowhead' }, h('div', {}, h('span', { class: 'badge' }, e.category), st, warn), rt), h('p', { class: 'mut' }, e.original), ta, msg);
   };
   const fill = () => {
+    uiSet('filters:' + p.id, JSON.stringify({ filter, cat, fn, mode, q: qRaw }));
     const fnRe = fnTest(fn);
     const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : e.status === filter)) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
     const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE)); page = Math.min(page, pages - 1);
@@ -2311,6 +2312,18 @@ async function viewReview() {
     h('div', { class: 'sheet-foot row' }, h('button', { onclick: resetFilters }, 'Atur ulang'), showBtn));
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.close(); });
   const fbtn = h('button', { class: 'filterbtn', 'aria-haspopup': 'dialog', onclick: () => sheet.showModal() }, 'Filter', fbadge);
+  // Pulihkan filter terakhir (per proyek); nilai yang sudah tidak ada diabaikan.
+  try {
+    const sv = JSON.parse(uiGet('filters:' + p.id, 'null'));
+    if (sv) {
+      const ok = (s, v) => [...s.options].some((o) => o.value === v);
+      if (ok(sel, sv.filter)) { filter = sv.filter; sel.value = filter; }
+      if (ok(catSel, sv.cat)) { cat = sv.cat; catSel.value = cat; }
+      if (ok(fnSel, sv.fn)) { fn = sv.fn; fnSel.value = fn; }
+      if (ok(modeSel, sv.mode)) { mode = sv.mode; modeSel.value = mode; }
+      if (typeof sv.q === 'string' && sv.q) { find.value = sv.q; setQuery(sv.q); return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), replCard, box, sheet]; }
+    }
+  } catch { /* abaikan */ }
   fill();
   return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), replCard, box, sheet];
 }
