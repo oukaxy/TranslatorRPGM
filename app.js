@@ -1876,10 +1876,12 @@ export async function searchOrig(projectId, needle, max = 30, minScore = 60, onP
   res.sort((x, y) => y.score - x.score);
   return res.slice(0, max);
 }
+const uiGet = (k, d) => { try { const v = localStorage.getItem('rpgtl:ui:' + k); return v === null ? d : v; } catch { return d; } };
+const uiSet = (k, v) => { try { localStorage.setItem('rpgtl:ui:' + k, v); } catch { /* abaikan */ } };
 async function viewProyek() {
   const msg = h('p', { class: 'mut' }), bar = h('progress', { value: '0', max: '1', hidden: '' });
   const box = card(h('h2', {}, 'Impor game'));
-  let src = 'auto', busy = false;
+  let src = ['auto', 'all', 'ja', 'en'].includes(uiGet('src', 'auto')) ? uiGet('src', 'auto') : 'auto', busy = false;
   if (importNote) { msg.className = importNote.bad ? 'err' : 'mut'; msg.textContent = importNote.text; importNote = null; }
   const lock = (on) => { busy = on; box.classList.toggle('busy', on); bar.hidden = !on; };
   const run = async (ev) => {
@@ -1894,8 +1896,9 @@ async function viewProyek() {
       await render();
     } catch (e) { lock(false); msg.className = 'err'; msg.textContent = e.message; }
   };
-  const sel = h('select', { onchange: (e) => { src = e.target.value; } },
+  const sel = h('select', { onchange: (e) => { src = e.target.value; uiSet('src', src); } },
     h('option', { value: 'auto' }, 'Otomatis (Jepang/Inggris campur)'), h('option', { value: 'all' }, 'Semua teks (bahasa apa pun, impor penuh)'), h('option', { value: 'ja' }, 'Jepang'), h('option', { value: 'en' }, 'Inggris'));
+  sel.value = src;
   const pick = (title, hint, attrs) => pickRow(title, hint, attrs, run);
   box.append(h('label', {}, 'Bahasa sumber'), sel,
     h('div', { class: 'picks' },
@@ -1907,7 +1910,7 @@ async function viewProyek() {
   if (p) out.push(card(h('h2', {}, 'Ringkasan'),
     kv(`Engine: ${p.engine}\nSumber: ${srcLabel(p.src)}\nFile data: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\nPlugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan)` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`),
     p.paramNote ? h('p', { class: 'err' }, p.paramNote) : '',
-    h('details', { class: 'fold-in', ...((p.scriptsDiag?.hits || p.scriptsDiag?.error || p.gaps?.length) ? { open: '' } : {}) },
+    h('details', { class: 'fold-in', ...((uiGet('diag', (p.scriptsDiag?.hits || p.scriptsDiag?.error || p.gaps?.length) ? '1' : '0') === '1') ? { open: '' } : {}), ontoggle: (e) => uiSet('diag', e.currentTarget.open ? '1' : '0') },
       h('summary', {}, (p.scriptsDiag?.hits || p.scriptsDiag?.error || p.gaps?.length) ? 'Diagnostik impor (ada temuan)' : 'Diagnostik impor'),
     p.engine === 'VX Ace' ? (() => {
       const d = p.scriptsDiag;
