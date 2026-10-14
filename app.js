@@ -120,7 +120,7 @@ export function dbCat(base, field) {
   if ((field === 'name' && ['Classes', 'Enemies', 'States'].includes(base)) || (base === 'Actors' && field === 'nickname')) return `${b}-label`;
   return b;
 }
-/** Semua kategori yang bisa dihasilkan extractor (dipakai menu Pulihkan, karena proyek hasil impor game yang sudah diubah mungkin belum punya kategori itu). */
+/** Semua kategori yang bisa dihasilkan extractor (dipakai menu Isi dari game asli, karena proyek hasil impor game yang sudah diubah mungkin belum punya kategori itu). */
 export const ALL_CATS = ['dialog', 'scroll', 'choice', 'speaker', 'actorname', 'system', 'map', 'plugin', ...new Set(Object.entries(DB_FIELDS).flatMap(([k, fs]) => fs.map((f) => dbCat(k, f)))), 'comment', 'comment-teks', 'comment-label', 'note-tag', 'script-teks', 'script-multi'];
 export const NOTE_TAGS = ['図鑑特徴'];
 const noteTagRe = (tag) => new RegExp('<' + tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '[:：]([\\s\\S]*?)>', 'g');
@@ -1292,83 +1292,43 @@ const diceP = (p, q) => {
 /** Kemiripan Dice 0..1 antara dua teks (spasi diabaikan). */
 export const similarity = (a, b) => diceP(prep({ original: a }), prep({ original: b }));
 /**
- * Pulihkan teks dari game asli (yang belum diubah) ke proyek, per kategori terpilih. Semua jenis teks ikut:
- * field, dialog/scroll (blok), pilihan, dan nama pembicara.
- * Cara kerja per file yang ada di game asli:
- *  1. File asli proyek (origFiles) diganti utuh dengan file game asli, jadi struktur dan posisi baris kembali seperti semula.
- *  2. Teks diekstrak ulang dari file asli. Kategori terpilih: entri lama (path sama) direset dan kolom terjemahan diisi teks asli
- *     (fill) atau dikosongkan (pending); bila belum ada, dibuat baru dari file asli.
- *  3. Kategori yang tidak dipilih: terjemahan dipertahankan (dicocokkan lewat path, atau lewat teks asli bila posisinya bergeser).
- *     Yang tidak ada lagi di game asli ditandai skipped, terjemahannya tidak dihapus.
- *  4. Entri kategori terpilih yang tidak ada lagi di game asli dihapus.
- * File yang ada di game asli tapi belum ada di proyek ikut ditambahkan.
+ * Isi kolom translation entri kategori terpilih dengan teks dari game asli, dicocokkan lewat posisi (file + path), bukan teks atau id.
+ * Cocok untuk mengembalikan teks tertentu (mis. label) ke bahasa asli tanpa menyentuh entri lain dan tanpa mengganti file asli proyek.
+ * Entri yang diisi berstatus edited; teks asli di proyek tidak diubah.
  */
-export async function restoreFromPristine(project, files, cats, onProgress = () => {}, fill = false) {
+export async function fillFromPristine(project, files, cats, onProgress = () => {}) {
   const { data, plugins } = await collectSources(files), base = (x) => x.split('/').pop().toLowerCase();
   const isPl = (x) => /(^|\/)js\/plugins\.js$/.test(x.replace(/\\/g, '/'));
-  const byBase = new Map([...data].map(([k, v]) => [base(k), [k, v]]));
+  const byBase = new Map([...data].map(([k, v]) => [base(k), v]));
   const stored = await dbPrefix('origFiles', project.id + ':'), ents = await dbQuery('entries', 'projectId', project.id);
   const byFile = new Map();
-  for (const e of ents) { if (!byFile.has(e.file)) byFile.set(e.file, []); byFile.get(e.file).push(e); }
-  const have = new Set(stored.map((f) => base(f.path)));
-  const extra = [...byBase].filter(([b]) => !have.has(b));
-  const res = { matched: 0, restored: 0, created: 0, removed: 0, kept: 0, moved: 0, orphan: 0, newFiles: 0, nofile: 0, bad: 0, badNames: [] };
-  const newOrig = [], toPut = [], toDel = [];
-  const load = async (path, item) => {
-    if (isPl(path)) { const text = await item.read(), pj = parsePluginsJs(text); if (!pj) throw new Error('plugins.js'); return { json: pj.arr, text }; }
-    if (/\.rvdata2$/i.test(path)) { const json = marshalToView(await item.readBin()); return { json, text: JSON.stringify(json) }; }
-    const text = await item.read(); return { json: JSON.parse(text), text };
-  };
-  // Proses satu file; mengembalikan true bila file ini disentuh (ada kategori terpilih).
-  const handle = async (path, json, oldEs) => {
-    const ex = extractFile(path, json, { src: project.src, allow: project.allow });
-    if (!ex.some((e) => cats.has(e.category)) && !oldEs.some((e) => cats.has(e.category))) return false;
-    const byPath = new Map(oldEs.map((e) => [e.path, e])), claimed = new Set(), pool = new Map(), later = [];
-    for (const o of oldEs) { const k = `${o.category}\n${normTxt(o.original)}`; if (!pool.has(k)) pool.set(k, []); pool.get(k).push(o); }
-    for (const e of ex) {
-      const o0 = byPath.get(e.path), old = o0 && o0.category === e.category && !claimed.has(o0.id) ? o0 : null;
-      if (cats.has(e.category)) {
-        if (old) { claimed.add(old.id); res.restored++; } else res.created++;
-        toPut.push({ ...(old || {}), ...e, file: path, projectId: project.id, hash: await sha256(e.original), translation: fill ? e.original : '', status: fill ? 'done' : 'pending', error: '' });
-      } else if (old && old.original === e.original) { claimed.add(old.id); res.kept++; }
-      else later.push(e);
-    }
-    // kategori tidak dipilih yang posisinya bergeser: cari entri lama dengan teks asli yang sama
-    for (const e of later) {
-      const c = (pool.get(`${e.category}\n${normTxt(e.original)}`) || []).find((x) => !claimed.has(x.id)); if (!c) continue;
-      claimed.add(c.id); res.moved++; toPut.push({ ...c, path: e.path, kind: e.kind, meta: e.meta, lineCount: e.lineCount, order: e.order });
-    }
-    for (const o of oldEs) {
-      if (claimed.has(o.id)) continue;
-      if (cats.has(o.category)) { toDel.push(o.id); res.removed++; }
-      else { toPut.push({ ...o, status: 'skipped', error: 'Tidak ada di game asli' }); res.orphan++; }
-    }
-    return true;
-  };
-  let i = 0; const total = stored.length + extra.length;
+  for (const e of ents) { if (!cats.has(e.category)) continue; if (!byFile.has(e.file)) byFile.set(e.file, []); byFile.get(e.file).push(e); }
+  const res = { files: 0, filled: 0, same: 0, nopos: 0, nofile: 0, bad: 0, badNames: [] }, toPut = [];
+  let i = 0;
   for (const f of stored) {
-    onProgress(`Memeriksa ${base(f.path)} (${++i} dari ${total})`, i, total);
+    const oldEs = byFile.get(f.path); if (!oldEs) continue;
+    onProgress(`Mencocokkan ${base(f.path)} (${++i} dari ${byFile.size})`);
     if (i % 10 === 0) await new Promise((r) => setTimeout(r));
-    const hit = isPl(f.path) ? (plugins ? [f.path, plugins] : null) : byBase.get(base(f.path));
-    if (!hit) { res.nofile++; continue; }
-    let p; try { p = await load(f.path, hit[1]); } catch { res.bad++; if (res.badNames.length < 5) res.badNames.push(base(f.path)); continue; }
-    res.matched++;
-    if (await handle(f.path, p.json, byFile.get(f.path) || [])) newOrig.push({ ...f, text: p.text });
+    const item = isPl(f.path) ? plugins : byBase.get(base(f.path));
+    if (!item) { res.nofile++; continue; }
+    let json;
+    try {
+      if (isPl(f.path)) { json = parsePluginsJs(await item.read())?.arr; if (!json) throw new Error('plugins.js'); }
+      else if (/\.rvdata2$/i.test(f.path)) json = marshalToView(await item.readBin());
+      else json = JSON.parse(await item.read());
+    } catch { res.bad++; if (res.badNames.length < 5) res.badNames.push(base(f.path)); continue; }
+    res.files++;
+    // src 'all': teks asli bisa bahasa apa pun, dan yang dicari hanya posisi entri yang sudah ada
+    const pos = new Map(extractFile(f.path, json, { src: 'all', allow: project.allow }).map((c) => [`${c.category}\n${c.path}`, c]));
+    for (const e of oldEs) {
+      const c = pos.get(`${e.category}\n${e.path}`);
+      if (!c) { res.nopos++; continue; }
+      if (e.translation === c.original && (e.status === 'edited' || e.status === 'done')) { res.same++; continue; }
+      toPut.push({ ...e, translation: c.original, status: 'edited', error: '' }); res.filled++;
+    }
   }
-  for (const [b, [k, item]] of extra) {
-    onProgress(`Memeriksa ${b} (${++i} dari ${total})`, i, total);
-    if (i % 10 === 0) await new Promise((r) => setTimeout(r));
-    let p; try { p = await load(k, item); } catch { res.bad++; if (res.badNames.length < 5) res.badNames.push(b); continue; }
-    if (await handle(k, p.json, [])) { newOrig.push({ key: `${project.id}:${k}`, projectId: project.id, path: k, text: p.text }); res.newFiles++; }
-  }
-  if (newOrig.length) await dbPutMany('origFiles', newOrig);
-  if (toDel.length) await dbDeleteMany('entries', toDel);
   if (toPut.length) await dbPutMany('entries', toPut);
-  // perbarui ringkasan proyek (lencana kategori dan total) dari data terbaru
-  const all = await dbQuery('entries', 'projectId', project.id), counts = {};
-  for (const e of all) counts[e.category] = (counts[e.category] || 0) + 1;
-  project.counts = counts; project.total = all.length; project.files = (project.files || 0) + res.newFiles; project.updatedAt = Date.now();
-  await dbPut('projects', project);
+  project.updatedAt = Date.now(); await dbPut('projects', project);
   return res;
 }
 // ===== 4b. GLOSARIUM =====
@@ -1966,31 +1926,27 @@ async function viewProyek() {
         } catch (e) { res.className = 'err'; res.textContent = e?.message || String(e); }
         b.disabled = false;
       } }, 'Cari'), res));
-    // Pulihkan dari game asli: semua jenis teks (field, dialog, pilihan, pembicara) per kategori.
-    const cats = [...new Set([...ALL_CATS, ...Object.keys(p.counts || {})])], pickC = new Set(cats);
-    const fillOpt = { on: true }, boxes = [];
-    const rsrc = h('select', { onchange: (e) => { p.src = e.target.value; } },
-      ...[['auto', 'Otomatis (Jepang/Inggris campur)'], ['all', 'Semua teks (bahasa apa pun, impor penuh)'], ['ja', 'Jepang'], ['en', 'Inggris']].map(([v, t]) => h('option', { value: v, ...(p.src === v ? { selected: '' } : {}) }, t)));
-    const rmsg = h('p', { class: 'mut' }), rbar = h('progress', { value: '0', max: '1', hidden: '' });
-    const doRestore = async (ev) => {
+    const cats = [...new Set([...ALL_CATS, ...Object.keys(p.counts || {})])];
+
+    const fillC = new Set(cats.filter((c) => /-label$/.test(c))), fillBoxes = [];
+    const setFill = (on) => { fillC.clear(); if (on) cats.forEach((c) => fillC.add(c)); fillBoxes.forEach((b) => { b.checked = on; }); };
+    const fmsg = h('p', { class: 'mut' }), fbar = h('progress', { value: '0', max: '1', hidden: '' });
+    const doFill = async (ev) => {
       const fs = [...ev.target.files]; ev.target.value = ''; if (!fs.length) return;
-      if (!pickC.size) { rmsg.className = 'err'; rmsg.textContent = 'Centang minimal satu kategori'; return; }
-      rbar.hidden = false; rmsg.className = 'mut'; rmsg.textContent = 'Membaca game asli…';
+      if (!fillC.size) { fmsg.className = 'err'; fmsg.textContent = 'Centang minimal satu kategori'; return; }
+      fbar.hidden = false; fmsg.className = 'mut'; fmsg.textContent = 'Membaca game asli…';
       try {
-        const r = await restoreFromPristine(p, fs, pickC, (t, d, n) => { rmsg.textContent = t; rbar.max = n; rbar.value = d; }, fillOpt.on);
-        rmsg.textContent = `Selesai. File cocok: ${r.matched} (tidak ada di game asli: ${r.nofile}, gagal dibaca: ${r.bad})\nFile baru dari game asli: ${r.newFiles}\nDipulihkan: ${r.restored}, dibuat baru: ${r.created}, dihapus (tidak ada di game asli): ${r.removed}\nKategori tidak dipilih: tetap ${r.kept}, dipindah posisi ${r.moved}, ditandai skipped ${r.orphan}\nContoh file gagal: ${r.badNames.join(', ') || '-'}\nBuka tab Review untuk melihat hasilnya, lalu ekspor ulang dan timpa folder Data. ${fillOpt.on ? 'Kolom terjemahan diisi teks asli (status done), jadi ikut masuk patch.' : 'Teks yang dipulihkan berstatus pending.'}`;
-      } catch (e) { rmsg.className = 'err'; rmsg.textContent = e?.message || String(e); }
-      rbar.hidden = true;
+        const r = await fillFromPristine(p, fs, fillC, (t) => { fmsg.textContent = t; });
+        fmsg.textContent = `Selesai. File dicocokkan: ${r.files} (tidak ada di game asli: ${r.nofile}, gagal dibaca: ${r.bad})\nDiisi dengan teks asli: ${r.filled}\nSudah sama: ${r.same}\nPosisi tidak ditemukan (dibiarkan): ${r.nopos}${r.badNames.length ? `\nContoh file gagal: ${r.badNames.join(', ')}` : ''}\nCek di tab Review, lalu ekspor ulang.`;
+      } catch (e) { fmsg.className = 'err'; fmsg.textContent = e?.message || String(e); }
+      fbar.hidden = true;
     };
-    const setAll = (on) => { pickC.clear(); if (on) cats.forEach((c) => pickC.add(c)); boxes.forEach((b) => { b.checked = on; }); };
-    const pickR = (label, attrs) => h('label', { class: 'file' }, label, h('input', { type: 'file', onchange: doRestore, ...attrs }));
-    out.push(card(h('h2', {}, 'Pulihkan dari game asli'),
-      h('p', { class: 'mut' }, 'Untuk teks yang terlanjur diubah dan tidak punya backup. Pilih game asli yang belum diubah dan kategori yang mau dikembalikan. File asli proyek diganti dengan file dari game asli, lalu teks kategori terpilih diambil ulang dan otomatis mengisi kolom terjemahan di tab Review (dialog, pilihan, pembicara, field). Teks yang belum ada di proyek dibuat baru dari file asli, termasuk file yang hilang. Kategori yang tidak dicentang tetap, terjemahannya tidak disentuh.'),
-      h('label', {}, 'Bahasa sumber (menentukan teks mana yang diambil)'), rsrc,
-      h('div', { class: 'row' }, h('button', { onclick: () => setAll(true) }, 'Pilih semua'), h('button', { onclick: () => setAll(false) }, 'Kosongkan')),
-      cats.map((c) => { const cb = h('input', { type: 'checkbox', ...(pickC.has(c) ? { checked: '' } : {}), onchange: (e) => { e.target.checked ? pickC.add(c) : pickC.delete(c); } }); boxes.push(cb); return h('label', { class: 'row' }, cb, ` ${c}`); }),
-      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: '', onchange: (e) => { fillOpt.on = e.target.checked; } }), ' Isi kolom terjemahan dengan teks asli (status done) supaya semua file ikut di patch dan kembali seperti game asli. Matikan kalau mau hasilnya pending lalu diterjemahkan ulang'),
-      pickR('Pilih folder data asli', { webkitdirectory: '', multiple: '' }), pickR('Pilih zip game asli', { accept: '.zip' }), pickR('Pilih Game.rgss3a asli', {}), rbar, rmsg));
+    const pickF = (label, attrs) => h('label', { class: 'file' }, label, h('input', { type: 'file', onchange: doFill, ...attrs }));
+    out.push(card(h('h2', {}, 'Isi dari game asli (lewat posisi)'),
+      h('p', { class: 'mut' }, 'Untuk mengembalikan teks tertentu (mis. label) ke teks game asli tanpa menyentuh entri lain. Pilih kategori, lalu pilih game asli. Teks dicocokkan lewat posisi di file, bukan lewat teks, jadi tetap cocok walau proyek ini diimpor dari game yang sudah diterjemahkan. Kolom terjemahan diisi teks asli dan berstatus edited. File asli proyek tidak diganti.'),
+      h('div', { class: 'row' }, h('button', { onclick: () => setFill(true) }, 'Pilih semua'), h('button', { onclick: () => setFill(false) }, 'Kosongkan')),
+      cats.map((c) => { const cb = h('input', { type: 'checkbox', ...(fillC.has(c) ? { checked: '' } : {}), onchange: (e) => { e.target.checked ? fillC.add(c) : fillC.delete(c); } }); fillBoxes.push(cb); return h('label', { class: 'row' }, cb, ` ${c}`); }),
+      pickF('Pilih folder data asli', { webkitdirectory: '', multiple: '' }), pickF('Pilih zip game asli', { accept: '.zip' }), pickF('Pilih Game.rgss3a asli', {}), fbar, fmsg));
   }
   return out;
 }
