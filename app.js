@@ -2411,7 +2411,9 @@ async function viewEkspor() {
   const fmtIds = (a) => (a.length ? ` (id ${a.slice(0, 8).join(', ')}${a.length > 8 ? ', …' : ''})` : '');
   const prepare = async () => {
     chatUrls.forEach((u) => URL.revokeObjectURL(u)); chatUrls = [];
-    const parts = buildChatParts(p, await dbQuery('entries', 'projectId', p.id), await loadConfig(), Number(perPart.value) || 150, Number(perChars.value) || 6000);
+    // Pakai pilihan kategori dari tab Translate (kalau sudah dibuka); teks yang sudah selesai tidak terpengaruh.
+    const allEntries = await dbQuery('entries', 'projectId', p.id), sel = catSel.pid === p.id && catSel.set ? catSel.set : null;
+    const parts = buildChatParts(p, sel ? allEntries.filter((e) => !TODO.has(e.status) || sel.has(e.category)) : allEntries, await loadConfig(), Number(perPart.value) || 150, Number(perChars.value) || 6000);
     chatMsg.className = 'mut'; chatMsg.textContent = '';
     if (!parts.length) { chatOut.replaceChildren(h('p', { class: 'mut' }, 'Tidak ada teks yang belum selesai.')); return; }
     chatOut.replaceChildren(...parts.map((pt) => {
@@ -2435,7 +2437,7 @@ async function viewEkspor() {
     } catch (e) { chatMsg.className = 'err'; chatMsg.textContent = e.message; return false; }
   };
   return [card(h('h2', {}, 'Ekspor'), h('p', { class: 'mut' }, `Siap diekspor: ${ready}\nBelum diterjemahkan (tetap asli): ${pend}\nError (tetap asli): ${err}`), btn), out,
-    fold('Terjemah lewat chat AI', h('p', { class: 'mut' }, 'Untuk menerjemahkan di aplikasi AI lain tanpa API. Teks yang belum selesai dipecah jadi bagian-bagian berisi instruksi, gaya, dan glosarium. Kirim satu bagian ke AI (tempel atau unggah file), lalu tempel balasannya di bawah. Bagian dihitung ulang dari teks yang belum selesai tiap kali kamu menyiapkannya.'),
+    fold('Terjemah lewat chat AI', h('p', { class: 'mut' }, 'Untuk menerjemahkan di aplikasi AI lain tanpa API. Teks yang belum selesai dipecah jadi bagian-bagian berisi instruksi, gaya, dan glosarium. Kirim satu bagian ke AI (tempel atau unggah file), lalu tempel balasannya di bawah. Kategori yang dipilih di tab Translate ikut dipakai di sini (ubah centangnya di sana). Bagian dihitung ulang dari teks yang belum selesai tiap kali kamu menyiapkannya.'),
       h('label', {}, 'Teks per bagian'), perPart, h('label', {}, 'Maks karakter per bagian'), perChars, h('button', { class: 'pri', onclick: prepare }, 'Siapkan bagian'), chatOut,
       h('label', {}, 'Balasan AI'), paste,
       h('div', { class: 'row' }, h('button', { class: 'pri', onclick: async () => { if (await doImport(paste.value)) paste.value = ''; } }, 'Impor tempelan'),
