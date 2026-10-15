@@ -2017,6 +2017,13 @@ const paintJob = (force) => {
 };
 // Kategori yang dipilih untuk diterjemahkan (tab Translate). Disimpan per proyek selama halaman terbuka.
 const catSel = { pid: null, set: null };
+/** Hitung kategori yang masih punya teks belum selesai, dan samakan pilihan kategori (catSel) dengannya. Default: semua kecuali komentar/skrip. */
+function syncCatSel(p, all) {
+  const todoBy = new Map(); all.filter((e) => TODO.has(e.status)).forEach((e) => todoBy.set(e.category, (todoBy.get(e.category) || 0) + 1));
+  if (catSel.pid !== p.id || !catSel.set) { catSel.pid = p.id; catSel.set = new Set([...todoBy.keys()].filter((k) => k !== 'comment-label' && k !== 'comment-teks' && k !== 'script-teks' && k !== 'script-multi')); }
+  for (const k of [...catSel.set]) if (!todoBy.has(k)) catSel.set.delete(k);
+  return todoBy;
+}
 async function startJob() {
   if (job.running) return;
   const cfg = await loadConfig(), p = await currentProject();
@@ -2046,10 +2053,8 @@ async function viewTranslate() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
   const cfg = await loadConfig(), all = await dbQuery('entries', 'projectId', p.id);
-  // Kategori yang masih punya teks belum diterjemahkan (pending/error). Default: semua terpilih.
-  const todoBy = new Map(); all.filter((e) => TODO.has(e.status)).forEach((e) => todoBy.set(e.category, (todoBy.get(e.category) || 0) + 1));
-  if (catSel.pid !== p.id || !catSel.set) { catSel.pid = p.id; catSel.set = new Set([...todoBy.keys()].filter((k) => k !== 'comment-label' && k !== 'comment-teks' && k !== 'script-teks' && k !== 'script-multi')); }
-  for (const k of [...catSel.set]) if (!todoBy.has(k)) catSel.set.delete(k);
+  // Kategori yang masih punya teks belum diterjemahkan (pending/error). Default: semua kecuali komentar/skrip.
+  const todoBy = syncCatSel(p, all);
   const cnt = (s) => all.filter((e) => e.status === s).length;
   // Perkiraan dihitung ulang di tempat saat kategori dicentang, tanpa memuat ulang seluruh halaman.
   const estText = () => {
@@ -2369,6 +2374,14 @@ async function viewEkspor() {
   const n = (f) => rows.filter(f).length, out = h('div');
   const ready = n((e) => (e.status === 'done' || e.status === 'edited') && e.translation.trim()), pend = n((e) => e.status === 'pending' || e.status === 'translating'), err = n((e) => e.status === 'error');
   const rgMsg = h('p', { class: 'mut' }), rgOut = h('div');
+  const todoBy = syncCatSel(p, rows), catBox = h('div');
+  const chatCats = todoBy.size ? h('div', {}, h('label', {}, 'Kategori yang dikirim ke chat AI'),
+    h('p', { class: 'mut' }, 'Sama dengan pilihan di tab Translate. Hanya teks belum selesai di kategori yang dicentang yang masuk ke bagian.'),
+    catBox, h('div', { class: 'row' },
+      h('button', { onclick: () => { catSel.set = new Set(todoBy.keys()); catBox.querySelectorAll('input').forEach((i) => { i.checked = true; }); } }, 'Pilih semua'),
+      h('button', { onclick: () => { catSel.set = new Set(); catBox.querySelectorAll('input').forEach((i) => { i.checked = false; }); } }, 'Kosongkan'))) : '';
+  if (todoBy.size) catBox.replaceChildren(...[...todoBy].sort((a, b) => b[1] - a[1]).map(([k, c]) => h('label', { class: 'row' },
+    h('input', { type: 'checkbox', ...(catSel.set.has(k) ? { checked: '' } : {}), onchange: (e) => { e.target.checked ? catSel.set.add(k) : catSel.set.delete(k); } }), ` ${k} (${c})`)));
   // Entri yang posisinya tidak cocok: tampilkan peringatan saja
   const warnCard = (r) => {
     if (!r.bad?.length) return '';
@@ -2415,7 +2428,7 @@ async function viewEkspor() {
     const allEntries = await dbQuery('entries', 'projectId', p.id), sel = catSel.pid === p.id && catSel.set ? catSel.set : null;
     const parts = buildChatParts(p, sel ? allEntries.filter((e) => !TODO.has(e.status) || sel.has(e.category)) : allEntries, await loadConfig(), Number(perPart.value) || 150, Number(perChars.value) || 6000);
     chatMsg.className = 'mut'; chatMsg.textContent = '';
-    if (!parts.length) { chatOut.replaceChildren(h('p', { class: 'mut' }, 'Tidak ada teks yang belum selesai.')); return; }
+    if (!parts.length) { chatOut.replaceChildren(h('p', { class: 'mut' }, todoBy.size && !catSel.set.size ? 'Pilih minimal satu kategori dulu.' : 'Tidak ada teks yang belum selesai.')); return; }
     chatOut.replaceChildren(...parts.map((pt) => {
       const url = URL.createObjectURL(new Blob([pt.text], { type: 'text/plain;charset=utf-8' })); chatUrls.push(url);
       return h('div', { class: 'row' }, h('span', {}, `Bagian ${pt.index} dari ${pt.total} · ${pt.count} teks`),
@@ -2437,8 +2450,8 @@ async function viewEkspor() {
     } catch (e) { chatMsg.className = 'err'; chatMsg.textContent = e.message; return false; }
   };
   return [card(h('h2', {}, 'Ekspor'), h('p', { class: 'mut' }, `Siap diekspor: ${ready}\nBelum diterjemahkan (tetap asli): ${pend}\nError (tetap asli): ${err}`), btn), out,
-    fold('Terjemah lewat chat AI', h('p', { class: 'mut' }, 'Untuk menerjemahkan di aplikasi AI lain tanpa API. Teks yang belum selesai dipecah jadi bagian-bagian berisi instruksi, gaya, dan glosarium. Kirim satu bagian ke AI (tempel atau unggah file), lalu tempel balasannya di bawah. Kategori yang dipilih di tab Translate ikut dipakai di sini (ubah centangnya di sana). Bagian dihitung ulang dari teks yang belum selesai tiap kali kamu menyiapkannya.'),
-      h('label', {}, 'Teks per bagian'), perPart, h('label', {}, 'Maks karakter per bagian'), perChars, h('button', { class: 'pri', onclick: prepare }, 'Siapkan bagian'), chatOut,
+    fold('Terjemah lewat chat AI', h('p', { class: 'mut' }, 'Untuk menerjemahkan di aplikasi AI lain tanpa API. Teks yang belum selesai dipecah jadi bagian-bagian berisi instruksi, gaya, dan glosarium. Kirim satu bagian ke AI (tempel atau unggah file), lalu tempel balasannya di bawah. Pilih kategori yang mau dikirim di bawah (sama dengan pilihan di tab Translate). Bagian dihitung ulang dari teks yang belum selesai tiap kali kamu menyiapkannya.'),
+      chatCats, h('label', {}, 'Teks per bagian'), perPart, h('label', {}, 'Maks karakter per bagian'), perChars, h('button', { class: 'pri', onclick: prepare }, 'Siapkan bagian'), chatOut,
       h('label', {}, 'Balasan AI'), paste,
       h('div', { class: 'row' }, h('button', { class: 'pri', onclick: async () => { if (await doImport(paste.value)) paste.value = ''; } }, 'Impor tempelan'),
         h('label', { class: 'file' }, 'Impor file (.txt)', h('input', { type: 'file', accept: '.txt,text/plain', multiple: '', onchange: async (ev) => { const fs = [...ev.target.files]; ev.target.value = ''; if (fs.length) await doImport((await Promise.all(fs.map((f) => f.text()))).join('\n')); } }))), chatMsg)];
