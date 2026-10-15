@@ -1,3 +1,4 @@
+import { ID_W, ID_X, EN_W, ID_AMBIG } from './lang-vocab.js';
 // ===== 1. CONFIG & STRING UI =====
 // Mode tes memakai DB terpisah agar data asli di origin yang sama tidak ikut terhapus.
 export const DB_NAME = globalThis.__RPGTL_TEST__ ? 'rpgtl-db-test' : 'rpgtl-db';
@@ -140,21 +141,41 @@ export function detectMessagePlugins(text) {
 /** Config efektif: bila proyek memakai plugin message, batas baris manual dimatikan. */
 export const effCfg = (project, cfg) => (project?.msgPlugins?.length ? { ...cfg, wrapWidth: 0, wrapFace: 0 } : cfg);
 const JA = /[\u3040-\u30ff\u3400-\u9fff]/;
-const ID_W = new Set('yang dan di ke dari untuk dengan tidak ini itu ada saya aku kamu kau kita kami mereka akan sudah belum bisa dapat pada adalah atau juga tapi tetapi karena jika kalau apa siapa bagaimana mengapa kenapa sebuah para oleh lagi saja hanya sangat sekali harus mau ingin punya anda dia ia lebih semua setiap masih telah dalam tentang seperti setelah sebelum ketika saat sini situ sana bukan jangan tolong terima kasih maaf selamat ya dong deh kok'.split(' '));
-const EN_W = new Set("the and to of a is are was were you i it that this in on for with not be have has had will would can could my your we he she they them his her but if so what who how why do don't did no yes at as from by an me us just all there here now then when up out about i'm it's you're".split(' '));
-/** Tebak bahasa satu teks (kode escape sudah dibuang): 'ja' | 'en' | 'id' | null (tanpa huruf, mis. angka/simbol). */
 const srcLabel = (s) => ({ auto: 'Otomatis (Jepang/Inggris)', all: 'Semua teks (bahasa apa pun)', ja: 'Jepang', en: 'Inggris' }[s] || s);
-export function detectLang(t) {
-  if (JA.test(t)) return 'ja';
-  const w = t.toLowerCase().match(/[a-z']+/g);
-  if (!w) return null;
+/**
+ * Analisis bahasa satu teks (kode escape sudah dibuang).
+ * lang: 'ja' (ada kana/kanji) | 'en' | 'id' | null (tanpa huruf). mixed: ada kana/kanji DAN huruf Latin.
+ * sure: false bila teks terlalu pendek / skor seri, jadi hasilnya hanya tebakan.
+ */
+export function langInfo(t) {
+  const ja = (t.match(/[\u3040-\u30ff\u3400-\u9fff]/g) || []).length;
+  const raw = t.match(/[A-Za-z']+/g), w = raw && raw.map((x) => x.toLowerCase());
+  const lat = w ? w.length : 0;
+  if (ja) return { lang: 'ja', mixed: lat > 0, sure: true, id: 0, en: 0 };
+  if (!w) return { lang: null, mixed: false, sure: false, id: 0, en: 0 };
   let id = 0, en = 0;
-  for (const x of w) {
-    if (ID_W.has(x)) id++;
-    else if (/^(ber|ter|meng|peng)[a-z]{4,}$|^[a-z]{3,}(kan|nya)$/.test(x)) id += 0.5;
+  w.forEach((x, k) => {
+    if ((ID_W.has(x) || ID_X.has(x)) && !(ID_AMBIG.has(x) && raw[k] !== x)) id++;
+    else if (/^(ber|ter|meng|peng|mem|pem)[a-z]{4,}$|^(ke|per|pen|peng)[a-z]{3,}an$|^[a-z]{3,}(kan|nya|lah|kah)$/.test(x)) id += 0.5;
     if (EN_W.has(x)) en++;
-  }
-  return id > en ? 'id' : 'en';
+    else if (/^[a-z]{3,}(tion|ment|ness|ous|ful|ly|ed)$/.test(x)) en += 0.4;
+  });
+  const lang = id > en ? 'id' : 'en';
+  return { lang, mixed: false, sure: Math.abs(id - en) >= 1.5 || (lat >= 4 && id !== en), id, en };
+}
+/** Tebak bahasa satu teks: 'ja' | 'en' | 'id' | null (tanpa huruf, mis. angka/simbol). */
+export const detectLang = (t) => langInfo(t).lang;
+/**
+ * Filter ketat saat IMPOR dengan sumber Inggris: buang teks yang ada huruf Jepang atau jelas berbahasa Indonesia.
+ * Teks pendek yang tidak yakin (nama, "Potion") tetap lolos. stats (opsional) menghitung yang dibuang per alasan.
+ */
+export function langAllowed(original, src, stats = null) {
+  if (src !== 'en') return true;
+  const t = original.replace(ESC, '').trim(), r = langInfo(t);
+  const why = r.lang === 'ja' ? (r.mixed ? 'mix' : 'ja') : r.lang === 'id' ? 'id' : null;
+  if (!why) return true;
+  if (stats) { const g = (stats[why] ||= { n: 0, samples: [] }); g.n++; if (g.samples.length < 3) g.samples.push(t.replace(/\s+/g, ' ').slice(0, 40)); }
+  return false;
 }
 /** Ganti kode escape dengan token ⟦n⟧. Kode di awal dan akhir teks tidak dikirim ke AI (sering dihapus model); dipasang lagi saat unmask. */
 const ESC_LEAD = new RegExp('^(?:\\s*(?:' + ESC.source + '))+\\s*'), ESC_TRAIL = new RegExp('(?:\\s*(?:' + ESC.source + '))+\\s*$');
@@ -800,11 +821,12 @@ export const scriptSentence = (x, src = 'ja') => {
   if (src === 'all') return JA.test(t) || /[^\x00-\x7f]/.test(t.replace(/[\p{P}\p{S}\p{Z}]/gu, '')) || (/\s/.test(t) && (t.match(/[A-Za-z']+/g) || []).length >= 2);
   return (JA.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 3) && detectLang(t) !== 'id';
 };
-export function extractFile(path, json, { src = 'ja', allow = null } = {}) {
+export function extractFile(path, json, { src = 'ja', allow = null, strict = false, stats = null } = {}) {
   const A = allowSets(allow);
   const base = path.split('/').pop().replace(/\.(json|rvdata2)$/i, ''), ace = /\.rvdata2$/i.test(path), out = [];
   const add = (p, kind, category, original, meta = {}, lineCount = 1) => {
     if (!isTranslatable(original, src)) return;
+    if (strict && !langAllowed(original, src, stats)) return;
     out.push({ file: path, path: JSON.stringify(p), kind, category, original, translation: '', status: 'pending', order: out.length, lineCount, meta, source: src === 'auto' ? detectLang(original.replace(ESC, '').trim()) : src === 'all' ? (JA.test(original) ? 'ja' : detectLang(original.replace(ESC, '').trim()) || 'all') : src, error: '' });
   };
   // Kalimat di dalam string berkutip pada perintah Script (355/655) dan Control Variables bertipe script (122).
@@ -1231,13 +1253,13 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
   const { engine: eng, data, plugins, scripts } = await collectSources(files);
   if (!data.size) throw new Error(UI.noData);
   const id = 'p' + Date.now().toString(36), orig = [], entries = [], broken = [], counts = {};
-  const gaps = new Map();
+  const gaps = new Map(), langSkip = {};
   let sys = null, i = 0, msgPlugins = [], pluginsSeen = false, pluginsText = '';
   if (plugins) try { pluginsText = await plugins.read(); msgPlugins = detectMessagePlugins(pluginsText); pluginsSeen = true; } catch { /* plugins.js tidak terbaca */ }
   const ingest = async (path, json, text) => {
     orig.push({ key: `${id}:${path}`, projectId: id, path, text });
     const covered = new Set();
-    for (const e of extractFile(path, json, { src, allow })) {
+    for (const e of extractFile(path, json, { src, allow, strict: true, stats: langSkip })) {
       e.projectId = id; e.hash = await sha256(e.original); entries.push(e);
       counts[e.category] = (counts[e.category] || 0) + 1;
       e.original.split('\n').forEach((l) => covered.add(l.trim())); if (e.meta?.speaker) covered.add(e.meta.speaker.trim());
@@ -1270,7 +1292,7 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
     else paramNote = pluginsText ? 'js/plugins.js tidak bisa dibaca (bukan array JSON murni), parameter plugin dilewati' : 'js/plugins.js tidak ikut dipilih, parameter plugin dilewati';
   }
   const engine = eng || (sys && (sys.advanced || sys.itemCategories) ? 'MZ' : 'MV');
-  const project = { id, engine, src, tgt: 'id', scriptsDiag, gaps: [...gaps].sort((a, b) => b[1].n - a[1].n).slice(0, 10), msgPlugins, pluginsSeen, allow, paramNote, catV: 2, files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
+  const project = { id, engine, src, tgt: 'id', scriptsDiag, gaps: [...gaps].sort((a, b) => b[1].n - a[1].n).slice(0, 10), langSkip, msgPlugins, pluginsSeen, allow, paramNote, catV: 2, files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
   onProgress(`Menyimpan ${entries.length} teks…`, data.size, data.size);
   await dbPutMany('origFiles', orig);
   await dbPutMany('entries', entries);
@@ -1916,6 +1938,14 @@ async function viewProyek() {
     p.paramNote ? h('p', { class: 'err' }, p.paramNote) : '',
     h('details', { class: 'fold-in', ...((uiGet('diag', (p.scriptsDiag?.hits || p.scriptsDiag?.error || p.gaps?.length) ? '1' : '0') === '1') ? { open: '' } : {}), ontoggle: (e) => uiSet('diag', e.currentTarget.open ? '1' : '0') },
       h('summary', {}, (p.scriptsDiag?.hits || p.scriptsDiag?.error || p.gaps?.length) ? 'Diagnostik impor (ada temuan)' : 'Diagnostik impor'),
+    (() => {
+      const L = p.langSkip, names = { ja: 'berhuruf Jepang', mix: 'campuran Jepang + Latin', id: 'berbahasa Indonesia' };
+      if (p.src !== 'en') return '';
+      if (!L) return h('p', { class: 'mut' }, 'Filter bahasa: impor ulang proyek ini untuk menghitung.');
+      const ks = Object.keys(L).filter((k) => L[k].n);
+      if (!ks.length) return h('p', { class: 'mut' }, 'Filter bahasa: tidak ada teks yang dibuang.');
+      return h('p', { class: 'err' }, `Dibuang karena bukan Inggris (cek bila ada yang salah):\n${ks.map((k) => `${names[k]}: ${L[k].n} | ${L[k].samples.map((x) => `"${x}"`).join(' / ')}`).join('\n')}`);
+    })(),
     p.engine === 'VX Ace' ? (() => {
       const d = p.scriptsDiag;
       if (!d) return h('p', { class: 'mut' }, 'Diagnostik Scripts.rvdata2: impor ulang proyek ini untuk memeriksa.');
