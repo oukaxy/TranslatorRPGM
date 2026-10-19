@@ -38,6 +38,23 @@ mendapatkan menerima menggunakan digunakan diperoleh ditemukan dimiliki terjual 
 peringatan berhasil gagal terkunci terbuka selesai tersedia
 `);
 
+// ---- Indonesia: kosakata dewasa/sensual, makian, dan bahasa gaul (dipakai agar teks dewasa tidak salah terdeteksi) ----
+// JANGAN masukkan kata yang sama di Inggris: penis, vagina, anal, oral, sex, anus, dildo, bra.
+const ID_ADULT = words(`
+payudara dada puting tetek toket susu bokong pantat paha pinggul selangkangan kemaluan kelamin kejantanan klitoris rahim
+telanjang bugil birahi nafsu gairah rangsang rangsangan merangsang bercinta bersetubuh persetubuhan senggama bersenggama
+orgasme klimaks ejakulasi sperma ereksi tegang mengeras basah becek licin sempit ketat nikmat geli lubang perawan keperawanan
+mesum cabul genit nakal menggoda godaan merayu rayuan sayang manja malu mendesah desah desahan mengerang erang gemetar
+bergetar menggeliat sentuh menyentuh sentuhan elus mengelus belai membelai peluk memeluk pelukan cium mencium ciuman
+kecup mengecup jilat menjilat hisap menghisap isap mengisap gigit menggigit remas meremas lidah bibir mulut leher pipi
+tubuh badan kulit keringat ranjang kasur selimut mandi celana rok gaun stoking kemben hamil mengandung
+pelacur jalang sundal lonte budak majikan hukuman cambuk diikat ikat belenggu rantai tunduk patuh
+kontol memek pepek ngentot entot ngewe colmek bangsat bajingan brengsek sialan keparat kampret tolol bodoh goblok sinting gila
+bangke bacot anjir anjrit njir buset
+gimana gitu gini emang emangnya soalnya pokoknya bentar sebentar aja doang yaudah yasudah
+`);
+ID_ADULT.forEach((w) => ID_X.add(w));
+
 // ---- Inggris: kata fungsi & percakapan ----
 export const EN_W = words(`
 the and to of a is are was were you i it that this in on for with not be have has had will would can could my your we
@@ -51,3 +68,28 @@ i'll i've we're they're he's she's didn't doesn't wasn't couldn't wouldn't shoul
 
 // Kata Indonesia yang juga nama/romaji Jepang (Dan, Kami, Sana, Kita, Aku, Hari, Lima). Hanya dihitung bila ditulis huruf kecil.
 export const ID_AMBIG = words('dan kami sana kita aku hari lima');
+
+// Kata khas Portugis/Spanyol yang sering tertinggal di teks hasil terjemahan mesin (dipakai foreignWords di app.js).
+// Hanya kata yang tidak ada di Indonesia/Inggris. JANGAN masukkan: para, mas, nada, las, com, bom, una, casa, seu, sua (umum di Indonesia atau nama).
+export const FOREIGN_W = words(`
+mesmo você vocês voce também tambem então entao ainda porque porquê obrigado obrigada estou estão estamos nós
+nosso nossa minha muito muita muitos aqui agora sempre tudo pelo pela isso isto vamos desculpa desculpe hoje ontem
+amanhã tenho quero posso preciso ninguém alguém coisa coisas porém embora apesar enquanto depois
+gracias también pero estoy están nosotros nosotras usted ustedes muy aquí ahora siempre hola adiós señor señora
+nuestro nuestra quiero puedo tengo hacer mucho mucha cuando donde pues entonces todavía aunque tiene había estás
+eres somos bueno buenas
+gostoso gostosa buceta boceta tesão safada safado putaria caralho porra merda puta foda foder gozar gozando peitos rabo
+delícia querida querido linda lindo gemido molhada senhor senhora
+coño joder mierda carajo culo polla verga tetas puto cabrón cabrona pendejo cariño bonita guapa señorita caliente
+`);
+
+// Kata Indonesia yang juga kata/nama Inggris (Mantra, Dada, Gila monster...). Hanya dihitung bila ditulis huruf kecil.
+'mantra dada gila pipi rok ikat susu paha topi kota surat'.split(' ').forEach((w) => ID_AMBIG.add(w));
+
+// ---- Inggris: bahasa gaul/lisan dan kosakata dewasa (membantu baris pendek seperti "Harder..." atau "Fuck you.") ----
+const EN_EXTRA = words(`
+gonna wanna gotta ain't gimme lemme dunno nope yep nah y'all
+fuck fucking fucked shit damn bitch dick cock pussy cum ass tits boobs naked horny suck sucking lick licking moan moaning
+harder deeper faster wet hard inside kiss kisses kissing touch touching stroke thrust
+`);
+EN_EXTRA.forEach((w) => EN_W.add(w));

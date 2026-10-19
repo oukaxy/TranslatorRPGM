@@ -1,4 +1,4 @@
-import { ID_W, ID_X, EN_W, ID_AMBIG } from './lang-vocab.js';
+import { ID_W, ID_X, EN_W, ID_AMBIG, FOREIGN_W } from './lang-vocab.js';
 // ===== 1. CONFIG & STRING UI =====
 // Mode tes memakai DB terpisah agar data asli di origin yang sama tidak ikut terhapus.
 export const DB_NAME = globalThis.__RPGTL_TEST__ ? 'rpgtl-db-test' : 'rpgtl-db';
@@ -1381,7 +1381,7 @@ export const DEFAULT_STYLE = 'Indonesia santai ala dialog game atau subtitle ani
 const cacheKey = (project, cfg, original, terms = [], notes = []) => sha256(`${project.src}|${project.tgt}|${cfg.model}|${original}${terms.length ? `|g:${terms.map((t) => t.join('=')).join(';')}` : ''}${notes.length ? `|n:${notes.map((t) => t.join('=')).join(';')}` : ''}`);
 
 // ===== 4c. TERJEMAH LEWAT CHAT AI =====
-const NL = '⏎', LANG_NAME = { all: 'bahasa apa pun (tiap baris bisa Jepang, Inggris, Indonesia, Korea, dll; baris yang sudah berbahasa Indonesia salin apa adanya)', ja: 'Jepang', en: 'Inggris', id: 'Indonesia', auto: 'Jepang atau Inggris (tiap baris bisa salah satunya; baris yang sudah berbahasa Indonesia salin apa adanya)' };
+const NL = '⏎', LANG_NAME = { all: 'bahasa apa pun (tiap baris bisa Jepang, Inggris, Indonesia, Korea, dll; baris yang sudah bersih berbahasa Indonesia salin apa adanya; bila bercampur bahasa lain atau salah ketik, perbaiki jadi bahasa Indonesia yang bersih)', ja: 'Jepang', en: 'Inggris', id: 'Indonesia', auto: 'Jepang atau Inggris (tiap baris bisa salah satunya; baris yang sudah bersih berbahasa Indonesia salin apa adanya; bila bercampur bahasa lain atau salah ketik, perbaiki jadi bahasa Indonesia yang bersih)' };
 const plainName = (t) => String(t || '').replace(ESC, '').replace(/[\[\]|\n]/g, ' ').trim();
 /**
  * Pecah teks yang belum selesai menjadi bagian-bagian untuk ditempel ke aplikasi AI.
@@ -1411,6 +1411,7 @@ export function buildChatParts(project, entries, cfg, perPart = 150, maxChars = 
       `4. Tanda ${NL} berarti pindah baris di dalam satu teks. Pertahankan tanda itu (jangan diganti baris baru sungguhan) dan taruh di tempat yang wajar.`,
       `5. Bagian "|nama" setelah id hanyalah konteks pembicara. Jangan ikut ditulis di balasan dan jangan diterjemahkan sebagai teks.`,
       `6. Tanpa komentar, pembuka, penutup, atau blok kode.`,
+      `7. Teks sumber bisa sudah setengah terjemah, salah ketik, atau berisi kata bahasa lain (mis. Portugis "mesmo", "você", Spanyol "gracias"). Perbaiki semuanya: hasil harus bersih, ejaan benar, tanpa sisa kata asing.`,
       ...((cfg.style || '').trim() ? [``, `# GAYA BAHASA`, cfg.style.trim().replace(/\s+/g, ' ')] : []),
       ...(notes.size ? [``, `# CATATAN KARAKTER (nama pembicara: gaya bicara)`, ...[...notes].map(([a, b]) => `${a}: ${b}`)] : []),
       ...(terms.size ? [``, `# GLOSARIUM (pakai terjemahan ini persis)`, ...[...terms].map(([a, b]) => `${a} = ${b}`)] : []),
@@ -1440,7 +1441,7 @@ export function parseChatReply(text, ids = null) {
 export function applyChatRows(entries, rows) {
   const byId = new Map(entries.map((e) => [e.id, e])), byOrig = new Map();
   for (const e of entries) { if (!byOrig.has(e.original)) byOrig.set(e.original, []); byOrig.get(e.original).push(e); }
-  const out = { updates: [], texts: 0, empty: [], badToken: [], unknown: [], dup: 0 }, seen = new Set();
+  const out = { updates: [], texts: 0, empty: [], badToken: [], foreign: [], unknown: [], dup: 0 }, seen = new Set();
   for (const r of rows) {
     const e0 = byId.get(r.id); if (!e0) { out.unknown.push(r.id); continue; }
     if (seen.has(e0.original)) { out.dup++; continue; }
@@ -1449,6 +1450,7 @@ export function applyChatRows(entries, rows) {
     if (!t) { out.empty.push(r.id); continue; }
     const mk = maskText(e0.original), u = unmaskText(t, mk.tokens);
     if (!u.ok || codeProblem(mk.text.replace(/\r?\n/g, '\n'), t)) { out.badToken.push(r.id); continue; }
+    if (foreignWords(t).length) { out.foreign.push(r.id); continue; }
     seen.add(e0.original); out.texts++;
     for (const e of byOrig.get(e0.original)) if (TODO.has(e.status)) out.updates.push({ ...e, translation: lead + u.text + trail, status: 'done', error: '' });
   }
@@ -1461,10 +1463,17 @@ export const DEFAULT_CONFIG = {
   temperature: 0.3, batchSize: 30, maxChars: 4000, concurrency: 4, delay: 100, priceIn: 0, priceOut: 0,
   fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '', timeout: 120, extraBody: '', auto: true,
 };
-const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian', all: 'any language (each item may be Japanese, English, Indonesian, Korean, etc.; if an item is already Indonesian, return it unchanged)', auto: 'Japanese or English (each item may be in either language; if an item is already Indonesian, return it unchanged)' };
+const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian', all: 'any language (each item may be Japanese, English, Indonesian, Korean, etc.; if an item is already entirely clean Indonesian, return it unchanged; if it mixes Indonesian with other languages or has typos, rewrite it as clean Indonesian)', auto: 'Japanese or English (each item may be in either language; if an item is already entirely clean Indonesian, return it unchanged; if it mixes Indonesian with other languages or has typos, rewrite it as clean Indonesian)' };
 /** Hasil terjemahan yang masih memuat huruf Jepang/Mandarin, Cyrillic, Arab, atau Hangul: tanda terjemahan setengah jalan atau ngaco. */
 export const stray = (t) => JA.test(t) || /[\u0400-\u04FF\u0600-\u06FF\uAC00-\uD7AF]/.test(t);
 const STRAY_MSG = 'Hasil masih bercampur huruf Jepang/asing, bukan bahasa target';
+/** Kata khas Portugis/Spanyol yang tertinggal di teks (kode escape diabaikan). Mengembalikan kata unik berhuruf kecil. */
+export function foreignWords(t) {
+  const ws = String(t || '').replace(ESC, ' ').match(/\p{L}+/gu) || [], out = new Set();
+  for (const w of ws) { const k = w.toLowerCase(); if (FOREIGN_W.has(k)) out.add(k); }
+  return [...out];
+}
+const foreignMsg = (t) => `Ada kata bahasa asing (Portugis/Spanyol) yang tertinggal: ${foreignWords(t).slice(0, 3).join(', ')}`;
 const TODO = new Set(['pending', 'error', 'translating']);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const abortErr = () => Object.assign(new Error('Aborted'), { name: 'AbortError' });
@@ -1587,7 +1596,7 @@ Rules:
 - Never write game codes yourself: no backslash codes (\\C[2], \\V[1], \\N[1]), no <tags>, no %1 placeholders unless they appear as ⟦n⟧ tokens in the source. If the source has none, the translation has none.
 - If an item is only code, a number, a variable/file/switch name, or key=value pairs, copy it unchanged. Do not fix, normalise, or reformat code: keep brackets, parentheses, operators, digits, and letter case exactly. Never translate identifiers (CamelCase, snake_case, ALL_CAPS).
 - Keep line breaks as line breaks and keep the same number of lines when possible.
-- Translate every word into ${LANG[tgt]}. Never leave Japanese, Chinese, or Korean characters in the translation and never mix source-language words into the sentence; romanize a name if you must keep it. Reply only in ${LANG[tgt]}.\n- Translate as natural game dialogue. Keep names consistent. Keep short UI terms short.
+- Translate every word into ${LANG[tgt]}. Never leave Japanese, Chinese, or Korean characters in the translation and never mix source-language words into the sentence; romanize a name if you must keep it. Reply only in ${LANG[tgt]}.\n- The source may already be machine-translated, half-translated, or contain stray words from other languages (e.g. Portuguese "mesmo", "você", Spanish "gracias", "pero") or typos. Fix all of them: the result must be clean, correctly spelled ${LANG[tgt]} with no leftover foreign words.\n- Translate as natural game dialogue. Keep names consistent. Keep short UI terms short.
 - If "glossary" is given, translate those terms exactly as listed (from -> to).${style.trim() ? `\n- Style guide for all text: ${style.trim().replace(/\s+/g, ' ')}` : ''}
 - If "character_notes" is given, follow each note for lines spoken by that speaker; it overrides the general style guide.
 - If an item has max_chars_per_line and max_lines, the translation must fit: break lines with \\n, never exceed max_chars_per_line characters per line (not counting ⟦n⟧ tokens) or max_lines lines. Indonesian and English run longer than Japanese, so shorten the wording when needed and keep the meaning.
@@ -1713,7 +1722,7 @@ export async function runTranslation(project, cfg, o = {}) {
     const terms = termsFor(gl, `${original}\n${entries[0].meta?.speaker || ''}`);
     const notes = notesFor(cn, entries[0].meta?.speaker || '');
     const key = await cacheKey(project, cfg, original, terms, notes), c = await dbGet('cache', key);
-    if (c && !stray(c.text)) { entries.forEach((e) => hits.push({ ...e, translation: c.text, status: 'done', error: '' })); continue; }
+    if (c && !stray(c.text) && !foreignWords(c.text).length) { entries.forEach((e) => hits.push({ ...e, translation: c.text, status: 'done', error: '' })); continue; }
     const m = maskText(original), e0 = entries[0], p = pos.get(e0.id);
     units.push({
       id: uid++, key, text: m.text, tokens: m.tokens, speaker: e0.meta?.speaker || '', entries, terms, notes,
@@ -1739,7 +1748,7 @@ export async function runTranslation(project, cfg, o = {}) {
   const run = async (batch) => {
     const r = await translateBatch(batch, {
       chat: guarded, retry: { signal }, src: project.src, tgt: project.tgt, context: batch[0].ctx, style: cfg.style,
-      check: (id, t) => (!t.trim() ? UI.emptyTr : !unmaskText(t, byId.get(id).tokens).ok ? UI.tokenBad : stray(t) ? STRAY_MSG : codeProblem(byId.get(id).text, t)),
+      check: (id, t) => (!t.trim() ? UI.emptyTr : !unmaskText(t, byId.get(id).tokens).ok ? UI.tokenBad : stray(t) ? STRAY_MSG : foreignWords(t).length ? foreignMsg(t) : codeProblem(byId.get(id).text, t)),
       onUsage: (u) => { stat.tokensIn += u?.prompt_tokens || 0; stat.tokensOut += u?.completion_tokens || 0; },
     });
     stat.expOut += batch.reduce((a, u) => a + u.text.length + 5, 0); stat.nb++;
@@ -1775,7 +1784,7 @@ export async function retranslateEntry(project, cfg, e, chat) {
   const terms = termsFor(parseGlossary(cfg.glossary), `${e.original}\n${e.meta?.speaker || ''}`), notes = notesFor(parseNotes(cfg.charNotes), e.meta?.speaker || '');
   const r = await translateBatch([{ id: 0, text: m.text, speaker: e.meta?.speaker || '', limit: limitFor(e, effCfg(project, cfg)), terms, notes }], {
     chat: call, src: project.src, tgt: project.tgt, context: [], style: cfg.style,
-    check: (id, t) => (t.trim() ? (unmaskText(t, m.tokens).ok ? codeProblem(m.text, t) : UI.tokenBad) : UI.emptyTr),
+    check: (id, t) => (t.trim() ? (unmaskText(t, m.tokens).ok ? (foreignWords(t).length ? foreignMsg(t) : codeProblem(m.text, t)) : UI.tokenBad) : UI.emptyTr),
   });
   if (!r.ok.size) throw new LlmError(r.fail.get(0) || UI.badJson);
   const text = unmaskText(r.ok.get(0), m.tokens).text, u = { ...e, translation: text, status: 'done', error: '' };
@@ -2113,12 +2122,12 @@ async function viewTranslate() {
       })()) : '',
     cnt('done') ? (() => {
       const m = h('p', { class: 'mut' });
-      return card(h('h2', {}, 'Periksa hasil'), h('p', { class: 'mut' }, 'Cari terjemahan yang masih bercampur huruf Jepang atau asing (setengah terjemah). Yang ketemu ditandai error supaya bisa diterjemahkan ulang lewat tombol Lanjutkan. Terjemahan yang kamu edit manual tidak disentuh.'),
+      return card(h('h2', {}, 'Periksa hasil'), h('p', { class: 'mut' }, 'Cari terjemahan yang masih bercampur huruf Jepang atau asing, atau masih memuat kata Portugis/Spanyol (setengah terjemah). Yang ketemu ditandai error supaya bisa diterjemahkan ulang lewat tombol Lanjutkan. Terjemahan yang kamu edit manual tidak disentuh.'),
         h('button', { onclick: async (ev) => {
           const b = ev.currentTarget; b.disabled = true;
-          const bad = all.filter((e) => e.status === 'done' && stray(e.translation));
-          if (bad.length) await dbPutMany('entries', bad.map((e) => ({ ...e, status: 'error', error: STRAY_MSG })));
-          m.textContent = bad.length ? `${bad.length} teks ditandai error.` : 'Tidak ada hasil yang bercampur huruf asing.';
+          const bad = all.filter((e) => e.status === 'done' && (stray(e.translation) || foreignWords(e.translation).length));
+          if (bad.length) await dbPutMany('entries', bad.map((e) => ({ ...e, status: 'error', error: stray(e.translation) ? STRAY_MSG : foreignMsg(e.translation) })));
+          m.textContent = bad.length ? `${bad.length} teks ditandai error.` : 'Tidak ada hasil yang bercampur huruf atau kata asing.';
           b.disabled = false; if (bad.length) render();
         } }, 'Periksa hasil'), m);
     })() : '',
@@ -2188,7 +2197,8 @@ async function viewSettings() {
     h('div', { class: 'card danger-card' }, h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn),
     actionBar(msg, h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')))];
 }
-const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)']];
+const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Kata asing Portugis/Spanyol']];
+const hasForeign = (e) => !!e.translation && foreignWords(e.translation).length > 0;
 /** Filter khusus: cari teks asli yang memuat kode/fungsi tertentu. Dicocokkan ke teks asli (kode game ada di sana). */
 const FUNC_FILTERS = [
   ['any', 'Semua jenis kode/fungsi', null],
@@ -2262,7 +2272,7 @@ async function viewReview() {
   const fill = () => {
     uiSet('filters:' + p.id, JSON.stringify({ filter, cat, fn, mode, q: qRaw }));
     const fnRe = fnTest(fn);
-    const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : e.status === filter)) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
+    const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : filter === 'foreign' ? hasForeign(e) : e.status === filter)) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
     const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE)); page = Math.min(page, pages - 1);
     info.textContent = qErr ? qErr : `${list.length} teks`; info.className = qErr ? 'err' : 'mut'; count = list.length; paintChips();
     const go = (n) => () => { page = n; fill(); scrollTo(0, 0); };
@@ -2270,7 +2280,7 @@ async function viewReview() {
       h('div', { class: 'row' }, h('button', { onclick: go(page - 1), ...(page ? {} : { disabled: '' }) }, 'Sebelumnya'),
         h('button', { onclick: go(page + 1), ...(page < pages - 1 ? {} : { disabled: '' }) }, `Berikutnya (${page + 1}/${pages})`)));
   };
-  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); sCnt.set('codediff', rows.filter(codeDiff).length);
+  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); sCnt.set('codediff', rows.filter(codeDiff).length); sCnt.set('foreign', rows.filter(hasForeign).length);
   const sel = h('select', { 'aria-label': 'Filter status', onchange: (e) => { filter = e.target.value; page = 0; fill(); } }, FILTERS.map(([v, t]) => h('option', { value: v }, v === 'all' ? `${t} (${rows.length})` : `${t} (${sCnt.get(v) || 0})`)));
   const fnSel = h('select', { 'aria-label': 'Filter kode atau fungsi', onchange: (e) => { fn = e.target.value; page = 0; fill(); } }, FUNC_FILTERS.map(([v, t]) => { const re = fnTest(v); return h('option', { value: v }, re ? `${t} (${rows.filter((x) => re.test(x.original)).length})` : t); }));
   const modeSel = h('select', { 'aria-label': 'Mode pencarian', onchange: (e) => { mode = e.target.value; setQuery(qRaw); } },
@@ -2445,7 +2455,7 @@ async function viewEkspor() {
       if (r.updates.length) await dbPutMany('entries', r.updates);
       const upd = new Set(r.updates.map((u) => u.id)), left = new Set(es.filter((e) => TODO.has(e.status) && !upd.has(e.id)).map((e) => e.original)).size;
       chatMsg.textContent = [`Baris terbaca: ${rows.length}`, `Teks diterjemahkan: ${r.texts} (${r.updates.length} entri)`, `Sisa belum diterjemahkan: ${left} teks`, `Kode game rusak atau hilang (ditolak): ${r.badToken.length}${fmtIds(r.badToken)}`,
-        `Terjemahan kosong: ${r.empty.length}${fmtIds(r.empty)}`, `id tidak dikenal: ${r.unknown.length}${fmtIds(r.unknown)}`, `Duplikat diabaikan: ${r.dup}`, `Baris tanpa nomor di awal atau akhir diabaikan: ${ignored}`].join('\n');
+        `Masih ada kata Portugis/Spanyol (ditolak): ${r.foreign.length}${fmtIds(r.foreign)}`, `Terjemahan kosong: ${r.empty.length}${fmtIds(r.empty)}`, `id tidak dikenal: ${r.unknown.length}${fmtIds(r.unknown)}`, `Duplikat diabaikan: ${r.dup}`, `Baris tanpa nomor di awal atau akhir diabaikan: ${ignored}`].join('\n');
       return r.updates.length > 0;
     } catch (e) { chatMsg.className = 'err'; chatMsg.textContent = e.message; return false; }
   };
