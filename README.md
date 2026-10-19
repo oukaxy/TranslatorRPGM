@@ -10,6 +10,7 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 - [Engine dan Format yang Didukung](#engine-dan-format-yang-didukung)
 - [Cara Pakai](#cara-pakai)
 - [Pengaturan](#pengaturan)
+- [Aksi Massal di Review](#aksi-massal-di-review)
 - [Cadangan dan Pemulihan](#cadangan-dan-pemulihan)
 - [Terjemah Lewat Chat AI (Tanpa API)](#terjemah-lewat-chat-ai-tanpa-api)
 - [Keamanan Hasil Terjemahan](#keamanan-hasil-terjemahan)
@@ -30,6 +31,9 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 - **Pilih kategori** yang diterjemahkan (dialog, pilihan, nama, sistem, deskripsi item, dan seterusnya).
 - **Gaya bahasa, catatan per karakter, dan glosarium** yang dikirim ke model di setiap batch.
 - **Review**: edit manual, terjemah ulang per teks, filter status, pencarian (longgar, persis, atau regex), filter jenis kode escape, audit "kode berubah", dan ganti kata massal yang tidak menyentuh kode escape.
+- **Filter temuan masalah**: "Kata asing Portugis/Spanyol" (semua status, termasuk hasil edit) dan "Belum diterjemahkan (sama dengan asli)" untuk teks Jepang atau bahasa lain yang lolos tanpa diterjemahkan.
+- **Filter bahasa terjemahan**: di panel Filter, pilih *Masih ada Jepang/aksara asing*, *Ada kata Inggris (ketat)*, *Dominan Inggris*, *Spanyol/Portugis*, atau *Bahasa Indonesia* untuk menemukan kosakata yang terlewat. Memakai `lang-vocab.js`; bila ada salah tangkap atau yang lolos, tambah katanya di file itu.
+- **Aksi massal untuk hasil filter**: terjemah ulang atau tandai untuk nanti, sekaligus untuk semua teks yang tampil, dengan konfirmasi dua ketukan.
 - **Ekspor patch** berupa zip berisi file data yang sudah diterjemahkan, dilengkapi `patch-report.txt`.
 - **Diff guard**: hasil ekspor diperiksa terhadap file asli sehingga hanya teks yang berubah. Bila ada yang janggal, ekspor dibatalkan.
 - **Pemecahan baris otomatis** agar teks muat di kotak pesan (lebar bisa diatur, otomatis mati bila terdeteksi plugin message).
@@ -55,7 +59,7 @@ Navigasi memakai empat tab di bawah layar, dengan Pengaturan di pojok kanan atas
 1. **Pengaturan**: isi base URL, API key, dan model. Tekan **Tes koneksi** untuk memastikan semuanya benar.
 2. **Proyek**: pilih bahasa sumber, lalu impor folder data, zip game, atau `Game.rgss3a`. Ringkasan dan diagnostik impor muncul setelahnya.
 3. **Translate**: pilih bahasa target (Indonesia atau Inggris) dan kategori, cek perkiraan biaya, lalu tekan **Mulai translate**. Proses bisa dihentikan dan dilanjutkan kapan saja.
-4. **Review**: periksa hasil, edit, atau terjemah ulang. Gunakan filter *Error* dan *Kode berubah* untuk menemukan masalah lebih cepat.
+4. **Review**: periksa hasil, edit, atau terjemah ulang. Gunakan filter *Error*, *Kode berubah*, *Kata asing*, dan *Belum diterjemahkan* untuk menemukan masalah lebih cepat. Saat ada filter aktif, kartu **Aksi untuk hasil filter** muncul (lihat [Aksi Massal di Review](#aksi-massal-di-review)).
 5. **Ekspor**: tekan **Buat patch**, unduh zip, **backup folder data asli**, lalu timpa isinya dengan file di dalam zip. Untuk game VX Ace yang memakai `Game.rgss3a`, pilih arsip aslinya agar aplikasi membuat `Game.rgss3a` baru.
 
 ## Pengaturan
@@ -97,6 +101,17 @@ Contoh glosarium dan catatan karakter:
 アリス: sopan, pakai saya/Anda
 バルト: preman, pakai gue/lo, kasar
 ```
+
+## Aksi Massal di Review
+
+Setelah memilih filter atau mencari sesuatu, kartu **Aksi untuk hasil filter** menampilkan dua tombol yang berlaku untuk **semua** teks di daftar (bukan hanya halaman yang terlihat). Keduanya memakai konfirmasi dua ketukan, dan peringatannya menyebut berapa teks yang merupakan hasil edit manual.
+
+- **Terjemah ulang sekarang**: menandai teks-teks itu, membuang cache-nya, lalu langsung menerjemahkan **hanya** teks tersebut di tab Translate. Peringatan menampilkan perkiraan token. Teks pending lain tidak ikut diterjemahkan. Butuh API key.
+- **Tandai untuk diterjemah ulang**: hanya mengubah status menjadi Error dan membuang cache. Terjemahan lama tetap terlihat sebagai acuan, tetapi tidak ikut ekspor sampai diterjemahkan ulang. Lanjutkan nanti lewat tombol *Lanjutkan* di tab Translate atau lewat chat AI di tab Ekspor.
+
+Cache teks yang ditandai dibuang supaya hasil lama yang sama tidak dipakai lagi. Cache teks lain tetap dipakai, sehingga tidak ada token yang terbuang.
+
+Filter **Belum diterjemahkan (sama dengan asli)** menampilkan teks yang terjemahannya identik dengan aslinya padahal bahasanya bukan bahasa target (misalnya Jepang atau Inggris tak tersentuh). Teks pendek atau meragukan, seperti nama dan istilah, sengaja tidak dihitung. Teks yang sudah berbahasa Indonesia tetapi memuat kata Portugis/Spanyol ditangkap oleh filter **Kata asing**, bukan filter ini.
 
 ## Cadangan dan Pemulihan
 

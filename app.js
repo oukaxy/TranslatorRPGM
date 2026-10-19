@@ -1763,10 +1763,10 @@ export function estimateCost(entries, cfg0, src = 'ja') {
  * @returns {Promise<{done:number, error:number, cached:number, tokensIn:number, tokensOut:number, stopped:boolean}>}
  */
 export async function runTranslation(project, cfg, o = {}) {
-  const { signal, onProgress = () => {}, base = 0 } = o, chat = o.chat || ((m, s) => llmChat(cfg, m, s));
+  const { signal, onProgress = () => {}, base = 0 } = o, ids = o.ids ? new Set(o.ids) : null, chat = o.chat || ((m, s) => llmChat(cfg, m, s));
   const all = (await dbQuery('entries', 'projectId', project.id)).sort((a, b) => a.id - b.id);
   const cats = Array.isArray(o.cats) ? new Set(o.cats) : null; // null = semua kategori
-  const pos = new Map(all.map((e, i) => [e.id, i])), todo = all.filter((e) => TODO.has(e.status) && (!cats || cats.has(e.category)));
+  const pos = new Map(all.map((e, i) => [e.id, i])), todo = all.filter((e) => TODO.has(e.status) && (!cats || cats.has(e.category)) && (!ids || ids.has(e.id)));
   const stat = { done: 0, error: 0, cached: 0, tokensIn: 0, tokensOut: 0, stopped: false, expOut: 0, nb: 0 };
   const auto = cfg.auto !== false, eff = auto ? autoTune(todo, cfg) : cfg;
   // Jumlah batch yang berjalan bersamaan: mulai 6, turun saat provider membatasi, naik tiap 4 batch lancar (sampai batas konkurensi).
@@ -1850,6 +1850,21 @@ export async function retranslateEntry(project, cfg, e, chat) {
   await dbPut('entries', u);
   await dbPut('cache', { key: await cacheKey(project, cfg, e.original, terms, notes), text, at: Date.now() });
   return u;
+}
+export const MARK_MSG = 'Ditandai untuk diterjemah ulang';
+/**
+ * Tandai banyak entri untuk diterjemah ulang: status jadi error (terjemahan lama tetap terlihat sebagai acuan, tapi tidak ikut ekspor),
+ * dan cache untuk teks-teks itu dibuang supaya hasil lama yang sama tidak dipakai lagi. Mengembalikan {entries, cache}.
+ */
+export async function markRetranslate(project, cfg, list) {
+  const gl = parseGlossary(cfg.glossary), cn = parseNotes(cfg.charNotes), keys = new Set(), seen = new Set();
+  for (const e of list) {
+    const sp = e.meta?.speaker || '', sig = `${sp}\u0001${e.original}`; if (seen.has(sig)) continue; seen.add(sig);
+    keys.add(await cacheKey(project, cfg, e.original, termsFor(gl, `${e.original}\n${sp}`), notesFor(cn, sp)));
+  }
+  await dbDeleteMany('cache', [...keys]);
+  await dbPutMany('entries', list.map((e) => ({ ...e, status: 'error', error: MARK_MSG })));
+  return { entries: list.length, cache: keys.size };
 }
 
 // ===== 6. VIEWS (proyek/import, translate, review, ekspor, pengaturan) =====
@@ -2144,19 +2159,21 @@ function syncCatSel(p, all) {
   for (const k of [...catSel.set]) if (!todoBy.has(k)) catSel.set.delete(k);
   return todoBy;
 }
-async function startJob() {
+/** opts.ids: terjemahkan hanya entri dengan id tersebut (dipakai aksi massal di Review); tanpa itu, semua kategori yang dicentang. */
+async function startJob(opts = {}) {
   if (job.running) return;
   const cfg = await loadConfig(), p = await currentProject();
   job.err = false;
   if (!cfg.apiKey) { job.err = true; job.text = UI.noKey; return paintJob(); }
-  const cats = catSel.pid === p.id && catSel.set ? [...catSel.set] : null;
+  const ids = Array.isArray(opts.ids) ? new Set(opts.ids) : null;
+  const cats = !ids && catSel.pid === p.id && catSel.set ? [...catSel.set] : null;
   if (cats && !cats.length) { job.err = true; job.text = 'Pilih minimal satu kategori dulu'; return paintJob(); }
-  const before = await dbQuery('entries', 'projectId', p.id), base = before.filter((e) => e.status === 'done' || e.status === 'edited').length;
-  job.running = true; job.ctl = new AbortController(); job.value = base; job.max = base + before.filter((e) => TODO.has(e.status) && (!cats || cats.includes(e.category))).length || 1; job.text = 'Memulai…'; paintJob();
+  const before = await dbQuery('entries', 'projectId', p.id), base = ids ? 0 : before.filter((e) => e.status === 'done' || e.status === 'edited').length;
+  job.running = true; job.ctl = new AbortController(); job.value = base; job.max = base + before.filter((e) => TODO.has(e.status) && (!cats || cats.includes(e.category)) && (!ids || ids.has(e.id))).length || 1; job.text = 'Memulai…'; paintJob();
   let lock = null; try { lock = await navigator.wakeLock?.request('screen'); } catch { /* layar tetap boleh mati */ }
   try {
     let t0 = Date.now(), d0 = null;
-    const r = await runTranslation(p, cfg, { signal: job.ctl.signal, base, cats, onProgress: (d, t, txt) => {
+    const r = await runTranslation(p, cfg, { signal: job.ctl.signal, base, cats, ids, onProgress: (d, t, txt) => {
       if (d0 === null) { d0 = d; t0 = Date.now(); }
       let eta = '';
       if (d > d0 && d < t) { const sec = ((t - d) * (Date.now() - t0)) / 1000 / (d - d0); eta = ` · sisa ±${sec >= 90 ? Math.round(sec / 60) + ' menit' : Math.round(sec) + ' detik'}`; }
@@ -2194,7 +2211,7 @@ async function viewTranslate() {
     h('option', { value: 'id', ...(p.tgt === 'id' ? { selected: '' } : {}) }, 'Indonesia'),
     h('option', { value: 'en', ...(p.tgt === 'en' ? { selected: '' } : {}) }, 'Inggris'));
   const bar = h('progress', { value: '0', max: '1' }), txt = h('p', { class: 'mut' });
-  const start = h('button', { class: 'pri', onclick: startJob }, cnt('done') || cnt('error') ? 'Lanjutkan' : 'Mulai translate');
+  const start = h('button', { class: 'pri', onclick: () => startJob() }, cnt('done') || cnt('error') ? 'Lanjutkan' : 'Mulai translate');
   const stop = h('button', { onclick: () => job.ctl?.abort() }, 'Hentikan');
   job.ui = { bar, txt, start, stop };
   if (!p.total) job.text = UI.emptyImp, job.err = true;
@@ -2308,8 +2325,40 @@ async function viewSettings() {
     h('div', { class: 'card danger-card' }, h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn),
     actionBar(msg, h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')))];
 }
-const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Kata asing Portugis/Spanyol']];
+const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Kata asing Portugis/Spanyol'], ['same', 'Belum diterjemahkan (sama dengan asli)']];
 const hasForeign = (e) => !!e.translation && foreignWords(e.translation).length > 0;
+/** Kata Inggris yang tertinggal di teks (kode escape diabaikan). Hanya kata >= 3 huruf dari EN_W yang bukan kata Indonesia. */
+export function englishWords(t) {
+  const ws = String(t || '').replace(ESC, ' ').match(/[A-Za-z']+/g) || [], out = new Set();
+  for (const w of ws) { const k = w.toLowerCase().replace(/^'+|'+$/g, ''); if (k.length >= 3 && EN_W.has(k) && !ID_W.has(k) && !ID_X.has(k)) out.add(k); }
+  return [...out];
+}
+const LANG_FILTERS = [['all', 'Semua bahasa'], ['ja', 'Masih ada Jepang/aksara asing'], ['en1', 'Ada kata Inggris (ketat)'], ['en2', 'Dominan Inggris'], ['es', 'Spanyol/Portugis'], ['id', 'Bahasa Indonesia']];
+const langMemo = new WeakMap();
+/**
+ * Bahasa HASIL TERJEMAHAN (bukan teks asli). Mengembalikan null bila terjemahan kosong.
+ * ja: ada kana/kanji/Cyrillic/Arab/Hangul | en1: ada minimal satu kata Inggris | en2: dominan Inggris dan yakin
+ * es: ada kata Spanyol/Portugis | id: terdeteksi Indonesia dan tidak ada kata Inggris.
+ */
+export function transLang(e) {
+  const t = e.translation; if (!t || !t.trim()) return null;
+  const m = langMemo.get(e); if (m && m.t === t) return m.v;
+  const c = stripEscapes(t).trim(), li = langInfo(c), ja = stray(c);
+  const v = { ja, en1: !ja && englishWords(c).length > 0, en2: !ja && li.lang === 'en' && li.sure, es: foreignWords(c).length > 0, id: !ja && li.lang === 'id' && englishWords(c).length === 0 };
+  langMemo.set(e, { t, v }); return v;
+}
+const sameMemo = new WeakMap();
+/**
+ * Terjemahan identik dengan teks asli padahal bahasanya bukan bahasa target (Jepang, atau Inggris/Indonesia yang jelas):
+ * tanda teks yang lolos tanpa diterjemahkan. Teks pendek atau ragu (nama, istilah) tidak dihitung.
+ */
+export function leftUntranslated(e, tgt = 'id') {
+  const t = e.translation; if (!t || !t.trim()) return false;
+  const m = sameMemo.get(e); if (m && m.t === t && m.g === tgt) return m.v;
+  let v = false;
+  if (normTxt(t) === normTxt(e.original)) { const li = langInfo(stripEscapes(t).trim()); v = li.lang === 'ja' || (li.sure && !!li.lang && li.lang !== tgt); }
+  sameMemo.set(e, { t, g: tgt, v }); return v;
+}
 /** Filter khusus: cari teks asli yang memuat kode/fungsi tertentu. Dicocokkan ke teks asli (kode game ada di sana). */
 const FUNC_FILTERS = [
   ['any', 'Semua jenis kode/fungsi', null],
@@ -2342,10 +2391,10 @@ async function viewReview() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
   const rows = (await dbQuery('entries', 'projectId', p.id)).sort((a, b) => a.id - b.id);
-  let filter = 'all', cat = 'all', fn = 'any', mode = 'loose', q = '', qRaw = '', qRe = null, page = 0, count = 0;
+  let filter = 'all', lang = 'all', cat = 'all', fn = 'any', mode = 'loose', q = '', qRaw = '', qRe = null, page = 0, count = 0;
   const origNorm = new WeakMap(), normOf = (e) => { let v = origNorm.get(e); if (v === undefined) { v = searchNorm(e.original); origNorm.set(e, v); } return v; };
   const box = h('div'), info = h('p', { class: 'mut' });
-  let qErr = '', paintChips = () => {};
+  let qErr = '', paintChips = () => {}, paintBulk = () => {};
   const fnTest = (k) => { const f = FUNC_FILTERS.find((x) => x[0] === k); if (!f || !f[2]) return null; return typeof f[2] === 'function' ? f[2]() : f[2]; };
   // Cocokkan kata kunci ke teks asli + terjemahan. 'loose' = abaikan spasi/tanda baca/kode (lama); 'exact' = potongan literal apa adanya (cocok untuk \v[, (\v, if); 'regex' = ekspresi reguler.
   const matchText = (e) => {
@@ -2381,18 +2430,20 @@ async function viewReview() {
     return card(h('div', { class: 'rowhead' }, h('div', {}, h('span', { class: 'badge' }, e.category), st, warn), rt), h('p', { class: 'mut' }, e.original), ta, msg);
   };
   const fill = () => {
-    uiSet('filters:' + p.id, JSON.stringify({ filter, cat, fn, mode, q: qRaw }));
+    uiSet('filters:' + p.id, JSON.stringify({ filter, lang, cat, fn, mode, q: qRaw }));
     const fnRe = fnTest(fn);
-    const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : filter === 'foreign' ? hasForeign(e) : e.status === filter)) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
+    const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : filter === 'foreign' ? hasForeign(e) : filter === 'same' ? leftUntranslated(e, p.tgt) : e.status === filter)) && (lang === 'all' || !!transLang(e)?.[lang]) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
     const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE)); page = Math.min(page, pages - 1);
-    info.textContent = qErr ? qErr : `${list.length} teks`; info.className = qErr ? 'err' : 'mut'; count = list.length; paintChips();
+    info.textContent = qErr ? qErr : `${list.length} teks`; info.className = qErr ? 'err' : 'mut'; count = list.length; paintChips(); paintBulk(list);
     const go = (n) => () => { page = n; fill(); scrollTo(0, 0); };
     box.replaceChildren(...list.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map(rowCard),
       h('div', { class: 'row' }, h('button', { onclick: go(page - 1), ...(page ? {} : { disabled: '' }) }, 'Sebelumnya'),
         h('button', { onclick: go(page + 1), ...(page < pages - 1 ? {} : { disabled: '' }) }, `Berikutnya (${page + 1}/${pages})`)));
   };
-  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); sCnt.set('codediff', rows.filter(codeDiff).length); sCnt.set('foreign', rows.filter(hasForeign).length);
+  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); sCnt.set('codediff', rows.filter(codeDiff).length); sCnt.set('foreign', rows.filter(hasForeign).length); sCnt.set('same', rows.filter((e) => leftUntranslated(e, p.tgt)).length);
   const sel = h('select', { 'aria-label': 'Filter status', onchange: (e) => { filter = e.target.value; page = 0; fill(); } }, FILTERS.map(([v, t]) => h('option', { value: v }, v === 'all' ? `${t} (${rows.length})` : `${t} (${sCnt.get(v) || 0})`)));
+  const lCnt = new Map(); rows.forEach((e) => { const f = transLang(e); if (f) for (const k of Object.keys(f)) if (f[k]) lCnt.set(k, (lCnt.get(k) || 0) + 1); });
+  const langSel = h('select', { 'aria-label': 'Filter bahasa terjemahan', onchange: (e) => { lang = e.target.value; page = 0; fill(); } }, LANG_FILTERS.map(([v, t]) => h('option', { value: v }, v === 'all' ? t : `${t} (${lCnt.get(v) || 0})`)));
   const fnSel = h('select', { 'aria-label': 'Filter kode atau fungsi', onchange: (e) => { fn = e.target.value; page = 0; fill(); } }, FUNC_FILTERS.map(([v, t]) => { const re = fnTest(v); return h('option', { value: v }, re ? `${t} (${rows.filter((x) => re.test(x.original)).length})` : t); }));
   const modeSel = h('select', { 'aria-label': 'Mode pencarian', onchange: (e) => { mode = e.target.value; setQuery(qRaw); } },
     h('option', { value: 'loose' }, 'Cari longgar (abaikan spasi & tanda baca)'), h('option', { value: 'exact' }, 'Cari persis (kode & tanda baca, mis. \\v[ atau if)'), h('option', { value: 'regex' }, 'Regex'));
@@ -2449,10 +2500,49 @@ async function viewReview() {
     h('p', { class: 'mut' }, 'Mengganti kata di terjemahan saja (bukan teks asli), mengikuti kategori yang dipilih di atas. Kode game tidak disentuh.'),
     rf, rr, h('label', { class: 'chk' }, wholeCb, 'Kata utuh saja (kau tidak mengubah "kaum")'), h('label', { class: 'chk' }, icCb, 'Abaikan huruf besar/kecil (Kau menjadi Kamu)'),
     h('div', { class: 'row' }, h('button', { onclick: preview }, 'Cek jumlah'), applyBtn), rMsg);
+  // Aksi massal untuk semua teks hasil filter/pencarian (hanya tampil bila ada filter aktif). Konfirmasi dua ketukan.
+  const cfg0 = await loadConfig();
+  let shown = []; const bMsg = h('p', { class: 'mut' });
+  const bSay = (t, bad) => { bMsg.className = bad ? 'err' : 'mut'; bMsg.textContent = t; };
+  const bulkBtn = (cls, label, warn, run) => {
+    const b = h('button', cls ? { class: cls } : {}); let armed = false, tm = 0;
+    b.reset = () => { clearTimeout(tm); armed = false; b.textContent = label(); };
+    b.addEventListener('click', async () => {
+      if (!shown.length) return;
+      if (!armed) { armed = true; b.textContent = warn(); tm = setTimeout(b.reset, 5000); return; }
+      b.reset(); b.disabled = true; bSay('');
+      try { await run(); } catch (x) { bSay(x?.message || String(x), true); }
+      b.disabled = false;
+    });
+    b.reset(); return b;
+  };
+  const editedN = () => shown.filter((e) => e.status === 'edited').length;
+  const warnTxt = (what) => `Yakin? Ketuk lagi: ${shown.length} teks ${what}${editedN() ? `, termasuk ${editedN()} hasil edit manual` : ''}`;
+  const markBtn = bulkBtn('', () => `Tandai untuk diterjemah ulang (${shown.length})`, () => warnTxt('ditandai'), async () => {
+    const r = await markRetranslate(p, cfg0, shown);
+    shown.forEach((e) => Object.assign(e, { status: 'error', error: MARK_MSG }));
+    bSay(`${r.entries} teks ditandai (status Error; terjemahan lama tetap terlihat tapi tidak ikut ekspor). Buka tab Translate lalu tekan Lanjutkan, atau pakai chat AI di tab Ekspor.`); fill();
+  });
+  const redoBtn = bulkBtn('pri', () => `Terjemah ulang sekarang (${shown.length})`, () => {
+    const est = estimateCost(shown.map((e) => ({ ...e, status: 'pending' })), cfg0, p.src);
+    return warnTxt(`diterjemah ulang lewat LLM (±${est.inTok + est.outTok} token)`);
+  }, async () => {
+    const cfg = await loadConfig(); if (!cfg.apiKey) throw new Error(UI.noKey);
+    const ids = shown.map((e) => e.id); await markRetranslate(p, cfg, shown);
+    location.hash = '#/translate'; startJob({ ids });
+  });
+  const bulkCard = fold('Aksi untuk hasil filter', h('p', { class: 'mut' }, 'Berlaku untuk semua teks yang tampil di daftar (bukan hanya halaman ini). Terjemahan lama diganti, termasuk hasil edit manual, dan cache teks itu dibuang agar hasilnya benar-benar baru.'), redoBtn, markBtn, bMsg);
+  bulkCard.hidden = true;
+  paintBulk = (list) => {
+    shown = list; const act = filter !== 'all' || lang !== 'all' || cat !== 'all' || fn !== 'any' || !!qRaw;
+    bulkCard.hidden = !act || !list.length; bulkCard.querySelector('summary').textContent = `Aksi untuk ${list.length} teks hasil filter`;
+    redoBtn.reset(); markBtn.reset();
+  };
   // Filter tersembunyi di balik tombol Filter (panel bawah); yang aktif tampil sebagai chip yang bisa dihapus.
   const optText = (s) => s.options[s.selectedIndex]?.textContent.replace(/\s*\(\d+\)$/, '') || '';
   const activeFilters = () => [
     filter !== 'all' && [`Status: ${optText(sel)}`, () => { filter = 'all'; sel.value = 'all'; }],
+    lang !== 'all' && [`Bahasa: ${optText(langSel)}`, () => { lang = 'all'; langSel.value = 'all'; }],
     cat !== 'all' && [`Kategori: ${cat}`, () => { cat = 'all'; catSel.value = 'all'; }],
     fn !== 'any' && [optText(fnSel), () => { fn = 'any'; fnSel.value = 'any'; }],
     mode !== 'loose' && [optText(modeSel).split(' (')[0], () => { mode = 'loose'; modeSel.value = 'loose'; }],
@@ -2465,10 +2555,10 @@ async function viewReview() {
     showBtn.textContent = `Tampilkan ${count} teks`;
     chips.replaceChildren(...act.map(([t, clear]) => h('button', { class: 'chip', 'aria-label': `Hapus filter ${t}`, onclick: () => { clear(); setQuery(qRaw); } }, `${t} ×`)));
   };
-  const resetFilters = () => { filter = 'all'; cat = 'all'; fn = 'any'; mode = 'loose'; sel.value = 'all'; catSel.value = 'all'; fnSel.value = 'any'; modeSel.value = 'loose'; setQuery(qRaw); };
+  const resetFilters = () => { filter = 'all'; lang = 'all'; langSel.value = 'all'; cat = 'all'; fn = 'any'; mode = 'loose'; sel.value = 'all'; catSel.value = 'all'; fnSel.value = 'any'; modeSel.value = 'loose'; setQuery(qRaw); };
   sheet.append(
     h('div', { class: 'sheet-head' }, h('h2', {}, 'Filter'), h('button', { class: 'sm', onclick: () => sheet.close() }, 'Tutup')),
-    h('div', { class: 'sheet-body' }, h('label', {}, 'Status'), sel, h('label', {}, 'Kategori'), catSel, h('label', {}, 'Kode atau fungsi'), fnSel, h('label', {}, 'Mode pencarian'), modeSel),
+    h('div', { class: 'sheet-body' }, h('label', {}, 'Status'), sel, h('label', {}, 'Bahasa terjemahan'), langSel, h('label', {}, 'Kategori'), catSel, h('label', {}, 'Kode atau fungsi'), fnSel, h('label', {}, 'Mode pencarian'), modeSel),
     h('div', { class: 'sheet-foot row' }, h('button', { onclick: resetFilters }, 'Atur ulang'), showBtn));
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.close(); });
   const fbtn = h('button', { class: 'filterbtn', 'aria-haspopup': 'dialog', onclick: () => sheet.showModal() }, 'Filter', fbadge);
@@ -2478,14 +2568,15 @@ async function viewReview() {
     if (sv) {
       const ok = (s, v) => [...s.options].some((o) => o.value === v);
       if (ok(sel, sv.filter)) { filter = sv.filter; sel.value = filter; }
+      if (ok(langSel, sv.lang)) { lang = sv.lang; langSel.value = lang; }
       if (ok(catSel, sv.cat)) { cat = sv.cat; catSel.value = cat; }
       if (ok(fnSel, sv.fn)) { fn = sv.fn; fnSel.value = fn; }
       if (ok(modeSel, sv.mode)) { mode = sv.mode; modeSel.value = mode; }
-      if (typeof sv.q === 'string' && sv.q) { find.value = sv.q; setQuery(sv.q); return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), replCard, box, sheet]; }
+      if (typeof sv.q === 'string' && sv.q) { find.value = sv.q; setQuery(sv.q); return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), replCard, bulkCard, box, sheet]; }
     }
   } catch { /* abaikan */ }
   fill();
-  return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), replCard, box, sheet];
+  return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), replCard, bulkCard, box, sheet];
 }
 let exportUrl = '', rgUrl = '';
 async function viewEkspor() {

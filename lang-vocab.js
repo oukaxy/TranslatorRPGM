@@ -56,7 +56,7 @@ gimana gitu gini emang emangnya soalnya pokoknya bentar sebentar aja doang yauda
 ID_ADULT.forEach((w) => ID_X.add(w));
 
 // ---- Inggris: kata fungsi & percakapan ----
-export const EN_W = words(`
+const EN_BASE = words(`
 the and to of a is are was were you i it that this in on for with not be have has had will would can could my your we
 he she they them his her but if so what who how why do don't did no yes at as from by an me us just all there here
 now then when up out about i'm it's you're
@@ -65,6 +65,42 @@ more most other such both each few many much should must shall might may get got
 need let let's please thank thanks sorry hello hi hey okay well oh yeah what's that's there's can't won't isn't
 i'll i've we're they're he's she's didn't doesn't wasn't couldn't wouldn't shouldn't haven't hasn't aren't
 `);
+
+// Tambahan kata Inggris umum (kata kerja, benda, sifat, istilah UI/game) agar filter "Ada kata Inggris" menangkap teks yang tertinggal.
+// JANGAN masukkan kata yang juga dipakai di Indonesia/game: game menu film data bank radio hotel volume master power cool real color
+// item level status skill monster gold mana main air cat. Kata Spanyol/Portugis ada di FOREIGN_W, bukan di sini.
+const EN_MORE = words(`
+these those where whose whom whether although though unless until since during without within between through against
+around across along behind beside beyond above below near every everyone everything anything nothing something someone
+anyone nobody always never sometimes often maybe perhaps still already yet even ever once twice another others same
+different myself yourself himself herself itself ourselves themselves mine yours hers ours theirs him welcome goodbye
+bye sir madam find found finding look looking take took taken give gave given tell told say said speak spoke talk walk
+walking run ran running stop stay wait help hold keep bring brought send open close use used make made build live
+leave left return follow move turn pull push throw catch break fix save lose lost win won die died dead kill killed
+fight fought fighting attack defend protect call called ask asked answer try tried trying feel felt hear heard learn
+teach read write wrote play played start begin began end finish buy bought sell sold pay paid eat drink sleep wake
+dream dreams remember forget believe trust love hate hope wish fear meet met visit enter escape search choose pick
+drop carry cut burn freeze shock poison heal cure restore recover equip unequip cast summon defeat explore travel
+arrive reach coming taking making giving getting having doing saying seeing waiting working work works worked continue
+options quit exit cancel confirm back next previous select settings setting sound music screen window button accept
+decline discard inventory equipment sword shield armor armour weapon weapons staff bow arrow arrows axe spear dagger
+knife helmet boots gloves necklace potion potions elixir scroll book books letter key keys chest door gate wall floor
+room house home village town city castle palace tower dungeon cave forest mountain river lake sea ocean island desert
+field road bridge street market shop inn church temple graveyard tomb ruins world kingdom empire king queen prince
+princess lord lady knight warrior mage wizard witch priest thief hunter archer soldier guard captain teacher student
+child children boy girl woman women people friend friends enemy enemies demon devil angel god gods goddess spirit
+ghost dragon beast wolf bear snake spider rat bird fish horse sheep cow pig dog fire water earth wind lightning
+thunder ice snow rain storm light dark darkness shadow night morning evening day days week month year time hour minute
+moment life death soul heart mind blood strength luck wisdom courage pain voice word words name story tale legend
+secret truth lie lies memory money coin coins silver treasure gift reward quest mission battle war peace victory
+danger trouble problem question reason way place thing things men magic damage health agility intelligence critical
+evade evasion accuracy resist resistance weakness defense speed good bad great small little long short high low fast
+slow strong weak young old new big large huge tiny hot cold warm bright beautiful ugly strange weird dangerous safe
+true false free full empty heavy sharp broken hidden ancient sacred holy evil wicked brave kind cruel happy sad angry
+afraid tired sick hungry thirsty alive ready sure certain right wrong first second third last own whole half enough
+almost quite really truly soon later away down forward together alone one two three four five six seven eight nine ten
+`);
+export const EN_W = new Set([...EN_BASE, ...EN_MORE]);
 
 // Kata Indonesia yang juga nama/romaji Jepang (Dan, Kami, Sana, Kita, Aku, Hari, Lima). Hanya dihitung bila ditulis huruf kecil.
 export const ID_AMBIG = words('dan kami sana kita aku hari lima');
