@@ -10,6 +10,7 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 - [Engine dan Format yang Didukung](#engine-dan-format-yang-didukung)
 - [Cara Pakai](#cara-pakai)
 - [Pengaturan](#pengaturan)
+- [Cadangan dan Pemulihan](#cadangan-dan-pemulihan)
 - [Terjemah Lewat Chat AI (Tanpa API)](#terjemah-lewat-chat-ai-tanpa-api)
 - [Keamanan Hasil Terjemahan](#keamanan-hasil-terjemahan)
 - [Privasi dan Penyimpanan Data](#privasi-dan-penyimpanan-data)
@@ -21,26 +22,27 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 
 ## Fitur
 
-- **Impor fleksibel**: folder `data`, file zip game, atau arsip terenkripsi `Game.rgss3a` (VX Ace) tanpa perlu diekstrak dulu.
+- **Impor fleksibel**: folder `data`, file zip atau RAR game, atau arsip terenkripsi `Game.rgss3a` (VX Ace) tanpa perlu diekstrak dulu.
 - **Deteksi bahasa sumber**: mode Otomatis (Jepang/Inggris campur), Jepang, Inggris, atau Semua teks (bahasa apa pun). Teks yang sudah berbahasa Indonesia dikenali dan tidak diterjemahkan ulang.
 - **Provider LLM bebas**: memakai format *chat completions* yang kompatibel dengan OpenAI. Bawaannya OpenRouter, tetapi base URL bisa diganti ke provider lain atau server lokal.
 - **Terjemahan per batch** dengan konkurensi otomatis, retry dengan backoff, penghormatan terhadap `Retry-After`, batas waktu per request, dan lanjut dari titik berhenti.
-- **Cache terjemahan** untuk teks yang sama persis, plus **perkiraan token dan biaya** sebelum mulai.
+- **Cache terjemahan** untuk teks yang sama persis (kunci memuat model, glosarium, catatan karakter, dan gaya bahasa), plus **perkiraan token dan biaya** sebelum mulai.
 - **Pilih kategori** yang diterjemahkan (dialog, pilihan, nama, sistem, deskripsi item, dan seterusnya).
 - **Gaya bahasa, catatan per karakter, dan glosarium** yang dikirim ke model di setiap batch.
-- **Review**: edit manual, terjemah ulang per teks, filter status, pencarian (longgar, persis, atau regex), filter jenis kode escape, audit "kode berubah", dan ganti kata massal yang tidak menyentuh kode escape.
+- **Review**: edit manual, terjemah ulang per teks, filter status, pencarian (longgar, persis, atau regex), filter jenis kode escape, audit "kode berubah", filter "terjemahan sama dengan asli" dan "glosarium tidak dipakai", aksi massal (tandai terjemah ulang atau kembalikan ke teks asli) untuk semua hasil filter, serta ganti kata massal yang tidak menyentuh kode escape.
 - **Ekspor patch** berupa zip berisi file data yang sudah diterjemahkan, dilengkapi `patch-report.txt`.
 - **Diff guard**: hasil ekspor diperiksa terhadap file asli sehingga hanya teks yang berubah. Bila ada yang janggal, ekspor dibatalkan.
 - **Pemecahan baris otomatis** agar teks muat di kotak pesan (lebar bisa diatur, otomatis mati bila terdeteksi plugin message).
+- **Cadangan dan pemulihan** proyek (terjemahan, file data asli, glosarium, gaya) dalam satu file zip, plus permintaan penyimpanan permanen ke browser.
 - **Bisa offline** setelah dibuka sekali (service worker) dan **bisa dipasang** ke layar utama.
 
 ## Engine dan Format yang Didukung
 
 | Engine | Sumber yang bisa diimpor | Format keluaran |
 | --- | --- | --- |
-| RPG Maker MV | Folder `data`, zip game | JSON |
-| RPG Maker MZ | Folder `data`, zip game | JSON |
-| RPG Maker VX Ace | Folder `Data`, zip game, `Game.rgss3a` | `.rvdata2` (bisa dibangun ulang menjadi `Game.rgss3a`) |
+| RPG Maker MV | Folder `data`, zip/RAR game | JSON |
+| RPG Maker MZ | Folder `data`, zip/RAR game | JSON |
+| RPG Maker VX Ace | Folder `Data`, zip/RAR game, `Game.rgss3a` | `.rvdata2` (bisa dibangun ulang menjadi `Game.rgss3a`) |
 
 Engine dideteksi otomatis dari file yang ada (`rmmz_core.js`, `rpg_core.js`, atau file `.rvdata2`). Menyertakan `js/plugins.js` membantu aplikasi mendeteksi plugin message.
 
@@ -51,7 +53,7 @@ Teks yang diekstrak meliputi: dialog (Show Text), Scroll Text, pilihan, nama pem
 Navigasi memakai empat tab di bawah layar, dengan Pengaturan di pojok kanan atas.
 
 1. **Pengaturan**: isi base URL, API key, dan model. Tekan **Tes koneksi** untuk memastikan semuanya benar.
-2. **Proyek**: pilih bahasa sumber, lalu impor folder data, zip game, atau `Game.rgss3a`. Ringkasan dan diagnostik impor muncul setelahnya.
+2. **Proyek**: pilih bahasa sumber, lalu impor folder data, zip/RAR game, atau `Game.rgss3a`. Ringkasan dan diagnostik impor muncul setelahnya.
 3. **Translate**: pilih bahasa target (Indonesia atau Inggris) dan kategori, cek perkiraan biaya, lalu tekan **Mulai translate**. Proses bisa dihentikan dan dilanjutkan kapan saja.
 4. **Review**: periksa hasil, edit, atau terjemah ulang. Gunakan filter *Error* dan *Kode berubah* untuk menemukan masalah lebih cepat.
 5. **Ekspor**: tekan **Buat patch**, unduh zip, **backup folder data asli**, lalu timpa isinya dengan file di dalam zip. Untuk game VX Ace yang memakai `Game.rgss3a`, pilih arsip aslinya agar aplikasi membuat `Game.rgss3a` baru.
@@ -96,6 +98,18 @@ Contoh glosarium dan catatan karakter:
 バルト: preman, pakai gue/lo, kasar
 ```
 
+## Cadangan dan Pemulihan
+
+Semua data tersimpan di browser, dan browser boleh menghapusnya bila memori penuh atau data situs dibersihkan. Karena itu buat cadangan secara berkala.
+
+Di tab **Proyek**, buka bagian **Cadangan dan pemulihan**:
+
+- **Buat cadangan**: mengunduh file zip berisi data proyek, semua teks dan terjemahannya, file data asli (supaya proyek langsung bisa diekspor lagi), serta glosarium, gaya bahasa, catatan karakter, dan daftar aman plugin. **API key dan cache tidak ikut.**
+- **Pulihkan dari cadangan**: memilih file zip tadi. Bila proyek yang sama sudah ada di perangkat, aplikasi menampilkan perbandingan jumlah teks yang sudah diterjemahkan dan meminta konfirmasi sebelum menimpa.
+- **Penyimpanan permanen**: aplikasi meminta browser agar datanya tidak dihapus otomatis (setelah impor atau lewat tombol di bagian yang sama). Browser boleh menolak, jadi file cadangan tetap pengaman yang sebenarnya. Memasang aplikasi ke layar utama biasanya membantu permintaan ini dikabulkan.
+
+File cadangan divalidasi sebelum dipakai: struktur, jumlah entri, id proyek, dan path file. Bila ada yang tidak cocok, tidak ada data yang diubah.
+
 ## Terjemah Lewat Chat AI (Tanpa API)
 
 Tidak punya API key? Buka tab **Ekspor** lalu bagian **Terjemah lewat chat AI**:
@@ -116,6 +130,17 @@ Menerjemahkan teks game berarti harus menjaga kode di dalamnya agar game tidak r
 - **Deteksi teks setengah terjemah**: hasil yang masih bercampur huruf Jepang atau aksara asing ditandai error.
 - **Diff guard saat ekspor**: file hasil dibandingkan dengan file asli. Bila ada perubahan di luar teks, tidak ada zip yang dibuat. Entri yang posisinya tidak cocok dilewati dan tetap asli.
 - **Verifikasi `.rvdata2`**: hasil penulisan ulang format Marshal dibaca balik dan dibandingkan dengan data yang diterjemahkan.
+
+### Catatan impor RAR
+
+Pembaca RAR ditulis sendiri dalam JavaScript murni, jadi tetap tanpa dependensi dan sesuai kebijakan CSP. Setiap file diverifikasi dengan CRC-32 setelah diekstrak, sehingga arsip rusak atau gagal dibuka menghasilkan galat, bukan data salah.
+
+| Jenis RAR | Status |
+| --- | --- |
+| RAR5 (WinRAR 5 ke atas), disimpan atau terkompresi, termasuk solid | Didukung |
+| RAR4 (WinRAR 4 ke bawah), disimpan tanpa kompresi | Didukung |
+| RAR4 terkompresi | Belum didukung. Simpan ulang sebagai RAR5 atau zip, atau ekstrak dulu |
+| Berpassword, multi-volume (`.part1.rar`), SFX (`.exe`) | Tidak didukung |
 
 ## Privasi dan Penyimpanan Data
 
@@ -160,6 +185,7 @@ Bila kamu memakai hosting lain, terapkan header yang setara.
 ├── app.js           # Seluruh logika aplikasi (ES module)
 ├── app.css          # Gaya, termasuk mode gelap otomatis
 ├── lang-vocab.js    # Kosakata untuk deteksi bahasa Indonesia/Inggris
+├── rar.js           # Pembaca RAR (RAR5 penuh, RAR4 tanpa kompresi), tanpa dependensi
 ├── sw.js            # Service worker (cache app shell, mode offline)
 ├── manifest.json    # Manifest PWA
 └── vercel.json      # Konfigurasi deploy dan header keamanan

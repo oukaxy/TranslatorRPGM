@@ -1,4 +1,5 @@
 import { ID_W, ID_X, EN_W, ID_AMBIG, FOREIGN_W } from './lang-vocab.js';
+import { readRar, sniffArchive } from './rar.js';
 // ===== 1. CONFIG & STRING UI =====
 // Mode tes memakai DB terpisah agar data asli di origin yang sama tidak ikut terhapus.
 export const DB_NAME = globalThis.__RPGTL_TEST__ ? 'rpgtl-db-test' : 'rpgtl-db';
@@ -26,7 +27,8 @@ export const UI = {
   exportEmpty: 'Belum ada terjemahan yang bisa diekspor. Terjemahkan dulu di tab Translate',
   urlBad: 'Base URL harus memakai https. Untuk lokal pakai localhost',
   nothing: 'Tidak ada teks yang perlu diterjemahkan. Semua sudah selesai, atau impor tidak menemukan teks',
-  emptyImp: 'Impor selesai tapi tidak ada teks yang ditemukan. Sumber Jepang hanya mengambil teks berhuruf Jepang. Bila game berbahasa Inggris, hapus proyek ini lalu impor ulang dengan sumber Inggris',
+  emptyImp: 'Impor selesai tapi tidak ada teks yang ditemukan. Sumber Jepang hanya mengambil teks berhuruf Jepang. Bila game berbahasa Inggris, hapus proyek ini lalu impor ulang dengan sumber Inggris',  backupBad: 'File cadangan tidak valid atau rusak. Pilih file .zip hasil Buat cadangan dari aplikasi ini',
+  backupNew: 'Cadangan dibuat oleh versi aplikasi yang lebih baru. Perbarui aplikasi dulu lalu coba lagi',
 };
 
 // ===== 2. STORAGE (wrapper IndexedDB, hash, hapus data) =====
@@ -606,8 +608,10 @@ async function collectSources(files) {
   const list = [];
   for (const f of files) if (/\.rgss3a$/i.test(f.name)) list.push(...await readRgss3a(f));
   files = files.filter((f) => !/\.rgss3a$/i.test(f.name));
-  if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
-    const z = await readZip(files[0]);
+  if (files.length === 1 && /\.(zip|rar)$/i.test(files[0].name)) {
+    // Jenis arsip ditentukan dari isinya, bukan ekstensi (zip yang salah diberi nama .rar tetap terbaca).
+    const kind = sniffArchive(new Uint8Array(await files[0].slice(0, 8).arrayBuffer()));
+    const z = kind === 'rar' ? await readRar(files[0]) : await readZip(files[0]);
     z.entries.forEach((e) => list.push({ path: e.name, read: async () => new TextDecoder().decode(await z.read(e)), readBin: () => z.read(e) }));
   } else for (const f of files) list.push({ path: f.webkitRelativePath || f.name, read: () => f.text(), readBin: async () => new Uint8Array(await f.arrayBuffer()) });
   const has = (re) => list.some((i) => re.test(i.path));
@@ -1245,6 +1249,64 @@ export async function exportProject(project, model = '', wrap = null) {
   if (!r.ok) return r;
   return { ...r, blob: await writeZip([...r.files, { name: 'patch-report.txt', data: new TextEncoder().encode(r.report) }]) };
 }
+// ===== 4b. CADANGAN & PEMULIHAN PROYEK =====
+export const BACKUP_VERSION = 1;
+const doneCount = (rows) => rows.filter((e) => e.status === 'done' || e.status === 'edited').length;
+const BACKUP_KEYS = ['glossary', 'style', 'charNotes', 'pluginAllow'];
+/** Minta penyimpanan permanen (browser boleh menolak) dan laporkan statusnya. null bila browser tidak mendukung. */
+export async function storageStatus(ask = false) {
+  const st = globalThis.navigator?.storage; if (!st?.persisted) return null;
+  let persisted = await st.persisted();
+  if (!persisted && ask && st.persist) { try { persisted = await st.persist(); } catch { /* ditolak */ } }
+  let usage = null, quota = null; try { ({ usage, quota } = await st.estimate()); } catch { /* tidak tersedia */ }
+  return { persisted, usage, quota };
+}
+/**
+ * Cadangan satu proyek: zip berisi manifest.json (data proyek + pengaturan non-rahasia), entries.json (semua teks, urut),
+ * dan orig/N.txt (file data asli, supaya proyek langsung bisa diekspor lagi). API key dan cache tidak ikut.
+ */
+export async function buildBackup(project, cfg = {}) {
+  const enc = new TextEncoder();
+  const entries = (await dbQuery('entries', 'projectId', project.id)).sort((a, b) => a.id - b.id);
+  const orig = await dbPrefix('origFiles', project.id + ':');
+  const settings = {}; for (const k of BACKUP_KEYS) if (typeof cfg[k] === 'string') settings[k] = cfg[k];
+  const manifest = { app: 'rpgtl-backup', version: BACKUP_VERSION, date: new Date().toISOString(), project, entries: entries.length, done: doneCount(entries), settings, orig: orig.map((o, i) => ({ file: `orig/${i}.txt`, path: o.path })) };
+  const files = [{ name: 'manifest.json', data: enc.encode(JSON.stringify(manifest)) }, { name: 'entries.json', data: enc.encode(JSON.stringify(entries.map(({ id, ...r }) => r))) }];
+  orig.forEach((o, i) => files.push({ name: `orig/${i}.txt`, data: enc.encode(o.text) }));
+  return writeZip(files);
+}
+const SAFE_ID = /^[A-Za-z0-9_-]{1,40}$/, BAD_PATH = /(^|[\\/])\.\.([\\/]|$)|^[\\/]|^[A-Za-z]:|\0/;
+/**
+ * Pulihkan proyek dari cadangan. Semua isi divalidasi dulu sebelum ada yang diubah. Bila proyek dengan id yang sama sudah ada
+ * dan overwrite=false, tidak ada yang ditulis: hasilnya {confirm:true, ...} berisi perbandingan untuk ditampilkan.
+ */
+export async function restoreBackup(file, { overwrite = false } = {}) {
+  let z; try { z = await readZip(file); } catch { throw new Error(UI.backupBad); }
+  const get = (n) => z.entries.find((e) => e.name === n), dec = new TextDecoder(), mf = get('manifest.json'), en = get('entries.json');
+  if (!mf || !en) throw new Error(UI.backupBad);
+  let m; try { m = JSON.parse(dec.decode(await z.read(mf))); } catch { throw new Error(UI.backupBad); }
+  if (m?.app !== 'rpgtl-backup' || !m.project || !SAFE_ID.test(String(m.project.id))) throw new Error(UI.backupBad);
+  if (!(m.version >= 1) || m.version > BACKUP_VERSION) throw new Error(m.version > BACKUP_VERSION ? UI.backupNew : UI.backupBad);
+  const id = m.project.id, old = await dbGet('projects', id);
+  if (old && !overwrite) {
+    const rows = await dbQuery('entries', 'projectId', id);
+    return { confirm: true, backup: { total: m.entries, done: m.done, date: m.date }, existing: { total: rows.length, done: doneCount(rows) } };
+  }
+  let rows; try { rows = JSON.parse(dec.decode(await z.read(en))); } catch { throw new Error(UI.backupBad); }
+  if (!Array.isArray(rows) || rows.length !== m.entries || !rows.every((r) => r && typeof r.original === 'string' && typeof r.status === 'string')) throw new Error(UI.backupBad);
+  const orig = [];
+  for (const o of m.orig || []) {
+    const f = get(String(o?.file)); if (!f || typeof o.path !== 'string' || BAD_PATH.test(o.path)) throw new Error(UI.backupBad);
+    orig.push({ key: `${id}:${o.path}`, projectId: id, path: o.path, text: dec.decode(await z.read(f)) });
+  }
+  if (old) await deleteProject(id);
+  await dbPutMany('origFiles', orig);
+  await dbPutMany('entries', rows.map((r) => ({ ...r, projectId: id })));
+  const project = { ...m.project, updatedAt: Date.now() };
+  await dbPut('projects', project);
+  await dbPut('settings', { key: 'current', value: id });
+  return { project, done: doneCount(rows), settings: m.settings && typeof m.settings === 'object' ? m.settings : {} };
+}
 /** Impor folder/zip: simpan JSON asli dan entries ke IndexedDB. */
 const engine_isAce = (e) => e === 'VX Ace';
 export async function importProject(files, src = 'ja', onProgress = () => {}, { allow: allowText = '' } = {}) {
@@ -1378,7 +1440,7 @@ export function parseNotes(text = '') {
 /** Catatan untuk pembicara ini (nama pembicara memuat nama di catatan). */
 export const notesFor = (notes, speaker) => (speaker ? notes.filter(([n]) => speaker.includes(n)) : []);
 export const DEFAULT_STYLE = 'Indonesia santai ala dialog game atau subtitle anime (aku/kamu, nggak). Karakter formal (bangsawan, pelayan, narator, sistem) boleh baku. Ikuti register sumber: bila kasar, vulgar, atau mesum, terjemahkan setara; jangan dihaluskan, disensor, atau dikomentari. Teks UI ringkas dan netral.';
-const cacheKey = (project, cfg, original, terms = [], notes = []) => sha256(`${project.src}|${project.tgt}|${cfg.model}|${original}${terms.length ? `|g:${terms.map((t) => t.join('=')).join(';')}` : ''}${notes.length ? `|n:${notes.map((t) => t.join('=')).join(';')}` : ''}`);
+const cacheKey = (project, cfg, original, terms = [], notes = []) => sha256(`${project.src}|${project.tgt}|${cfg.model}|${original}${terms.length ? `|g:${terms.map((t) => t.join('=')).join(';')}` : ''}${notes.length ? `|n:${notes.map((t) => t.join('=')).join(';')}` : ''}|y:${String(cfg.style || '').trim().replace(/\s+/g, ' ')}`);
 
 // ===== 4c. TERJEMAH LEWAT CHAT AI =====
 const NL = '⏎', LANG_NAME = { all: 'bahasa apa pun (tiap baris bisa Jepang, Inggris, Indonesia, Korea, dll; baris yang sudah bersih berbahasa Indonesia salin apa adanya; bila bercampur bahasa lain atau salah ketik, perbaiki jadi bahasa Indonesia yang bersih)', ja: 'Jepang', en: 'Inggris', id: 'Indonesia', auto: 'Jepang atau Inggris (tiap baris bisa salah satunya; baris yang sudah bersih berbahasa Indonesia salin apa adanya; bila bercampur bahasa lain atau salah ketik, perbaiki jadi bahasa Indonesia yang bersih)' };
@@ -1472,6 +1534,22 @@ export function foreignWords(t) {
   const ws = String(t || '').replace(ESC, ' ').match(/\p{L}+/gu) || [], out = new Set();
   for (const w of ws) { const k = w.toLowerCase(); if (FOREIGN_W.has(k)) out.add(k); }
   return [...out];
+}
+/** Terjemahan identik dengan teks asli. Yang wajar identik (kurang dari 4 huruf, atau satu token mirip kode/path/angka) tidak dihitung. */
+export function sameAsOriginal(e) {
+  const t = String(e.translation ?? '').trim();
+  if (!t || (e.status !== 'done' && e.status !== 'edited') || t !== String(e.original ?? '').trim()) return false;
+  const core = stripEscapes(t).trim();
+  if ((core.match(/\p{L}/gu) || []).length < 4) return false;
+  return !(!/\s/.test(core) && /[\d_./\\]/.test(core));
+}
+/** Identik dengan asli dan terdeteksi bukan Indonesia: teks Inggris/Jepang yang lolos tanpa diterjemahkan. */
+export const sameNonId = (e) => sameAsOriginal(e) && langInfo(stripEscapes(e.translation).trim()).lang !== 'id';
+/** Istilah glosarium yang ada di teks asli tapi terjemahannya tidak memuat padanan. Hanya untuk teks yang sudah diterjemahkan. */
+export function glossMissing(e, gl) {
+  if (!gl.length || !isApplicable(e)) return [];
+  const t = e.translation.toLowerCase();
+  return gl.filter(([a, b]) => e.original.includes(a) && !t.includes(b.toLowerCase()));
 }
 const foreignMsg = (t) => `Ada kata bahasa asing (Portugis/Spanyol) yang tertinggal: ${foreignWords(t).slice(0, 3).join(', ')}`;
 const TODO = new Set(['pending', 'error', 'translating']);
@@ -1913,6 +1991,56 @@ export async function searchOrig(projectId, needle, max = 30, minScore = 60, onP
 }
 const uiGet = (k, d) => { try { const v = localStorage.getItem('rpgtl:ui:' + k); return v === null ? d : v; } catch { return d; } };
 const uiSet = (k, v) => { try { localStorage.setItem('rpgtl:ui:' + k, v); } catch { /* abaikan */ } };
+let backupUrl = '';
+const mb = (n) => `${n >= 1.05e7 ? Math.round(n / 1048576) : (n / 1048576).toFixed(1)} MB`;
+/** Kartu cadangan di tab Proyek: status penyimpanan, buat cadangan, pulihkan. */
+function backupCard(p) {
+  const msg = h('p', { class: 'mut' }), res = h('div'), st = h('p', { class: 'mut' }, 'Memeriksa penyimpanan…');
+  const say = (t, bad) => { msg.className = bad ? 'err' : 'mut'; msg.textContent = t; };
+  const ask = h('button', { hidden: '', onclick: () => paintSt(true) }, 'Minta penyimpanan permanen');
+  const paintSt = async (askNow) => {
+    const s = await storageStatus(askNow).catch(() => null);
+    if (!s) { st.textContent = 'Status penyimpanan tidak tersedia di browser ini. Buat cadangan secara berkala.'; return; }
+    st.textContent = `Penyimpanan: ${s.persisted ? 'permanen (tidak dihapus otomatis)' : 'belum permanen (browser boleh menghapusnya bila memori penuh)'}${s.usage != null && s.quota ? ` · terpakai ${mb(s.usage)} dari ${mb(s.quota)}` : ''}`;
+    ask.hidden = s.persisted;
+  };
+  paintSt(false);
+  const mk = h('button', { class: 'pri', onclick: async (ev) => {
+    const b = ev.currentTarget; b.disabled = true; say('Membuat cadangan…'); res.replaceChildren();
+    try {
+      const blob = await buildBackup(p, await loadConfig());
+      if (backupUrl) URL.revokeObjectURL(backupUrl); backupUrl = URL.createObjectURL(blob);
+      say(`Cadangan siap (${mb(blob.size)}). Simpan di tempat aman, mis. Google Drive. API key tidak ikut.`);
+      res.replaceChildren(h('a', { class: 'file', href: backupUrl, download: `rpgtl-cadangan-${p.id}.zip` }, 'Unduh cadangan'));
+    } catch (e) { say(e?.message || String(e), true); }
+    b.disabled = false;
+  } }, 'Buat cadangan');
+  const done = async (r) => {
+    const c = await loadConfig(), keep = {};
+    for (const k of BACKUP_KEYS) if (typeof r.settings[k] === 'string') keep[k] = r.settings[k];
+    if (Object.keys(keep).length) await saveConfig({ ...c, ...keep });
+    importNote = { text: `Pemulihan selesai. ${r.project.total} teks, ${r.done} sudah diterjemahkan. Glosarium, gaya, catatan karakter, dan daftar aman plugin ikut dipulihkan` };
+    storageStatus(true).catch(() => {});
+    await render();
+  };
+  const onPick = async (ev) => {
+    const f = ev.target.files[0]; ev.target.value = ''; if (!f) return;
+    res.replaceChildren(); say('Membaca cadangan…');
+    try {
+      const r = await restoreBackup(f);
+      if (!r.confirm) return await done(r);
+      say(`Proyek ini sudah ada di perangkat.\nSaat ini: ${r.existing.done} dari ${r.existing.total} teks diterjemahkan.\nCadangan: ${r.backup.done} dari ${r.backup.total} teks (${new Date(r.backup.date).toLocaleString('id-ID')}).\nMenimpa mengganti data saat ini dengan isi cadangan.`);
+      res.replaceChildren(h('button', { class: 'danger', onclick: async (e2) => {
+        e2.currentTarget.disabled = true;
+        try { await done(await restoreBackup(f, { overwrite: true })); } catch (e) { say(e?.message || String(e), true); }
+      } }, 'Timpa dengan cadangan'));
+    } catch (e) { say(e?.message || String(e), true); }
+  };
+  return fold('Cadangan dan pemulihan',
+    h('p', { class: 'mut' }, 'Data hanya tersimpan di browser ini dan bisa hilang bila memori penuh atau data situs dibersihkan. Cadangan berisi proyek, semua terjemahan, file data asli, serta glosarium, gaya, catatan karakter, dan daftar aman plugin. Tanpa API key.'),
+    st, ask, p ? mk : '', res,
+    pickRow('Pulihkan dari cadangan', 'File .zip hasil Buat cadangan', { accept: '.zip' }, onPick), msg);
+}
 async function viewProyek() {
   const msg = h('p', { class: 'mut' }), bar = h('progress', { value: '0', max: '1', hidden: '' });
   const box = card(h('h2', {}, 'Impor game'));
@@ -1925,6 +2053,7 @@ async function viewProyek() {
     lock(true); bar.removeAttribute('value'); msg.className = 'mut'; msg.textContent = 'Mengimpor…';
     try {
       const p = await importProject(files, src, (t, d, n) => { msg.textContent = t; if (n) { bar.max = n; bar.value = d; } else bar.removeAttribute('value'); }, { allow: (await loadConfig()).pluginAllow });
+      storageStatus(true).catch(() => {});
       importNote = p.total
         ? { text: `Impor selesai. ${p.total} teks dari ${p.files} file${p.broken.length ? `, ${p.broken.length} file rusak dilewati` : ''}. Lanjut ke tab Translate` }
         : { bad: true, text: UI.emptyImp };
@@ -1938,7 +2067,7 @@ async function viewProyek() {
   box.append(h('label', {}, 'Bahasa sumber'), sel,
     h('div', { class: 'picks' },
       pick('Folder data', 'Hasil ekstrak MV, MZ, atau VX Ace', { webkitdirectory: '', multiple: '' }),
-      pick('File zip game', 'Zip yang berisi folder data', { accept: '.zip' }),
+      pick('File zip/rar game', 'Zip atau RAR yang berisi folder data', { accept: '.zip,.rar' }),
       pick('Game.rgss3a', 'Arsip terenkripsi VX Ace', {})), bar, msg);
   const out = [box];
   const p = await currentProject();
@@ -2014,8 +2143,9 @@ async function viewProyek() {
       h('p', { class: 'mut' }, 'Untuk mengembalikan teks tertentu (mis. label) ke teks game asli tanpa menyentuh entri lain. Pilih kategori, lalu pilih game asli. Teks dicocokkan lewat posisi di file, bukan lewat teks, jadi tetap cocok walau proyek ini diimpor dari game yang sudah diterjemahkan. Kolom terjemahan diisi teks asli dan berstatus edited. File asli proyek tidak diganti.'),
       h('div', { class: 'row' }, h('button', { onclick: () => setFill(true) }, 'Pilih semua'), h('button', { onclick: () => setFill(false) }, 'Kosongkan')),
       cats.map((c) => { const cb = h('input', { type: 'checkbox', ...(fillC.has(c) ? { checked: '' } : {}), onchange: (e) => { e.target.checked ? fillC.add(c) : fillC.delete(c); } }); fillBoxes.push(cb); return h('label', { class: 'row' }, cb, ` ${c}`); }),
-      pickF('Pilih folder data asli', { webkitdirectory: '', multiple: '' }), pickF('Pilih zip game asli', { accept: '.zip' }), pickF('Pilih Game.rgss3a asli', {}), fbar, fmsg));
+      pickF('Pilih folder data asli', { webkitdirectory: '', multiple: '' }), pickF('Pilih zip/rar game asli', { accept: '.zip,.rar' }), pickF('Pilih Game.rgss3a asli', {}), fbar, fmsg));
   }
+  out.push(backupCard(p));
   return out;
 }
 const job = { running: false, ctl: null, value: 0, max: 1, text: '', err: false, ui: null };
@@ -2197,7 +2327,7 @@ async function viewSettings() {
     h('div', { class: 'card danger-card' }, h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn),
     actionBar(msg, h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')))];
 }
-const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Kata asing Portugis/Spanyol']];
+const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Kata asing Portugis/Spanyol'], ['same', 'Terjemahan sama dengan asli'], ['samenonid', 'Sama dengan asli & bukan Indonesia'], ['gloss', 'Glosarium tidak dipakai']];
 const hasForeign = (e) => !!e.translation && foreignWords(e.translation).length > 0;
 /** Filter khusus: cari teks asli yang memuat kode/fungsi tertentu. Dicocokkan ke teks asli (kode game ada di sana). */
 const FUNC_FILTERS = [
@@ -2231,7 +2361,9 @@ async function viewReview() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
   const rows = (await dbQuery('entries', 'projectId', p.id)).sort((a, b) => a.id - b.id);
-  let filter = 'all', cat = 'all', fn = 'any', mode = 'loose', q = '', qRaw = '', qRe = null, page = 0, count = 0;
+  const gl = parseGlossary((await loadConfig()).glossary);
+  const SPECIAL = { codediff: codeDiff, foreign: hasForeign, same: sameAsOriginal, samenonid: sameNonId, gloss: (e) => glossMissing(e, gl).length > 0 };
+  let filter = 'all', cat = 'all', fn = 'any', mode = 'loose', q = '', qRaw = '', qRe = null, page = 0, count = 0, shown = [];
   const origNorm = new WeakMap(), normOf = (e) => { let v = origNorm.get(e); if (v === undefined) { v = searchNorm(e.original); origNorm.set(e, v); } return v; };
   const box = h('div'), info = h('p', { class: 'mut' });
   let qErr = '', paintChips = () => {};
@@ -2272,16 +2404,21 @@ async function viewReview() {
   const fill = () => {
     uiSet('filters:' + p.id, JSON.stringify({ filter, cat, fn, mode, q: qRaw }));
     const fnRe = fnTest(fn);
-    const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : filter === 'foreign' ? hasForeign(e) : e.status === filter)) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
+    const list = rows.filter((e) => (filter === 'all' || (SPECIAL[filter] ? SPECIAL[filter](e) : e.status === filter)) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
     const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE)); page = Math.min(page, pages - 1);
-    info.textContent = qErr ? qErr : `${list.length} teks`; info.className = qErr ? 'err' : 'mut'; count = list.length; paintChips();
+    info.textContent = qErr ? qErr : filter === 'gloss' && !gl.length ? 'Glosarium masih kosong (isi di Pengaturan)' : `${list.length} teks`; info.className = qErr ? 'err' : 'mut'; count = list.length; shown = list; paintChips();
+    bulkMsg.textContent = ''; bulkBox.hidden = !(list.length && (filter !== 'all' || cat !== 'all' || fn !== 'any' || qRaw)); markB.refresh(); backB.refresh();
     const go = (n) => () => { page = n; fill(); scrollTo(0, 0); };
     box.replaceChildren(...list.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map(rowCard),
       h('div', { class: 'row' }, h('button', { onclick: go(page - 1), ...(page ? {} : { disabled: '' }) }, 'Sebelumnya'),
         h('button', { onclick: go(page + 1), ...(page < pages - 1 ? {} : { disabled: '' }) }, `Berikutnya (${page + 1}/${pages})`)));
   };
-  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); sCnt.set('codediff', rows.filter(codeDiff).length); sCnt.set('foreign', rows.filter(hasForeign).length);
-  const sel = h('select', { 'aria-label': 'Filter status', onchange: (e) => { filter = e.target.value; page = 0; fill(); } }, FILTERS.map(([v, t]) => h('option', { value: v }, v === 'all' ? `${t} (${rows.length})` : `${t} (${sCnt.get(v) || 0})`)));
+  const sCnt = new Map();
+  const calcCounts = () => { sCnt.clear(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); for (const k in SPECIAL) sCnt.set(k, rows.filter(SPECIAL[k]).length); };
+  const optLabel = ([v, t]) => (v === 'all' ? `${t} (${rows.length})` : `${t} (${sCnt.get(v) || 0})`);
+  calcCounts();
+  const sel = h('select', { 'aria-label': 'Filter status', onchange: (e) => { filter = e.target.value; page = 0; fill(); } }, FILTERS.map((f) => h('option', { value: f[0] }, optLabel(f))));
+  const updCounts = () => { calcCounts(); FILTERS.forEach((f, i) => { sel.options[i].textContent = optLabel(f); }); };
   const fnSel = h('select', { 'aria-label': 'Filter kode atau fungsi', onchange: (e) => { fn = e.target.value; page = 0; fill(); } }, FUNC_FILTERS.map(([v, t]) => { const re = fnTest(v); return h('option', { value: v }, re ? `${t} (${rows.filter((x) => re.test(x.original)).length})` : t); }));
   const modeSel = h('select', { 'aria-label': 'Mode pencarian', onchange: (e) => { mode = e.target.value; setQuery(qRaw); } },
     h('option', { value: 'loose' }, 'Cari longgar (abaikan spasi & tanda baca)'), h('option', { value: 'exact' }, 'Cari persis (kode & tanda baca, mis. \\v[ atau if)'), h('option', { value: 'regex' }, 'Regex'));
@@ -2292,6 +2429,43 @@ async function viewReview() {
   const find = h('input', { type: 'search', placeholder: 'Cari teks, kode, atau fungsi', autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false',
     oninput: (e) => { clearTimeout(tmr); const v = e.target.value; tmr = setTimeout(() => setQuery(v), 250); },
     onchange: (e) => { clearTimeout(tmr); setQuery(e.target.value); } });
+  // Aksi massal: berlaku untuk SEMUA teks yang cocok dengan filter aktif, bukan hanya halaman yang tampil.
+  const bulkMsg = h('p', { class: 'mut' }), MARK_MSG = 'Ditandai untuk diterjemahkan ulang';
+  const bulkSet = () => shown.filter((e) => e.status === 'done' || e.status === 'edited' || e.status === 'error');
+  const editedIn = (set) => set.filter((e) => e.status === 'edited').length;
+  const bulkBtn = (label, ask, run) => {
+    let armed = false, tm = 0;
+    const b = h('button', { class: 'danger', onclick: async () => {
+      if (armed) {
+        clearTimeout(tm); armed = false; b.disabled = true;
+        try { await run(); } catch (x) { bulkMsg.className = 'err'; bulkMsg.textContent = `Gagal: ${x.message || x}`; }
+        b.disabled = false; b.refresh(); return;
+      }
+      const t = ask(); bulkMsg.className = 'mut';
+      if (!t) { bulkMsg.textContent = 'Tidak ada teks yang bisa diproses di hasil filter ini.'; return; }
+      bulkMsg.textContent = ''; armed = true; b.textContent = t; tm = setTimeout(() => { armed = false; b.refresh(); }, 5000);
+    } }, label());
+    b.refresh = () => { if (!armed) b.textContent = label(); };
+    return b;
+  };
+  const askText = (what) => { const set = bulkSet(), ed = editedIn(set); return set.length ? `Yakin? Ketuk lagi: ${set.length} teks ${what}${ed ? `, termasuk ${ed} hasil edit manual` : ''}` : ''; };
+  const markB = bulkBtn(() => `Tandai ${bulkSet().length} teks untuk diterjemah ulang`, () => askText('ditandai'), async () => {
+    const set = bulkSet(), cfg = await loadConfig(), gl2 = parseGlossary(cfg.glossary), cn = parseNotes(cfg.charNotes);
+    // Hapus cache teks-teks ini supaya Lanjutkan benar-benar memanggil model lagi, bukan memakai hasil lama.
+    const origs = [...new Map(set.map((e) => [`${e.original}\n${e.meta?.speaker || ''}`, e])).values()];
+    const keys = await Promise.all(origs.map((e) => cacheKey(p, cfg, e.original, termsFor(gl2, `${e.original}\n${e.meta?.speaker || ''}`), notesFor(cn, e.meta?.speaker || ''))));
+    await dbDeleteMany('cache', keys);
+    const upd = set.map((e) => ({ ...e, status: 'error', error: MARK_MSG }));
+    await dbPutMany('entries', upd); set.forEach((e, i) => Object.assign(e, upd[i]));
+    updCounts(); fill(); bulkMsg.className = 'mut'; bulkMsg.textContent = `${set.length} teks ditandai. Buka tab Translate lalu tekan Lanjutkan.`;
+  });
+  const backB = bulkBtn(() => `Kembalikan ${bulkSet().length} teks ke teks asli`, () => askText('dikosongkan'), async () => {
+    const set = bulkSet(), upd = set.map((e) => ({ ...e, translation: '', status: 'pending', error: '' }));
+    await dbPutMany('entries', upd); set.forEach((e, i) => Object.assign(e, upd[i]));
+    updCounts(); fill(); bulkMsg.className = 'mut'; bulkMsg.textContent = `${set.length} teks dikembalikan ke teks asli.`;
+  });
+  const bulkBox = card(h('p', { class: 'mut' }, 'Aksi untuk semua teks hasil filter (bukan hanya halaman ini). Terjemah ulang memakai batch dan retry yang sama dengan tab Translate.'), h('div', { class: 'row' }, markB, backB), bulkMsg);
+  bulkBox.hidden = true;
   // Cari & ganti kata di semua terjemahan (mengikuti kategori yang dipilih)
   const rf = h('input', { type: 'text', placeholder: 'Kata yang dicari, mis. kau', autocapitalize: 'off' }), rr = h('input', { type: 'text', placeholder: 'Diganti dengan, mis. kamu', autocapitalize: 'off' });
   const wholeCb = h('input', { type: 'checkbox', checked: '' }), icCb = h('input', { type: 'checkbox', checked: '' }), rMsg = h('p', { class: 'mut' });
@@ -2370,11 +2544,11 @@ async function viewReview() {
       if (ok(catSel, sv.cat)) { cat = sv.cat; catSel.value = cat; }
       if (ok(fnSel, sv.fn)) { fn = sv.fn; fnSel.value = fn; }
       if (ok(modeSel, sv.mode)) { mode = sv.mode; modeSel.value = mode; }
-      if (typeof sv.q === 'string' && sv.q) { find.value = sv.q; setQuery(sv.q); return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), replCard, box, sheet]; }
+      if (typeof sv.q === 'string' && sv.q) { find.value = sv.q; setQuery(sv.q); return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), bulkBox, replCard, box, sheet]; }
     }
   } catch { /* abaikan */ }
   fill();
-  return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), replCard, box, sheet];
+  return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), bulkBox, replCard, box, sheet];
 }
 let exportUrl = '', rgUrl = '';
 async function viewEkspor() {

@@ -1,8 +1,8 @@
 // Service worker: cache app shell agar bisa dibuka offline.
 // Hanya menyentuh cache berawalan "rpgtl-shell-" dan hanya request same-origin.
 // Panggilan ke provider LLM (cross-origin) tidak pernah dicegat.
-const VERSION = 'rpgtl-shell-v18';
-const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'lang-vocab.js', 'manifest.json'];
+const VERSION = 'rpgtl-shell-v20';
+const SHELL = ['./', 'index.html', 'app.css', 'app.js', 'lang-vocab.js', 'rar.js', 'manifest.json'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
