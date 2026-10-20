@@ -100,7 +100,72 @@ true false free full empty heavy sharp broken hidden ancient sacred holy evil wi
 afraid tired sick hungry thirsty alive ready sure certain right wrong first second third last own whole half enough
 almost quite really truly soon later away down forward together alone one two three four five six seven eight nine ten
 `);
-export const EN_W = new Set([...EN_BASE, ...EN_MORE]);
+// Tambahan 2: kosakata dialog/RPG (tubuh, aksi, tempat, benda, gelar). Bentuk turunan (-s, -ed, -ing, -ly, -er) dikenali otomatis
+// oleh englishWords() di app.js, jadi cukup tulis bentuk dasarnya.
+const EN_MORE2 = words(`
+adventurer adventure adventurers request requests switch guild party leader experience price sale buyer seller
+merchant trader customer owner worker servant maid butler slave mistress sister brother mother father daughter son
+wife husband family parent uncle aunt cousin kid lover stranger neighbor pirate thug criminal prisoner prison jail
+cell judge court crime law police officer sheriff doctor nurse patient hospital medicine illness disease curse
+blessing prayer bible saint monk nun face hair eye eyes nose mouth lip lips tongue tooth teeth neck shoulder shoulders
+arm arms hand hands finger fingers belly waist hip hips leg legs thigh thighs foot feet skin head brain bone bones
+breast breasts nipple nipples butt nude touches moans scream screams sweat soft tight deep rough gentle slowly quickly
+suddenly gently softly tightly deeply hungrily slide slides slid part parted parting cleavage drops tears tear cry
+cries laugh laughs smile smiles blush blushes shake shakes tremble trembles shiver shivers breathe breath breathing
+panting gasp gasps whisper whispers shout shouts yell yells sigh sighs grin grins stare stares glare glares onto upon
+toward towards outside beneath among except instead rather either neither nor whenever wherever whatever whoever
+however therefore otherwise anyway anyways besides meanwhile afterwards finally actually basically honestly seriously
+exactly probably definitely absolutely completely totally simply merely nearly barely hardly nowadays today tonight
+tomorrow yesterday forever ought shoot shoots shot shooting fires aim aims hit hits strike strikes slash slashes stab
+stabs pierce pierces crush crushes smash smashes swing swings block blocks dodge dodges parry parries counter counters
+charge charges blast blasts explode explodes explosion burst bursts fall falls fell rise rises rose jump jumps climb
+climbs fly flies flew swim swims dive dives crawl crawls sneak sneaks hide hides hid seek seeks sought chase chases
+hunt hunts capture captures trap traps lock locks locked unlock unlocks seal seals sealed release releases frees
+create creates created destroy destroys destroyed ruin ruined repair repairs forge forges craft crafts crafted brew
+brews cook cooks bake bakes mix mixes combine combines upgrade upgrades enhance enhances improve improves increase
+increases decrease decreases raise raises lower lowers gain gains gained earn earns earned spend spends spent cost
+costs owe owes lend lends borrow borrows steal steals stole rob robs accepts accepted refuse refuses refused agree
+agrees agreed disagree promise promises promised swear swears vow vows betray betrays forgive forgives apologize
+apologizes greet greets welcomes invite invites introduce introduces check checks checked confirms cancels selects
+chooses chosen change changes changed quits exits resume pause pauses automatic easy sounds screens windows buttons
+controller control controls option language english japanese chinese korean version chapter scene prologue epilogue
+title credits director producer artist writer author designer noon afternoon midnight dawn dusk sunrise sunset spring
+summer autumn winter monday tuesday wednesday thursday friday saturday sunday january february march april june july
+august september october november december north south east west front center middle corner edge side bottom red blue
+green yellow orange purple pink black white gray grey brown golden crimson scarlet round square circle triangle line
+lines point points dot dots star stars moon sun sky cloud clouds tree trees flower flowers grass leaf leaves seed
+seeds root roots stone stones rock rocks sand dirt mud ash ashes smoke flame flames hill hills valley plains swamp
+marsh jungle volcano canyon cliff beach coast harbor ship ships boat boats sail sails roads path paths trail gates
+fence yard garden farm farmer fields barn mill pond stream waterfall rooms hall halls kitchen bedroom bathroom
+basement attic cellar stairs stair ladder roof doors table chair bed beds desk shelf shelves lamp candle torch lantern
+mirror clock bell bells drum flute harp violin song songs sing sings dance dances danced bread cheese meat fruit apple
+apples berry berries vegetable vegetables soup rice milk wine beer tea coffee juice cake candy sugar salt swords
+shields axes spears bows daggers blade blades hammer hammers whip whips wand wands staves helmets glove belt belts
+cloak cloaks robe robes dress dresses skirt skirts shirt shirts pants shoes hat hats cap mask masks earring earrings
+bracelet bracelets crown crowns jewel jewels gem gems diamond diamonds ruby emerald crystal crystals pearl pearls herb
+herbs antidote scrolls map maps letters note notes paper ink diary journal chests box boxes bag bags barrel barrels
+bottle bottles cup cups bowl bowls plate plates knives spoon fork poisons poisoned paralysis paralyzed sleeping asleep
+awake blind blinded silence silenced stun stunned confuse confused charm charmed cursed bless blessed healed healing
+revive revived resurrect resurrected rest rested recovered energy dexterity vitality charisma defence offense attacks
+physical magical elemental minion minions guards commander soldiers army armies knights troop troops orc orcs elf
+elves dwarf dwarves giant giants undead zombie zombies skeleton skeletons vampire vampires werewolf demons devils
+angels dragons beasts thieves witches wizards sorcerer sorceress priestess lords ladies kings queens emperor empress
+hero heroes heroine villain villains legends myth myths prophecy prophet oracle fate destiny kingdoms empires realm
+realms land lands country countries nation nations cities towns villages castles fortress fortresses towers temples
+shrine shrines tombs caves dungeons labyrinth maze floors ground layer layers entrance entrances bridges treasures
+loot wealth fortune rewards prize prizes strangers traveler travelers visitor visitors guest guests loves loved hates
+hated like likes liked wants wanted needs needed knows knew thinks thought feels believes hopes wishes wished dreamed
+fears feared worry worries worried trusts trusted remembers remembered forgets forgot forgotten understand understands
+understood learns learned teaches taught listen listens listened watch watches watched waits waited stays stayed
+arrives arrived returns returned begins starts started finishes finished continues continued stops stopped tells asks
+answers answered calls names named
+`);
+export const EN_W = new Set([...EN_BASE, ...EN_MORE, ...EN_MORE2]);
+
+// Kata Inggris yang SENGAJA dibiarkan (nama tokoh, tempat, istilah). Tidak dihitung di filter Review. Tulis huruf kecil, pisah spasi.
+// Contoh: cayenne ghost
+export const EN_SKIP = words(`
+`);
 
 // Kata Indonesia yang juga nama/romaji Jepang (Dan, Kami, Sana, Kita, Aku, Hari, Lima). Hanya dihitung bila ditulis huruf kecil.
 export const ID_AMBIG = words('dan kami sana kita aku hari lima');

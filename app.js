@@ -1,4 +1,4 @@
-import { ID_W, ID_X, EN_W, ID_AMBIG, FOREIGN_W } from './lang-vocab.js';
+import { ID_W, ID_X, EN_W, EN_SKIP, ID_AMBIG, FOREIGN_W } from './lang-vocab.js';
 // ===== 1. CONFIG & STRING UI =====
 // Mode tes memakai DB terpisah agar data asli di origin yang sama tidak ikut terhapus.
 export const DB_NAME = globalThis.__RPGTL_TEST__ ? 'rpgtl-db-test' : 'rpgtl-db';
@@ -2327,13 +2327,37 @@ async function viewSettings() {
 }
 const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Kata asing Portugis/Spanyol'], ['same', 'Belum diterjemahkan (sama dengan asli)']];
 const hasForeign = (e) => !!e.translation && foreignWords(e.translation).length > 0;
-/** Kata Inggris yang tertinggal di teks (kode escape diabaikan). Hanya kata >= 3 huruf dari EN_W yang bukan kata Indonesia. */
+/** Apakah k kata Inggris: ada di EN_W atau bentuk turunannya (-s, -es, -ies, -ed, -ing, -ly, -er, -est, 's) dari kata di EN_W. */
+function enHas(k) {
+  if (EN_W.has(k)) return true;
+  if (k.length < 5) return false;
+  const ok = (r) => r.length >= 3 && EN_W.has(r);
+  const un = (r) => ok(r) || (r.length > 3 && r[r.length - 1] === r[r.length - 2] && ok(r.slice(0, -1)));
+  if (k.endsWith("'s")) return enHas(k.slice(0, -2));
+  if (k.endsWith('ies') && ok(k.slice(0, -3) + 'y')) return true;
+  if (k.endsWith('ing') && (un(k.slice(0, -3)) || ok(k.slice(0, -3) + 'e'))) return true;
+  if (k.endsWith('ed') && (un(k.slice(0, -2)) || ok(k.slice(0, -1)))) return true;
+  if (k.endsWith('es') && (un(k.slice(0, -2)) || ok(k.slice(0, -1)))) return true;
+  if (k.endsWith('s') && un(k.slice(0, -1))) return true;
+  if (k.endsWith('ly') && ok(k.slice(0, -2))) return true;
+  if (k.endsWith('est') && (un(k.slice(0, -3)) || ok(k.slice(0, -2)))) return true;
+  if (k.endsWith('er') && (un(k.slice(0, -2)) || ok(k.slice(0, -1)))) return true;
+  return false;
+}
+/** Kata Inggris yang tertinggal di teks (kode escape diabaikan). Kata >= 3 huruf yang bukan kata Indonesia dan tidak ada di EN_SKIP. */
 export function englishWords(t) {
   const ws = String(t || '').replace(ESC, ' ').match(/[A-Za-z']+/g) || [], out = new Set();
-  for (const w of ws) { const k = w.toLowerCase().replace(/^'+|'+$/g, ''); if (k.length >= 3 && EN_W.has(k) && !ID_W.has(k) && !ID_X.has(k)) out.add(k); }
+  for (const w of ws) { const k = w.toLowerCase().replace(/^'+|'+$/g, ''); if (k.length >= 3 && !ID_W.has(k) && !ID_X.has(k) && !EN_SKIP.has(k) && enHas(k)) out.add(k); }
   return [...out];
 }
-const LANG_FILTERS = [['all', 'Semua bahasa'], ['ja', 'Masih ada Jepang/aksara asing'], ['en1', 'Ada kata Inggris (ketat)'], ['en2', 'Dominan Inggris'], ['es', 'Spanyol/Portugis'], ['id', 'Bahasa Indonesia']];
+/** Porsi kata Inggris dari seluruh kata berhuruf (0..1). Dipakai untuk "Dominan Inggris"; kata Indonesia yang tidak ada di kamus tetap dihitung sebagai bukan Inggris. */
+function enShare(t) {
+  const ws = (String(t || '').replace(ESC, ' ').toLowerCase().match(/[a-z']+/g) || []).map((k) => k.replace(/^'+|'+$/g, '')).filter((k) => k.length >= 2);
+  if (!ws.length) return 0;
+  let n = 0; for (const k of ws) if (!ID_W.has(k) && !ID_X.has(k) && !EN_SKIP.has(k) && enHas(k)) n++;
+  return n / ws.length;
+}
+const LANG_FILTERS = [['all', 'Semua bahasa'], ['ja', 'Masih ada Jepang/aksara asing'], ['en1', 'Ada kata Inggris (semua)'], ['mix', 'Campuran (Inggris di tengah kalimat Indonesia)'], ['en2', 'Dominan Inggris (belum diterjemah)'], ['es', 'Spanyol/Portugis'], ['id', 'Bahasa Indonesia (bersih)']];
 const langMemo = new WeakMap();
 /**
  * Bahasa HASIL TERJEMAHAN (bukan teks asli). Mengembalikan null bila terjemahan kosong.
@@ -2343,8 +2367,9 @@ const langMemo = new WeakMap();
 export function transLang(e) {
   const t = e.translation; if (!t || !t.trim()) return null;
   const m = langMemo.get(e); if (m && m.t === t) return m.v;
-  const c = stripEscapes(t).trim(), li = langInfo(c), ja = stray(c);
-  const v = { ja, en1: !ja && englishWords(c).length > 0, en2: !ja && li.lang === 'en' && li.sure, es: foreignWords(c).length > 0, id: !ja && li.lang === 'id' && englishWords(c).length === 0 };
+  const c = stripEscapes(t).trim(), li = langInfo(c), ja = stray(c.replace(/[\u30fb\u30fc\u30a0\u309b\u309c]/g, ''));
+  const en = !ja && englishWords(c).length > 0, dom = en && enShare(c) >= 0.6;
+  const v = { ja, en1: en, mix: en && !dom, en2: dom, es: foreignWords(c).length > 0, id: !ja && li.lang === 'id' && englishWords(c).length === 0 };
   langMemo.set(e, { t, v }); return v;
 }
 const sameMemo = new WeakMap();
