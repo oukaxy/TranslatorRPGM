@@ -1424,7 +1424,23 @@ export function parseGlossary(text = '') {
   return out.sort((x, y) => y[0].length - x[0].length);
 }
 /** Istilah glosarium yang muncul di teks. */
-export const termsFor = (gl, text) => gl.filter(([a]) => text.includes(a));
+export const termsFor = (gl, text) => { const low = String(text).toLowerCase(); return gl.filter(([a]) => low.includes(a.toLowerCase())); };
+/** Normalisasi untuk membandingkan teks yang mirip: huruf kecil, angka jadi #, spasi dirapatkan ("Up Level 2" dan "Up level 3" sama). */
+export const simNorm = (s) => String(s || '').toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim();
+/** Istilah glosarium yang ada di teks asli tetapi padanannya tidak muncul di terjemahan (tak peka huruf besar/kecil). */
+export const glossMissing = (gl, original, translation) => { const t = String(translation || '').toLowerCase(); return termsFor(gl, original).filter(([, b]) => !t.includes(b.toLowerCase())); };
+/** id entry yang teks aslinya mirip (beda angka/huruf besar) tetapi terjemahannya berbeda. */
+export function inconsistentIds(rows) {
+  const g = new Map();
+  for (const e of rows) {
+    if (!e.translation || !e.translation.trim()) continue;
+    const k = simNorm(stripEscapes(e.original)); if (k.length < 3) continue;
+    const l = g.get(k); if (l) l.push(e); else g.set(k, [e]);
+  }
+  const out = new Set();
+  for (const l of g.values()) if (l.length > 1 && new Set(l.map((e) => simNorm(stripEscapes(e.translation)))).size > 1) l.forEach((e) => out.add(e.id));
+  return out;
+}
 /** Catatan karakter: satu baris "nama pembicara: catatan gaya bicara". */
 export function parseNotes(text = '') {
   const out = [];
@@ -1656,14 +1672,15 @@ Rules:
 - If an item is only code, a number, a variable/file/switch name, or key=value pairs, copy it unchanged. Do not fix, normalise, or reformat code: keep brackets, parentheses, operators, digits, and letter case exactly. Never translate identifiers (CamelCase, snake_case, ALL_CAPS).
 - Keep line breaks as line breaks and keep the same number of lines when possible.
 - Translate every word into ${LANG[tgt]}. Never leave Japanese, Chinese, or Korean characters in the translation and never mix source-language words into the sentence; romanize a name if you must keep it. Reply only in ${LANG[tgt]}.\n- The source may already be machine-translated, half-translated, or contain stray words from other languages (e.g. Portuguese "mesmo", "você", Spanish "gracias", "pero") or typos. Fix all of them: the result must be clean, correctly spelled ${LANG[tgt]} with no leftover foreign words.\n- Translate as natural game dialogue. Keep names consistent. Keep short UI terms short.
-- If "glossary" is given, translate those terms exactly as listed (from -> to).${style.trim() ? `\n- Style guide for all text: ${style.trim().replace(/\s+/g, ' ')}` : ''}
+- If an item has "glossary", every term listed there must appear in that item's translation exactly as its "to" value, in the same wording every time (never a synonym or a different word for the same term).
+- If an item has "similar" ({from, to}), it is almost identical to a line already translated: reuse the same wording as "to" and change only what differs (numbers, names). Keep the same vocabulary.
+- If an item has "note", follow it.${style.trim() ? `\n- Style guide for all text: ${style.trim().replace(/\s+/g, ' ')}` : ''}
 - If "character_notes" is given, follow each note for lines spoken by that speaker; it overrides the general style guide.
 - If an item has max_chars_per_line and max_lines, the translation must fit: break lines with \\n, never exceed max_chars_per_line characters per line (not counting ⟦n⟧ tokens) or max_lines lines. Indonesian and English run longer than Japanese, so shorten the wording when needed and keep the meaning.
 - "context" holds earlier lines for reference only. Do not translate or return them.
 - Reply with one JSON object only, no code fence, no commentary: {"0":"translation","1":"translation"}. One key per item, using the item's id.`;
-  const gls = new Map(); units.forEach((u) => (u.terms || []).forEach(([a, b]) => gls.set(a, b)));
   const cns = new Map(); units.forEach((u) => (u.notes || []).forEach(([a, b]) => cns.set(a, b)));
-  const user = JSON.stringify({ context, ...(cns.size ? { character_notes: [...cns].map(([name, note]) => ({ name, note })) } : {}), ...(gls.size ? { glossary: [...gls].map(([from, to]) => ({ from, to })) } : {}), items: units.map((u) => ({ id: u.id, ...(u.speaker ? { speaker: u.speaker } : {}), ...(u.limit ? { max_chars_per_line: u.limit.line, max_lines: u.limit.lines } : {}), text: u.text })) });
+  const user = JSON.stringify({ context, ...(cns.size ? { character_notes: [...cns].map(([name, note]) => ({ name, note })) } : {}), items: units.map((u) => ({ id: u.id, ...(u.speaker ? { speaker: u.speaker } : {}), ...(u.terms?.length ? { glossary: u.terms.map(([from, to]) => ({ from, to })) } : {}), ...(u.ref ? { similar: u.ref } : {}), ...(u.hint ? { note: u.hint } : {}), ...(u.limit ? { max_chars_per_line: u.limit.line, max_lines: u.limit.lines } : {}), text: u.text })) });
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
 /**
@@ -1707,6 +1724,15 @@ export async function translateBatch(units, o, why = new Map()) {
     r.ok.forEach((v, k) => ok.set(k, v)); r.fail.forEach((v, k) => fail.set(k, v));
   }
   return { ok, fail };
+}
+/** Istilah glosarium (dari teks asli) yang belum muncul di terjemahan t. */
+const glossMiss = (u, t) => (u.must || []).filter(([, b]) => !String(t).toLowerCase().includes(b.toLowerCase()));
+/** Unit yang hasilnya melewatkan istilah glosarium diterjemah ulang sekali dengan catatan; hasil yang lebih baik dipakai, selain itu hasil awal tetap. */
+export async function glossFix(units, r, o) {
+  const bad = units.filter((u) => r.ok.has(u.id) && glossMiss(u, r.ok.get(u.id)).length);
+  if (!bad.length) return;
+  const r2 = await translateBatch(bad.map((u) => ({ ...u, hint: `Your previous translation missed required glossary terms: ${glossMiss(u, r.ok.get(u.id)).map(([a, b]) => `${a} -> ${b}`).join('; ')}. Use them exactly.` })), o);
+  r2.ok.forEach((t, id) => { const u = units.find((x) => x.id === id); if (u && glossMiss(u, t).length < glossMiss(u, r.ok.get(id)).length) r.ok.set(id, t); });
 }
 /** Bagi unit menjadi batch menurut jumlah dan total karakter. */
 export function makeBatches(units, size = 20, maxChars = 3000) {
@@ -1775,8 +1801,11 @@ export async function runTranslation(project, cfg, o = {}) {
   const groups = new Map();
   for (const e of todo) { if (!groups.has(e.original)) groups.set(e.original, []); groups.get(e.original).push(e); }
   const units = [], hits = [], gl = parseGlossary(cfg.glossary), cn = parseNotes(cfg.charNotes); let uid = 0;
+  // Memori terjemahan: teks pendek yang mirip (beda angka/huruf besar) dan sudah diterjemahkan dipakai sebagai acuan agar pilihan katanya sama.
+  const tm = new Map(), plain = (x) => maskText(x).tokens.length === 0;
+  for (const e of all) if (e.original.length <= 120 && e.translation?.trim() && (e.status === 'done' || e.status === 'edited')) { const k = simNorm(e.original); if (!tm.has(k)) tm.set(k, e); }
   for (const [original, entries] of groups) {
-    const exact = gl.find(([a]) => a === original.trim());
+    const exact = gl.find(([a]) => a.toLowerCase() === original.trim().toLowerCase());
     if (exact) { entries.forEach((e) => hits.push({ ...e, translation: exact[1], status: 'done', error: '' })); continue; }
     const terms = termsFor(gl, `${original}\n${entries[0].meta?.speaker || ''}`);
     const notes = notesFor(cn, entries[0].meta?.speaker || '');
@@ -1784,7 +1813,8 @@ export async function runTranslation(project, cfg, o = {}) {
     if (c && !stray(c.text) && !foreignWords(c.text).length) { entries.forEach((e) => hits.push({ ...e, translation: c.text, status: 'done', error: '' })); continue; }
     const m = maskText(original), e0 = entries[0], p = pos.get(e0.id);
     units.push({
-      id: uid++, key, text: m.text, tokens: m.tokens, speaker: e0.meta?.speaker || '', entries, terms, notes,
+      id: uid++, key, text: m.text, tokens: m.tokens, speaker: e0.meta?.speaker || '', entries, terms, notes, must: termsFor(gl, original),
+      ref: (() => { const r0 = original.length <= 120 ? tm.get(simNorm(original)) : null; return r0 && r0.original !== original && plain(r0.original) && plain(r0.translation) ? { from: r0.original.slice(0, 160), to: r0.translation.slice(0, 160) } : null; })(),
       limit: entries.map((x) => limitFor(x, effCfg(project, cfg))).filter(Boolean).reduce((a, b) => (a ? { line: Math.min(a.line, b.line), lines: Math.min(a.lines, b.lines) } : b), null),
       ctx: all.slice(Math.max(0, p - 3), p).filter((x) => x.file === e0.file).map((x) => maskText(x.original).text.slice(0, 200)),
     });
@@ -1805,16 +1835,18 @@ export async function runTranslation(project, cfg, o = {}) {
     }
   };
   const run = async (batch) => {
-    const r = await translateBatch(batch, {
+    const o2 = {
       chat: guarded, retry: { signal }, src: project.src, tgt: project.tgt, context: batch[0].ctx, style: cfg.style,
       check: (id, t) => (!t.trim() ? UI.emptyTr : !unmaskText(t, byId.get(id).tokens).ok ? UI.tokenBad : stray(t) ? STRAY_MSG : foreignWords(t).length ? foreignMsg(t) : codeProblem(byId.get(id).text, t)),
       onUsage: (u) => { stat.tokensIn += u?.prompt_tokens || 0; stat.tokensOut += u?.completion_tokens || 0; },
-    });
+    };
+    const r = await translateBatch(batch, o2); await glossFix(batch, r, o2);
     stat.expOut += batch.reduce((a, u) => a + u.text.length + 5, 0); stat.nb++;
     const upd = [], cache = [];
     r.ok.forEach((t, id) => {
       const u = byId.get(id), text = unmaskText(t, u.tokens).text;
       cache.push({ key: u.key, text, at: Date.now() });
+      if (u.entries[0].original.length <= 120) { const k = simNorm(u.entries[0].original); if (!tm.has(k)) tm.set(k, { original: u.entries[0].original, translation: text }); }
       u.entries.forEach((e) => upd.push({ ...e, translation: text, status: 'done', error: '' })); stat.done += u.entries.length;
     });
     r.fail.forEach((msg, id) => { byId.get(id).entries.forEach((e) => upd.push({ ...e, status: 'error', error: msg })); stat.error += byId.get(id).entries.length; });
@@ -1841,10 +1873,12 @@ export async function runTranslation(project, cfg, o = {}) {
 export async function retranslateEntry(project, cfg, e, chat) {
   const m = maskText(e.original), call = chat || ((msgs) => llmChat(cfg, msgs));
   const terms = termsFor(parseGlossary(cfg.glossary), `${e.original}\n${e.meta?.speaker || ''}`), notes = notesFor(parseNotes(cfg.charNotes), e.meta?.speaker || '');
-  const r = await translateBatch([{ id: 0, text: m.text, speaker: e.meta?.speaker || '', limit: limitFor(e, effCfg(project, cfg)), terms, notes }], {
+  const u0 = { id: 0, text: m.text, speaker: e.meta?.speaker || '', limit: limitFor(e, effCfg(project, cfg)), terms, notes, must: termsFor(parseGlossary(cfg.glossary), e.original) };
+  const o1 = {
     chat: call, src: project.src, tgt: project.tgt, context: [], style: cfg.style,
     check: (id, t) => (t.trim() ? (unmaskText(t, m.tokens).ok ? (foreignWords(t).length ? foreignMsg(t) : codeProblem(m.text, t)) : UI.tokenBad) : UI.emptyTr),
-  });
+  };
+  const r = await translateBatch([u0], o1); await glossFix([u0], r, o1);
   if (!r.ok.size) throw new LlmError(r.fail.get(0) || UI.badJson);
   const text = unmaskText(r.ok.get(0), m.tokens).text, u = { ...e, translation: text, status: 'done', error: '' };
   await dbPut('entries', u);
@@ -2314,7 +2348,7 @@ async function viewSettings() {
     card(h('h2', {}, 'Gaya bahasa'), h('p', { class: 'mut' }, 'Dikirim ke model di setiap batch. Kosongkan untuk memakai gaya bawaan model. Berlaku untuk terjemahan berikutnya; teks yang sudah selesai tidak berubah.'), styleTa,
       h('label', {}, 'Catatan per karakter (nama pembicara: gaya bicara)'), notesTa,
       h('button', { onclick: () => { styleTa.value = DEFAULT_STYLE; } }, 'Pulihkan gaya bawaan')),
-    card(h('h2', {}, 'Glosarium (opsional)'), h('p', { class: 'mut' }, 'Satu baris per istilah: sumber = terjemahan. Istilah yang muncul di sebuah teks dikirim ke model sebagai acuan. Teks yang isinya persis satu istilah diterjemahkan langsung tanpa model. Berlaku untuk terjemahan berikutnya; teks yang sudah selesai tidak diubah.'), glossTa),
+    card(h('h2', {}, 'Glosarium (opsional)'), h('p', { class: 'mut' }, 'Satu baris per istilah: sumber = terjemahan. Istilah dicocokkan tanpa membedakan huruf besar/kecil dan dikirim ke model bersama teks yang memuatnya. Bila hasilnya tidak memakai padanan istilah, teks itu diterjemah ulang sekali. Teks yang isinya persis satu istilah diterjemahkan langsung tanpa model. Teks mirip yang sudah diterjemahkan dipakai sebagai acuan agar pilihan katanya sama. Berlaku untuk terjemahan berikutnya; teks yang sudah selesai tidak diubah. Untuk yang sudah selesai, pakai filter Review "Glosarium tidak dipakai" dan "Terjemahan tidak konsisten".'), glossTa),
     fold('Lanjutan',
       h('label', { class: 'chk' }, autoCb, 'Atur kecepatan otomatis (disarankan)'),
       h('p', { class: 'mut' }, 'Ukuran batch dan konkurensi diatur sendiri mengikuti panjang teks dan respons provider. Isian ukuran batch, batas karakter, konkurensi, dan jeda di bawah baru dipakai kalau ini dimatikan.'),
@@ -2325,7 +2359,7 @@ async function viewSettings() {
     h('div', { class: 'card danger-card' }, h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn),
     actionBar(msg, h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')))];
 }
-const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Kata asing Portugis/Spanyol'], ['same', 'Belum diterjemahkan (sama dengan asli)']];
+const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Kata asing Portugis/Spanyol'], ['same', 'Belum diterjemahkan (sama dengan asli)'], ['glmiss', 'Glosarium tidak dipakai'], ['inconsistent', 'Terjemahan tidak konsisten (teks mirip)']];
 const hasForeign = (e) => !!e.translation && foreignWords(e.translation).length > 0;
 /** Apakah k kata Inggris: ada di EN_W atau bentuk turunannya (-s, -es, -ies, -ed, -ing, -ly, -er, -est, 's) dari kata di EN_W. */
 function enHas(k) {
@@ -2416,6 +2450,7 @@ async function viewReview() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
   const rows = (await dbQuery('entries', 'projectId', p.id)).sort((a, b) => a.id - b.id);
+  const glRev = parseGlossary((await loadConfig()).glossary);
   let filter = 'all', lang = 'all', cat = 'all', fn = 'any', mode = 'loose', q = '', qRaw = '', qRe = null, page = 0, count = 0;
   const origNorm = new WeakMap(), normOf = (e) => { let v = origNorm.get(e); if (v === undefined) { v = searchNorm(e.original); origNorm.set(e, v); } return v; };
   const box = h('div'), info = h('p', { class: 'mut' });
@@ -2456,8 +2491,9 @@ async function viewReview() {
   };
   const fill = () => {
     uiSet('filters:' + p.id, JSON.stringify({ filter, lang, cat, fn, mode, q: qRaw }));
-    const fnRe = fnTest(fn);
-    const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : filter === 'foreign' ? hasForeign(e) : filter === 'same' ? leftUntranslated(e, p.tgt) : e.status === filter)) && (lang === 'all' || !!transLang(e)?.[lang]) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
+    const fnRe = fnTest(fn), incSet = filter === 'inconsistent' ? inconsistentIds(rows) : null;
+    const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : filter === 'foreign' ? hasForeign(e) : filter === 'same' ? leftUntranslated(e, p.tgt) : filter === 'glmiss' ? !!e.translation && glossMissing(glRev, e.original, e.translation).length > 0 : filter === 'inconsistent' ? incSet.has(e.id) : e.status === filter)) && (lang === 'all' || !!transLang(e)?.[lang]) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
+    if (incSet) list.sort((a, b) => (simNorm(stripEscapes(a.original)) < simNorm(stripEscapes(b.original)) ? -1 : simNorm(stripEscapes(a.original)) > simNorm(stripEscapes(b.original)) ? 1 : a.id - b.id));
     const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE)); page = Math.min(page, pages - 1);
     info.textContent = qErr ? qErr : `${list.length} teks`; info.className = qErr ? 'err' : 'mut'; count = list.length; paintChips(); paintBulk(list);
     const go = (n) => () => { page = n; fill(); scrollTo(0, 0); };
@@ -2465,7 +2501,7 @@ async function viewReview() {
       h('div', { class: 'row' }, h('button', { onclick: go(page - 1), ...(page ? {} : { disabled: '' }) }, 'Sebelumnya'),
         h('button', { onclick: go(page + 1), ...(page < pages - 1 ? {} : { disabled: '' }) }, `Berikutnya (${page + 1}/${pages})`)));
   };
-  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); sCnt.set('codediff', rows.filter(codeDiff).length); sCnt.set('foreign', rows.filter(hasForeign).length); sCnt.set('same', rows.filter((e) => leftUntranslated(e, p.tgt)).length);
+  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); sCnt.set('codediff', rows.filter(codeDiff).length); sCnt.set('foreign', rows.filter(hasForeign).length); sCnt.set('same', rows.filter((e) => leftUntranslated(e, p.tgt)).length); sCnt.set('glmiss', glRev.length ? rows.filter((e) => e.translation && glossMissing(glRev, e.original, e.translation).length).length : 0); sCnt.set('inconsistent', inconsistentIds(rows).size);
   const sel = h('select', { 'aria-label': 'Filter status', onchange: (e) => { filter = e.target.value; page = 0; fill(); } }, FILTERS.map(([v, t]) => h('option', { value: v }, v === 'all' ? `${t} (${rows.length})` : `${t} (${sCnt.get(v) || 0})`)));
   const lCnt = new Map(); rows.forEach((e) => { const f = transLang(e); if (f) for (const k of Object.keys(f)) if (f[k]) lCnt.set(k, (lCnt.get(k) || 0) + 1); });
   const langSel = h('select', { 'aria-label': 'Filter bahasa terjemahan', onchange: (e) => { lang = e.target.value; page = 0; fill(); } }, LANG_FILTERS.map(([v, t]) => h('option', { value: v }, v === 'all' ? t : `${t} (${lCnt.get(v) || 0})`)));
