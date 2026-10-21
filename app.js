@@ -92,6 +92,7 @@ export async function deleteProject(id) {
     t.objectStore('projects').delete(id);
     t.objectStore('origFiles').delete(IDBKeyRange.bound(id + ':', id + ':\uffff'));
     if (cur?.value === id) t.objectStore('settings').delete('current');
+    t.objectStore('settings').delete('exportCount:' + id);
     // cepat: kalau semua entries milik proyek ini, kosongkan sekaligus; kalau tidak, hapus per key tanpa kursor
     const all = es.count(), mine = es.index('projectId').getAllKeys(IDBKeyRange.only(id));
     mine.onsuccess = () => { if (all.result === mine.result.length) es.clear(); else mine.result.forEach((k) => es.delete(k)); };
@@ -133,6 +134,9 @@ const rbLit = () => /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g;
 // Kode escape (\C[2], \!, ...) dan tag plugin ASCII seperti <br>, <WordWrap>, <left>. Tag berisi huruf Jepang tidak ikut.
 // Selain kode escape pesan, ikut dimasker: pemanggilan fungsi berindeks (if(s[12]), en(s[3]), f(\v[5])), s[n]/v[n], $gameXxx, dan placeholder %1.
 const ESC = /\\[A-Za-z]{1,12}<[^>\n\u3000-\u9fff\uff00-\uffef]*>|\\[Ff][RrIiBb](?![A-Za-z])|\\(?:[A-Za-z]+\[(?:\d+|#[0-9A-Fa-f]{3,8}|[0-9A-Fa-f]{6}|auto)\]|[A-Za-z]|[{}.|!^$<>\\])|<\/?[A-Za-z][ -;=?-~]{0,40}>|\b[A-Za-z_]\w*\((?=[^)\n]*(?:\[\d+\]|\\[A-Za-z]+\[))(?:[^()\n]|\([^()\n]*\))*\)|\b[sv]\[\d+\]|\$game[A-Za-z]+(?:\.\w+|\[[^\]\n]*\])*|%\d|#\{[^}\n]*\}|\$\{[^}\n]*\}|\{\{[^}\n]*\}\}|\{\d+\}|[¥￥]/g;
+// Pola masking yang lebih lengkap dari ESC: variabel bersarang \V[\V[1]], placeholder printf (%1$s, %s, %d) dan entitas HTML.
+// Hanya dipakai untuk masking terjemahan dan audit kode; ESC dipakai tetap oleh heuristik impor supaya hasil ekstraksi proyek lama tidak bergeser.
+const MASK = new RegExp(['\\\\[A-Za-z]+\\[\\\\[A-Za-z]+\\[\\d+\\]\\]', '%\\d+\\$[sd]', ESC.source, '%[sd]\\b', '&(?:nbsp|amp|lt|gt|quot|#\\d+);'].join('|'), 'g');
 // Plugin message yang punya word-wrap sendiri. Bila aktif, pemecahan baris manual dimatikan.
 const MSG_PLUGIN = /^(YEP_MessageCore|VisuMZ_1_MessageCore)$|word.?wrap|line.?wrap|auto.?wrap|text.?wrap|message.?wrap/i;
 /** Daftar nama plugin message aktif dari isi js/plugins.js. */
@@ -181,7 +185,7 @@ export function langAllowed(original, src, stats = null) {
   return false;
 }
 /** Ganti kode escape dengan token ⟦n⟧. Kode di awal dan akhir teks tidak dikirim ke AI (sering dihapus model); dipasang lagi saat unmask. */
-const ESC_LEAD = new RegExp('^(?:\\s*(?:' + ESC.source + '))+\\s*'), ESC_TRAIL = new RegExp('(?:\\s*(?:' + ESC.source + '))+\\s*$');
+const ESC_LEAD = new RegExp('^(?:\\s*(?:' + MASK.source + '))+\\s*'), ESC_TRAIL = new RegExp('(?:\\s*(?:' + MASK.source + '))+\\s*$');
 export function maskText(text) {
   let lead = '', trail = '', core = text;
   const a = ESC_LEAD.exec(core); if (a) { lead = a[0]; core = core.slice(lead.length); }
@@ -189,7 +193,7 @@ export function maskText(text) {
   if (!core.trim()) { lead = ''; trail = ''; core = text; } // teks hanya berisi kode: perlakukan seperti biasa
   const tokens = [];
   tokens.lead = lead; tokens.trail = trail;
-  return { text: core.replace(ESC, (m) => { tokens.push(m); return `⟦${tokens.length - 1}⟧`; }), tokens };
+  return { text: core.replace(MASK, (m) => { tokens.push(m); return `⟦${tokens.length - 1}⟧`; }), tokens };
 }
 /** Kembalikan kode escape. ok=false bila token hilang, duplikat, atau asing. */
 export function unmaskText(text, tokens) {
@@ -212,7 +216,7 @@ export function kwLost(orig, tr) {
  * (yang seharusnya hanya ada lewat token) atau kata kunci kode asli hilang/diterjemahkan. Hasil '' bila aman.
  */
 export function codeProblem(maskedOrig, maskedTr) {
-  if (new RegExp(ESC.source).test(String(maskedTr))) return UI.codeAdded;
+  if (new RegExp(MASK.source).test(String(maskedTr))) return UI.codeAdded;
   return kwLost(maskedOrig, maskedTr) ? UI.codeWord : '';
 }
 /** Audit: terjemahan yang kode game atau kata kunci kodenya tidak sama dengan teks asli. */
@@ -1430,7 +1434,7 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
 }
 
 const normTxt = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
-const escSig = (s) => (String(s ?? '').match(ESC) || []).sort().join('\u0001');
+const escSig = (s) => (String(s ?? '').match(MASK) || []).sort().join('\u0001');
 const bigrams = (s) => { const m = new Map(); for (let i = 0; i < s.length - 1; i++) { const g = s.slice(i, i + 2); m.set(g, (m.get(g) || 0) + 1); } return m; };
 const prep = (x) => { const n = normTxt(x.original); return { x, n, len: n.length, sig: escSig(x.original), g: null }; };
 const diceP = (p, q) => {
@@ -2624,7 +2628,8 @@ async function viewReview() {
     const st = h('span', { class: 'badge' }, e.status), warn = h('span', { class: 'badge warn' }, 'baris panjang'), msg = h('p', { class: 'err' }, e.error);
     warn.hidden = !longLine(e.translation);
     const ta = h('textarea', { rows: String(Math.max(2, e.original.split('\n').length + 1)) }, e.translation);
-    const sync = () => { st.textContent = e.status; warn.hidden = !longLine(e.translation); msg.className = 'err'; msg.textContent = e.error; };
+    const sync = () => { st.textContent = e.status; warn.hidden = !longLine(e.translation); msg.className = 'err'; msg.textContent = e.error || (codeDiff(e) ? 'Kode game berbeda dari teks asli (cek warna, nama, variabel, tag). Periksa sebelum ekspor' : ''); };
+    sync();
     ta.addEventListener('change', async () => {
       const u = { ...e, translation: ta.value, status: ta.value.trim() ? 'edited' : 'pending', error: '' };
       await dbPut('entries', u); Object.assign(e, u); sync();
@@ -2790,6 +2795,16 @@ async function viewReview() {
   return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), replCard, bulkCard, box, sheet];
 }
 let exportUrl = '', rgUrl = '';
+/** Nama file patch: "<judul game> - ke <n>.zip". Judul diambil dari System (terjemahan kalau ada, kalau tidak aslinya); nomor naik tiap ekspor sukses per proyek. */
+async function patchFileName(p) {
+  const es = await dbQuery('entries', 'projectId', p.id);
+  const t = es.find((e) => e.category === 'system' && /^\["(gameTitle|game_title)"\]$/.test(e.path));
+  const raw = t ? ((t.status === 'done' || t.status === 'edited') && t.translation?.trim() ? t.translation : t.original) : '';
+  const title = String(raw || '').replace(ESC, '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().replace(/^\.+|\.+$/g, '').slice(0, 80).trim() || `rpgtl-patch-${p.id}`;
+  const key = 'exportCount:' + p.id, n = ((await dbGet('settings', key))?.value || 0) + 1;
+  await dbPut('settings', { key, value: n });
+  return `${title} - ke ${n}.zip`;
+}
 async function viewEkspor() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
@@ -2822,8 +2837,11 @@ async function viewEkspor() {
       else {
         if (exportUrl) URL.revokeObjectURL(exportUrl);
         exportUrl = URL.createObjectURL(r.blob);
+        const dlName = await patchFileName(p);
+        const risky = (await dbQuery('entries', 'projectId', p.id)).filter((e) => (e.status === 'done' || e.status === 'edited') && codeDiff(e));
         out.replaceChildren(card(h('h2', {}, 'Patch siap'), h('p', { class: 'mut' }, r.report),
-          h('a', { class: 'file', href: exportUrl, download: `rpgtl-patch-${p.id}.zip` }, 'Unduh zip'),
+          risky.length ? h('p', { class: 'err' }, `Peringatan: ${risky.length} teks kodenya berbeda dari aslinya (id ${risky.slice(0, 8).map((e) => e.id).join(', ')}${risky.length > 8 ? ', …' : ''}). Buka Review, filter "Kode berubah (audit)", perbaiki, lalu buat patch ulang`) : '',
+          h('a', { class: 'file', href: exportUrl, download: dlName }, 'Unduh zip'),
           h('p', { class: 'mut' }, 'Backup folder data dulu, lalu timpa isinya dengan file di dalam zip.'),
           r.files.some((f) => /\.rvdata2$/i.test(f.name)) ? h('div', {}, h('h2', {}, 'Game pakai Game.rgss3a?'),
             h('p', { class: 'mut' }, 'Pilih Game.rgss3a asli. App membuat Game.rgss3a baru berisi terjemahan, tanpa perlu ekstrak. Gambar dan audio disalin apa adanya. Backup arsip asli dulu, lalu timpa dengan hasilnya.'),
