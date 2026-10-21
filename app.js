@@ -1594,7 +1594,7 @@ export function applyChatRows(entries, rows) {
     if (!t) { out.empty.push(r.id); continue; }
     const mk = maskText(e0.original), u = unmaskText(t, mk.tokens);
     if (!u.ok || codeProblem(mk.text.replace(/\r?\n/g, '\n'), t)) { out.badToken.push(r.id); continue; }
-    if (foreignWords(t).length) { out.foreign.push(r.id); continue; }
+    if (foreignWords(t, e0.original).length) { out.foreign.push(r.id); continue; }
     seen.add(e0.original); out.texts++;
     for (const e of byOrig.get(e0.original)) if (TODO.has(e.status)) out.updates.push({ ...e, translation: lead + u.text + trail, status: 'done', error: '' });
   }
@@ -1612,12 +1612,17 @@ const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian', all: 'any langua
 export const stray = (t) => JA.test(t) || /[\u0400-\u04FF\u0600-\u06FF\uAC00-\uD7AF]/.test(t);
 const STRAY_MSG = 'Hasil masih bercampur huruf Jepang/asing, bukan bahasa target';
 /** Kata khas Portugis/Spanyol yang tertinggal di teks (kode escape diabaikan). Mengembalikan kata unik berhuruf kecil. */
-export function foreignWords(t) {
+export function foreignWords(t, orig = '') {
   const ws = String(t || '').replace(ESC, ' ').match(/\p{L}+/gu) || [], out = new Set();
-  for (const w of ws) { const k = w.toLowerCase(); if (FOREIGN_W.has(k)) out.add(k); }
+  const ow = new Set((String(orig || '').replace(ESC, ' ').toLowerCase().match(/\p{L}+/gu) || []));
+  for (const w of ws) {
+    const k = w.toLowerCase();
+    if (FOREIGN_W.has(k)) out.add(k);
+    else if (/[àâäçèéêëîïôöùûüÿœæãõñß]/.test(k) && !ow.has(k)) out.add(k); // huruf beraksen Latin yang tidak ada di sumber: ciri bahasa asing
+  }
   return [...out];
 }
-const foreignMsg = (t) => `Ada kata bahasa asing (Portugis/Spanyol) yang tertinggal: ${foreignWords(t).slice(0, 3).join(', ')}`;
+const foreignMsg = (t, o = '') => `Ada kata bahasa asing (Prancis/Spanyol/Portugis/dll) yang muncul: ${foreignWords(t, o).slice(0, 3).join(', ')}`;
 const TODO = new Set(['pending', 'error', 'translating']);
 /** Entri pending/error yang hanya berisi kunci atau kode ditandai skipped (tidak dikirim ke model, tetap asli di ekspor). Mengubah `entries` di tempat. */
 export async function skipKeyOnly(entries) {
@@ -1756,7 +1761,7 @@ Rules:
 - Never write game codes yourself: no backslash codes (\\C[2], \\V[1], \\N[1]), no <tags>, no %1 placeholders unless they appear as ⟦n⟧ tokens in the source. If the source has none, the translation has none.
 - If an item is only code, a number, a variable/file/switch name, or key=value pairs, copy it unchanged. Do not fix, normalise, or reformat code: keep brackets, parentheses, operators, digits, and letter case exactly. Never translate identifiers (CamelCase, snake_case, ALL_CAPS).
 - Keep line breaks as line breaks and keep the same number of lines when possible.
-- Translate every word into ${LANG[tgt]}. Never leave Japanese, Chinese, or Korean characters in the translation and never mix source-language words into the sentence; romanize a name if you must keep it. Reply only in ${LANG[tgt]}.\n- The source may already be machine-translated, half-translated, or contain stray words from other languages (e.g. Portuguese "mesmo", "você", Spanish "gracias", "pero") or typos. Fix all of them: the result must be clean, correctly spelled ${LANG[tgt]} with no leftover foreign words.\n- Translate as natural game dialogue. Keep names consistent. Keep short UI terms short.
+- Translate every word into ${LANG[tgt]}. Never leave Japanese, Chinese, or Korean characters in the translation and never mix source-language words into the sentence; romanize a name if you must keep it. Reply only in ${LANG[tgt]}.\n- HARD RULE: the output language is ${LANG[tgt]} and nothing else. Never answer in French, Spanish, Portuguese, German, Italian or any other language, even for very short lines, quotes, or lines that look already translated. Do not copy the language of a neighbouring line.\n- The source may already be machine-translated, half-translated, or contain stray words from other languages (e.g. Portuguese "mesmo", "você", Spanish "gracias", "pero") or typos. Fix all of them: the result must be clean, correctly spelled ${LANG[tgt]} with no leftover foreign words.\n- Translate as natural game dialogue. Keep names consistent. Keep short UI terms short.
 - If an item has "glossary", every term listed there must appear in that item's translation exactly as its "to" value, in the same wording every time (never a synonym or a different word for the same term).
 - If an item has "similar" ({from, to}), it is almost identical to a line already translated: reuse the same wording as "to" and change only what differs (numbers, names). Keep the same vocabulary.
 - If an item has "note", follow it.${style.trim() ? `\n- Style guide for all text: ${style.trim().replace(/\s+/g, ' ')}` : ''}
@@ -1897,7 +1902,7 @@ export async function runTranslation(project, cfg, o = {}) {
     const terms = termsFor(gl, `${original}\n${entries[0].meta?.speaker || ''}`);
     const notes = notesFor(cn, entries[0].meta?.speaker || '');
     const key = await cacheKey(project, cfg, original, terms, notes), c = await dbGet('cache', key);
-    if (c && !stray(c.text) && !foreignWords(c.text).length) { entries.forEach((e) => hits.push({ ...e, translation: c.text, status: 'done', error: '' })); continue; }
+    if (c && !stray(c.text) && !foreignWords(c.text, original).length) { entries.forEach((e) => hits.push({ ...e, translation: c.text, status: 'done', error: '' })); continue; }
     const m = maskText(original), e0 = entries[0], p = pos.get(e0.id);
     units.push({
       id: uid++, key, text: m.text, tokens: m.tokens, speaker: e0.meta?.speaker || '', entries, terms, notes, must: termsFor(gl, original),
@@ -1924,7 +1929,7 @@ export async function runTranslation(project, cfg, o = {}) {
   const run = async (batch) => {
     const o2 = {
       chat: guarded, retry: { signal }, src: project.src, tgt: project.tgt, context: batch[0].ctx, style: cfg.style,
-      check: (id, t) => (!t.trim() ? UI.emptyTr : !unmaskText(t, byId.get(id).tokens).ok ? UI.tokenBad : stray(t) ? STRAY_MSG : foreignWords(t).length ? foreignMsg(t) : codeProblem(byId.get(id).text, t)),
+      check: (id, t) => (!t.trim() ? UI.emptyTr : !unmaskText(t, byId.get(id).tokens).ok ? UI.tokenBad : stray(t) ? STRAY_MSG : foreignWords(t, byId.get(id).text).length ? foreignMsg(t, byId.get(id).text) : codeProblem(byId.get(id).text, t)),
       onUsage: (u) => { stat.tokensIn += u?.prompt_tokens || 0; stat.tokensOut += u?.completion_tokens || 0; },
     };
     const r = await translateBatch(batch, o2); await glossFix(batch, r, o2);
@@ -1963,7 +1968,7 @@ export async function retranslateEntry(project, cfg, e, chat) {
   const u0 = { id: 0, text: m.text, speaker: e.meta?.speaker || '', limit: limitFor(e, effCfg(project, cfg)), terms, notes, must: termsFor(parseGlossary(cfg.glossary), e.original) };
   const o1 = {
     chat: call, src: project.src, tgt: project.tgt, context: [], style: cfg.style,
-    check: (id, t) => (t.trim() ? (unmaskText(t, m.tokens).ok ? (foreignWords(t).length ? foreignMsg(t) : codeProblem(m.text, t)) : UI.tokenBad) : UI.emptyTr),
+    check: (id, t) => (t.trim() ? (unmaskText(t, m.tokens).ok ? (foreignWords(t, m.text).length ? foreignMsg(t, m.text) : codeProblem(m.text, t)) : UI.tokenBad) : UI.emptyTr),
   };
   const r = await translateBatch([u0], o1); await glossFix([u0], r, o1);
   if (!r.ok.size) throw new LlmError(r.fail.get(0) || UI.badJson);
@@ -2389,11 +2394,11 @@ async function viewTranslate() {
       })()) : '',
     cnt('done') ? (() => {
       const m = h('p', { class: 'mut' });
-      return card(h('h2', {}, 'Periksa hasil'), h('p', { class: 'mut' }, 'Cari terjemahan yang masih bercampur huruf Jepang atau asing, atau masih memuat kata Portugis/Spanyol (setengah terjemah). Yang ketemu ditandai error supaya bisa diterjemahkan ulang lewat tombol Lanjutkan. Terjemahan yang kamu edit manual tidak disentuh.'),
+      return card(h('h2', {}, 'Periksa hasil'), h('p', { class: 'mut' }, 'Cari terjemahan yang masih bercampur huruf Jepang atau asing, atau memuat kata bahasa asing seperti Prancis, Spanyol, Portugis (salah bahasa atau setengah terjemah). Yang ketemu ditandai error supaya bisa diterjemahkan ulang lewat tombol Lanjutkan. Terjemahan yang kamu edit manual tidak disentuh.'),
         h('button', { onclick: async (ev) => {
           const b = ev.currentTarget; b.disabled = true;
-          const bad = all.filter((e) => e.status === 'done' && (stray(e.translation) || foreignWords(e.translation).length));
-          if (bad.length) await dbPutMany('entries', bad.map((e) => ({ ...e, status: 'error', error: stray(e.translation) ? STRAY_MSG : foreignMsg(e.translation) })));
+          const bad = all.filter((e) => e.status === 'done' && (stray(e.translation) || foreignWords(e.translation, e.original).length));
+          if (bad.length) await dbPutMany('entries', bad.map((e) => ({ ...e, status: 'error', error: stray(e.translation) ? STRAY_MSG : foreignMsg(e.translation, e.original) })));
           m.textContent = bad.length ? `${bad.length} teks ditandai error.` : 'Tidak ada hasil yang bercampur huruf atau kata asing.';
           b.disabled = false; if (bad.length) render();
         } }, 'Periksa hasil'), m);
@@ -2464,8 +2469,8 @@ async function viewSettings() {
     h('div', { class: 'card danger-card' }, h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn),
     actionBar(msg, h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')))];
 }
-const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Kata asing Portugis/Spanyol'], ['same', 'Belum diterjemahkan (sama dengan asli)'], ['glmiss', 'Glosarium tidak dipakai'], ['inconsistent', 'Terjemahan tidak konsisten (teks mirip)']];
-const hasForeign = (e) => !!e.translation && foreignWords(e.translation).length > 0;
+const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Bahasa asing (Prancis/Spanyol/Portugis/dll)'], ['same', 'Belum diterjemahkan (sama dengan asli)'], ['glmiss', 'Glosarium tidak dipakai'], ['inconsistent', 'Terjemahan tidak konsisten (teks mirip)']];
+const hasForeign = (e) => !!e.translation && foreignWords(e.translation, e.original).length > 0;
 /** Apakah k kata Inggris: ada di EN_W atau bentuk turunannya (-s, -es, -ies, -ed, -ing, -ly, -er, -est, 's) dari kata di EN_W. */
 function enHas(k) {
   if (EN_W.has(k)) return true;
@@ -2496,7 +2501,7 @@ function enShare(t) {
   let n = 0; for (const k of ws) if (!ID_W.has(k) && !ID_X.has(k) && !EN_SKIP.has(k) && enHas(k)) n++;
   return n / ws.length;
 }
-const LANG_FILTERS = [['all', 'Semua bahasa'], ['ja', 'Masih ada Jepang/aksara asing'], ['en1', 'Ada kata Inggris (semua)'], ['mix', 'Campuran (Inggris di tengah kalimat Indonesia)'], ['en2', 'Dominan Inggris (belum diterjemah)'], ['es', 'Spanyol/Portugis'], ['id', 'Bahasa Indonesia (bersih)']];
+const LANG_FILTERS = [['all', 'Semua bahasa'], ['ja', 'Masih ada Jepang/aksara asing'], ['en1', 'Ada kata Inggris (semua)'], ['mix', 'Campuran (Inggris di tengah kalimat Indonesia)'], ['en2', 'Dominan Inggris (belum diterjemah)'], ['es', 'Bahasa asing (Prancis/Spanyol/Portugis/dll)'], ['id', 'Bahasa Indonesia (bersih)']];
 const langMemo = new WeakMap();
 /**
  * Bahasa HASIL TERJEMAHAN (bukan teks asli). Mengembalikan null bila terjemahan kosong.
@@ -2508,7 +2513,7 @@ export function transLang(e) {
   const m = langMemo.get(e); if (m && m.t === t) return m.v;
   const c = stripEscapes(t).trim(), li = langInfo(c), ja = stray(c.replace(/[\u30fb\u30fc\u30a0\u309b\u309c]/g, ''));
   const en = !ja && englishWords(c).length > 0, dom = en && enShare(c) >= 0.6;
-  const v = { ja, en1: en, mix: en && !dom, en2: dom, es: foreignWords(c).length > 0, id: !ja && li.lang === 'id' && englishWords(c).length === 0 };
+  const v = { ja, en1: en, mix: en && !dom, en2: dom, es: foreignWords(c, e.original).length > 0, id: !ja && li.lang === 'id' && englishWords(c).length === 0 };
   langMemo.set(e, { t, v }); return v;
 }
 const sameMemo = new WeakMap();

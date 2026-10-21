@@ -194,3 +194,15 @@ fuck fucking fucked shit damn bitch dick cock pussy cum ass tits boobs naked hor
 harder deeper faster wet hard inside kiss kisses kissing touch touching stroke thrust
 `);
 EN_EXTRA.forEach((w) => EN_W.add(w));
+
+// Kata khas Prancis/Jerman/Italia yang muncul bila model salah keluar bahasa (halusinasi bahasa).
+// Dicek otomatis terhadap kamus Indonesia/Inggris saat dimuat; kata yang bentrok dibuang.
+const FOREIGN_MORE = words(`
+je nous vous ils elles est sont suis sommes avec pour dans mais donc alors aussi très même mes leur leurs cette ces ceux
+comment pourquoi quand parce voulais voulait veux veut peux peut pouvoir devoir faut faire toujours jamais rien tout tous
+toute toutes beaucoup trop merci bonjour bonsoir salut monsieur madame mademoiselle encore déjà hors perdraient valeur
+embêter qui que quoi chez sans sous entre vers depuis pendant
+ich nicht und ist mit für aber auch wenn dann noch schon sehr kann habe danke bitte wir ihr euch
+che questo questa anche molto grazie ciao sono perché
+`);
+FOREIGN_MORE.forEach((w) => { if (!ID_W.has(w) && !ID_X.has(w) && !EN_W.has(w) && !EN_SKIP.has(w) && !ID_AMBIG.has(w)) FOREIGN_W.add(w); });
