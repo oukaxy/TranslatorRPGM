@@ -206,3 +206,8 @@ ich nicht und ist mit für aber auch wenn dann noch schon sehr kann habe danke b
 che questo questa anche molto grazie ciao sono perché
 `);
 FOREIGN_MORE.forEach((w) => { if (!ID_W.has(w) && !ID_X.has(w) && !EN_W.has(w) && !EN_SKIP.has(w) && !ID_AMBIG.has(w)) FOREIGN_W.add(w); });
+
+// Tambahan kata Inggris yang sering tertinggal di hasil terjemahan dewasa/narasi (dicek agar tidak bentrok dengan kamus Indonesia).
+words(`although though crave craves craved craving yearning yearn swell swells swelling needy arousal aroused ceased cease forced satisfy
+desperate desperately within beneath against whilst while until unless however therefore moaning trembling shivering throbbing
+`).forEach((w) => { if (!ID_W.has(w) && !ID_X.has(w) && !EN_SKIP.has(w)) EN_W.add(w); });

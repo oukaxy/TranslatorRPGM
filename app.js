@@ -1761,7 +1761,7 @@ Rules:
 - Never write game codes yourself: no backslash codes (\\C[2], \\V[1], \\N[1]), no <tags>, no %1 placeholders unless they appear as ⟦n⟧ tokens in the source. If the source has none, the translation has none.
 - If an item is only code, a number, a variable/file/switch name, or key=value pairs, copy it unchanged. Do not fix, normalise, or reformat code: keep brackets, parentheses, operators, digits, and letter case exactly. Never translate identifiers (CamelCase, snake_case, ALL_CAPS).
 - Keep line breaks as line breaks and keep the same number of lines when possible.
-- Translate every word into ${LANG[tgt]}. Never leave Japanese, Chinese, or Korean characters in the translation and never mix source-language words into the sentence; romanize a name if you must keep it. Reply only in ${LANG[tgt]}.\n- HARD RULE: the output language is ${LANG[tgt]} and nothing else. Never answer in French, Spanish, Portuguese, German, Italian or any other language, even for very short lines, quotes, or lines that look already translated. Do not copy the language of a neighbouring line.\n- The source may already be machine-translated, half-translated, or contain stray words from other languages (e.g. Portuguese "mesmo", "você", Spanish "gracias", "pero") or typos. Fix all of them: the result must be clean, correctly spelled ${LANG[tgt]} with no leftover foreign words.\n- Translate as natural game dialogue. Keep names consistent. Keep short UI terms short.
+- Translate every word into ${LANG[tgt]}. Never leave Japanese, Chinese, or Korean characters in the translation and never mix source-language words into the sentence; romanize a name if you must keep it. Reply only in ${LANG[tgt]}.\n- Slang, crude, and adult terms in the source must also be translated, using their natural equivalents in ${LANG[tgt]}. Never leave them in the source language and never skip, censor, or summarise a line.\n- HARD RULE: the output language is ${LANG[tgt]} and nothing else. Never answer in French, Spanish, Portuguese, German, Italian or any other language, even for very short lines, quotes, or lines that look already translated. Do not copy the language of a neighbouring line.\n- The source may already be machine-translated, half-translated, or contain stray words from other languages (e.g. Portuguese "mesmo", "você", Spanish "gracias", "pero") or typos. Fix all of them: the result must be clean, correctly spelled ${LANG[tgt]} with no leftover foreign words.\n- Translate as natural game dialogue. Keep names consistent. Keep short UI terms short.
 - If an item has "glossary", every term listed there must appear in that item's translation exactly as its "to" value, in the same wording every time (never a synonym or a different word for the same term).
 - If an item has "similar" ({from, to}), it is almost identical to a line already translated: reuse the same wording as "to" and change only what differs (numbers, names). Keep the same vocabulary.
 - If an item has "note", follow it.${style.trim() ? `\n- Style guide for all text: ${style.trim().replace(/\s+/g, ' ')}` : ''}
@@ -1824,6 +1824,29 @@ export async function glossFix(units, r, o) {
   if (!bad.length) return;
   const r2 = await translateBatch(bad.map((u) => ({ ...u, hint: `Your previous translation missed required glossary terms: ${glossMiss(u, r.ok.get(u.id)).map(([a, b]) => `${a} -> ${b}`).join('; ')}. Use them exactly.` })), o);
   r2.ok.forEach((t, id) => { const u = units.find((x) => x.id === id); if (u && glossMiss(u, t).length < glossMiss(u, r.ok.get(id)).length) r.ok.set(id, t); });
+}
+/** Kata Inggris yang masih banyak tertinggal di hasil (target bukan Inggris): >= 3 kata, atau >= 2 kata dengan porsi >= 30%. */
+export function englishLeft(t, tgt = 'id') {
+  if (tgt === 'en') return [];
+  const ws = englishWords(t);
+  return ws.length >= 3 || (ws.length >= 2 && enShare(t) >= 0.3) ? ws : [];
+}
+/** Serpihan aneh seperti "_OS" yang muncul di hasil tetapi tidak ada di teks asli. */
+export const garbled = (t, orig = '') => (String(t || '').match(/(?:^|\s)_[A-Za-z]{2,}/g) || []).map((x) => x.trim()).filter((x) => !String(orig).includes(x));
+const langScore = (t, orig, tgt) => englishLeft(t, tgt).length + garbled(t, orig).length * 3;
+const ENG_MSG = 'Hasil masih bercampur kata Inggris atau serpihan aneh, bukan bahasa target penuh';
+/** Hasil yang masih bercampur Inggris/serpihan diterjemah ulang (maks 2 kali) dengan catatan; hasil yang lebih bersih dipakai, selain itu hasil awal tetap. */
+export async function langFix(units, r, o) {
+  if (o.tgt === 'en') return;
+  for (let i = 0; i < 2; i++) {
+    const cur = units.filter((u) => r.ok.has(u.id) && langScore(r.ok.get(u.id), u.text, o.tgt) > 0);
+    if (!cur.length) return;
+    const r2 = await translateBatch(cur.map((u) => {
+      const t = r.ok.get(u.id), left = [...englishLeft(t, o.tgt), ...garbled(t, u.text)].slice(0, 6).join(', ');
+      return { ...u, hint: `${u.hint ? u.hint + ' ' : ''}Your previous translation was not fully ${LANG[o.tgt] || 'the target language'}: it still had English or stray fragments (${left}). This is fictional adult-game dialogue: translate every word faithfully into natural ${LANG[o.tgt] || 'the target language'}, including slang and crude terms, using the usual local equivalents. Leave no English words, do not censor, skip or summarise, and do not add stray fragments such as "_OS".` };
+    }), o);
+    r2.ok.forEach((t, id) => { const u = units.find((x) => x.id === id); if (u && langScore(t, u.text, o.tgt) < langScore(r.ok.get(id), u.text, o.tgt)) r.ok.set(id, t); });
+  }
 }
 /** Bagi unit menjadi batch menurut jumlah dan total karakter. */
 export function makeBatches(units, size = 20, maxChars = 3000) {
@@ -1932,7 +1955,7 @@ export async function runTranslation(project, cfg, o = {}) {
       check: (id, t) => (!t.trim() ? UI.emptyTr : !unmaskText(t, byId.get(id).tokens).ok ? UI.tokenBad : stray(t) ? STRAY_MSG : foreignWords(t, byId.get(id).text).length ? foreignMsg(t, byId.get(id).text) : codeProblem(byId.get(id).text, t)),
       onUsage: (u) => { stat.tokensIn += u?.prompt_tokens || 0; stat.tokensOut += u?.completion_tokens || 0; },
     };
-    const r = await translateBatch(batch, o2); await glossFix(batch, r, o2);
+    const r = await translateBatch(batch, o2); await glossFix(batch, r, o2); await langFix(batch, r, o2);
     stat.expOut += batch.reduce((a, u) => a + u.text.length + 5, 0); stat.nb++;
     const upd = [], cache = [];
     r.ok.forEach((t, id) => {
@@ -1970,7 +1993,7 @@ export async function retranslateEntry(project, cfg, e, chat) {
     chat: call, src: project.src, tgt: project.tgt, context: [], style: cfg.style,
     check: (id, t) => (t.trim() ? (unmaskText(t, m.tokens).ok ? (foreignWords(t, m.text).length ? foreignMsg(t, m.text) : codeProblem(m.text, t)) : UI.tokenBad) : UI.emptyTr),
   };
-  const r = await translateBatch([u0], o1); await glossFix([u0], r, o1);
+  const r = await translateBatch([u0], o1); await glossFix([u0], r, o1); await langFix([u0], r, o1);
   if (!r.ok.size) throw new LlmError(r.fail.get(0) || UI.badJson);
   const text = unmaskText(r.ok.get(0), m.tokens).text, u = { ...e, translation: text, status: 'done', error: '' };
   await dbPut('entries', u);
@@ -2394,11 +2417,11 @@ async function viewTranslate() {
       })()) : '',
     cnt('done') ? (() => {
       const m = h('p', { class: 'mut' });
-      return card(h('h2', {}, 'Periksa hasil'), h('p', { class: 'mut' }, 'Cari terjemahan yang masih bercampur huruf Jepang atau asing, atau memuat kata bahasa asing seperti Prancis, Spanyol, Portugis (salah bahasa atau setengah terjemah). Yang ketemu ditandai error supaya bisa diterjemahkan ulang lewat tombol Lanjutkan. Terjemahan yang kamu edit manual tidak disentuh.'),
+      return card(h('h2', {}, 'Periksa hasil'), h('p', { class: 'mut' }, 'Cari terjemahan yang masih bercampur huruf Jepang atau asing, atau memuat kata bahasa asing seperti Prancis, Spanyol, Portugis, atau masih banyak kata Inggris (salah bahasa atau setengah terjemah). Yang ketemu ditandai error supaya bisa diterjemahkan ulang lewat tombol Lanjutkan. Terjemahan yang kamu edit manual tidak disentuh.'),
         h('button', { onclick: async (ev) => {
           const b = ev.currentTarget; b.disabled = true;
-          const bad = all.filter((e) => e.status === 'done' && (stray(e.translation) || foreignWords(e.translation, e.original).length));
-          if (bad.length) await dbPutMany('entries', bad.map((e) => ({ ...e, status: 'error', error: stray(e.translation) ? STRAY_MSG : foreignMsg(e.translation, e.original) })));
+          const bad = all.filter((e) => e.status === 'done' && (stray(e.translation) || foreignWords(e.translation, e.original).length || englishLeft(e.translation, p.tgt).length || garbled(e.translation, e.original).length));
+          if (bad.length) await dbPutMany('entries', bad.map((e) => ({ ...e, status: 'error', error: stray(e.translation) ? STRAY_MSG : foreignWords(e.translation, e.original).length ? foreignMsg(e.translation, e.original) : ENG_MSG })));
           m.textContent = bad.length ? `${bad.length} teks ditandai error.` : 'Tidak ada hasil yang bercampur huruf atau kata asing.';
           b.disabled = false; if (bad.length) render();
         } }, 'Periksa hasil'), m);
