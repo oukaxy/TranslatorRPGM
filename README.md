@@ -8,6 +8,7 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 
 - [Fitur](#fitur)
 - [Engine dan Format yang Didukung](#engine-dan-format-yang-didukung)
+- [File Bahasa (Plugin Lokalisasi)](#file-bahasa-plugin-lokalisasi)
 - [Cara Pakai](#cara-pakai)
 - [Pengaturan](#pengaturan)
 - [Aksi Massal di Review](#aksi-massal-di-review)
@@ -24,6 +25,8 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 ## Fitur
 
 - **Impor fleksibel**: folder `data`, file zip game, atau arsip terenkripsi `Game.rgss3a` (VX Ace) tanpa perlu diekstrak dulu.
+- **Impor file bahasa** (`languages/en.json` dan sejenisnya): untuk game yang menaruh dialog di file bahasa JSON dan hanya menyimpan kunci di event. Kunci dan struktur file tidak diubah.
+- **Entri hanya-kunci dilewati otomatis**: teks seperti `\nw[#{Chara.X}]#{Scenario.Msg1}` tidak punya kalimat, jadi tidak dikirim ke model dan tetap asli.
 - **Deteksi bahasa sumber**: mode Otomatis (Jepang/Inggris campur), Jepang, Inggris, atau Semua teks (bahasa apa pun). Teks yang sudah berbahasa Indonesia dikenali dan tidak diterjemahkan ulang.
 - **Provider LLM bebas**: memakai format *chat completions* yang kompatibel dengan OpenAI. Bawaannya OpenRouter, tetapi base URL bisa diganti ke provider lain atau server lokal.
 - **Terjemahan per batch** dengan konkurensi otomatis, retry dengan backoff, penghormatan terhadap `Retry-After`, batas waktu per request, dan lanjut dari titik berhenti.
@@ -52,6 +55,18 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 Engine dideteksi otomatis dari file yang ada (`rmmz_core.js`, `rpg_core.js`, atau file `.rvdata2`). Menyertakan `js/plugins.js` membantu aplikasi mendeteksi plugin message.
 
 Teks yang diekstrak meliputi: dialog (Show Text), Scroll Text, pilihan, nama pembicara, nama aktor, istilah sistem, nama peta, dan field database (Actors, Classes, Skills, Items, Weapons, Armors, Enemies, States). Komentar, teks di dalam script, tag note, serta perintah dan parameter plugin bersifat opsional dan hanya diambil bila ada di *daftar aman*.
+
+## File Bahasa (Plugin Lokalisasi)
+
+Sebagian game memakai plugin lokalisasi: di event hanya ada kunci seperti `#{Scenario_H.Brothel.Msg9}`, sedangkan teks aslinya ada di file bahasa (mis. `www/languages/en.json`, `jp.json`). Teks di event itu bukan kalimat, jadi menerjemahkannya sia-sia. Terjemahkan file bahasanya.
+
+1. Di tab **Proyek**, kartu **Impor file bahasa**: pilih bahasa sumber (Inggris untuk `en.json`), lalu pilih file `.json`. Hasilnya proyek baru berjenis *File bahasa*.
+2. Format yang dikenali: JSON bertingkat (seperti `en.json`) dan JSON datar `{kunci: teks}` (gaya MTool). Semua string diambil; kategori mengikuti nama bagian teratas (`lang:Scenario_H`, `lang:Quest`, dan seterusnya), dan string di tingkat atas masuk `lang:umum`.
+3. Terjemahkan seperti biasa (kode `\c[27]` dan token `#{...}`, `${...}`, `{{...}}` dilindungi).
+4. Di tab **Ekspor**, buat patch: zip berisi `languages/<nama>.json` dengan kunci dan struktur yang sama, hanya nilai teks yang berubah. Indentasi, akhir baris (CRLF), dan BOM mengikuti file asli. Diff guard memeriksa bahwa tidak ada nilai di luar entri yang berubah.
+5. Salin hasilnya ke folder `languages` game. Nama file boleh diganti agar cocok dengan pilihan di menu bahasa game (backup dulu). Plugin yang membaca daftar bahasanya menentukan apakah perlu perubahan lain.
+
+Yang dilewati saat impor: string kosong, string yang hanya berisi kode, dan string yang hanya berisi kunci (`#{...}` tanpa kalimat). Pemecahan baris otomatis dimatikan untuk proyek jenis ini. Proyek game yang sudah diimpor tetap bisa dipakai: entri hanya-kunci di dalamnya otomatis ditandai *skipped* saat membuka tab Translate atau Ekspor.
 
 ## Cara Pakai
 

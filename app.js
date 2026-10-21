@@ -22,6 +22,7 @@ export const UI = {
   codeAdded: 'AI menulis kode game sendiri (bukan token). Coba terjemahkan ulang',
   codeWord: 'Kata kunci kode (if, else, true, dll) hilang atau diterjemahkan. Coba terjemahkan ulang',
   timeout: 'Provider terlalu lama menjawab. Coba lagi atau naikkan batas waktu di Pengaturan',
+  langBad: 'File bahasa tidak bisa dibaca. Pastikan itu file JSON berisi kunci dan teks (mis. languages/en.json)',
   tooLong: 'Jawaban model terpotong karena kena batas token (kemungkinan berpikir terlalu panjang atau mengulang). Teks ini dilewati; coba terjemahkan ulang, kecilkan ukuran batch, atau naikkan batas token di Pengaturan',
   tooMany: 'Tiga batch gagal berturut-turut. Periksa Pengaturan atau koneksi, lalu lanjutkan',
   exportEmpty: 'Belum ada terjemahan yang bisa diekspor. Terjemahkan dulu di tab Translate',
@@ -257,6 +258,19 @@ export function isTranslatable(s, src = 'ja') {
   if (src === 'all') return !!t; // semua bahasa: asal tidak kosong/hanya kode escape
   if (src === 'auto') { const l = detectLang(t); return l === 'ja' || l === 'en'; }
   return !!t && (src !== 'ja' || JA.test(t));
+}
+/** File bahasa plugin lokalisasi (JSON bertingkat atau datar {kunci: teks}). Disimpan sebagai languages/<nama>.json. */
+export const LANG_PATH = /(^|\/)languages\/[^/]+\.json$/i;
+const PLACEHOLDER = /#\{|\$\{|\{\{/;
+/**
+ * Teks yang hanya berisi kunci/kode, mis. \nw[#{Chara.X}]#{Scenario.Msg1}: teks aslinya ada di file bahasa, jadi tidak ada kalimat untuk diterjemahkan.
+ * Syarat: memuat penanda kunci (#{...}, ${...}, {{...}}) dan setelah kode dibuang tersisa paling banyak satu huruf.
+ */
+export function keyOnly(s) {
+  const t = String(s ?? '');
+  if (!PLACEHOLDER.test(t)) return false;
+  const rest = t.replace(ESC, '').replace(/[\s\[\]()<>{}|.,:;!?'"_\-~*/\\]+/g, '');
+  return (rest.match(/\p{L}/gu) || []).length <= 1;
 }
 
 // ===== 4. PIPELINE (importer, ZIP reader/writer, CRC-32, extractor, exporter, diff guard) =====
@@ -823,10 +837,11 @@ export const scriptSentence = (x, src = 'ja') => {
   if (src === 'all') return JA.test(t) || /[^\x00-\x7f]/.test(t.replace(/[\p{P}\p{S}\p{Z}]/gu, '')) || (/\s/.test(t) && (t.match(/[A-Za-z']+/g) || []).length >= 2);
   return (JA.test(t) || (t.match(/[A-Za-z']+/g) || []).length >= 3) && detectLang(t) !== 'id';
 };
-export function extractFile(path, json, { src = 'ja', allow = null, strict = false, stats = null } = {}) {
+export function extractFile(path, json, { src = 'ja', allow = null, strict = false, stats = null, skipKeys = false, skipped = null } = {}) {
   const A = allowSets(allow);
   const base = path.split('/').pop().replace(/\.(json|rvdata2)$/i, ''), ace = /\.rvdata2$/i.test(path), out = [];
   const add = (p, kind, category, original, meta = {}, lineCount = 1) => {
+    if (skipKeys && typeof original === 'string' && keyOnly(original)) { if (skipped) skipped.n++; return; }
     if (!isTranslatable(original, src)) return;
     if (strict && !langAllowed(original, src, stats)) return;
     out.push({ file: path, path: JSON.stringify(p), kind, category, original, translation: '', status: 'pending', order: out.length, lineCount, meta, source: src === 'auto' ? detectLang(original.replace(ESC, '').trim()) : src === 'all' ? (JA.test(original) ? 'ja' : detectLang(original.replace(ESC, '').trim()) || 'all') : src, error: '' });
@@ -885,7 +900,16 @@ export function extractFile(path, json, { src = 'ja', allow = null, strict = fal
     else if (v && typeof v === 'object') Object.keys(v).filter((k) => !k.startsWith('__')).forEach((k) => walk(v[k], [...p, k]));
   };
   const pages = (pg, p) => (pg || []).forEach((pa, pi) => scanList(pa?.list, [...p, 'pages', pi, 'list']));
-  if (base === 'System') {
+  if (LANG_PATH.test(path)) {
+    // File bahasa: semua string diambil; kategori = nama bagian teratas (lang:Scenario_H), atau lang:umum untuk string di tingkat atas.
+    const go = (v, p, cat) => {
+      if (typeof v === 'string') add(p, 'field', cat, v);
+      else if (Array.isArray(v)) v.forEach((x, i) => go(x, [...p, i], cat));
+      else if (v && typeof v === 'object') for (const k of Object.keys(v)) go(v[k], [...p, k], cat);
+    };
+    if (Array.isArray(json)) go(json, [], 'lang:umum');
+    else if (json && typeof json === 'object') for (const k of Object.keys(json)) go(json[k], [k], typeof json[k] === 'string' ? 'lang:umum' : `lang:${k}`);
+  } else if (base === 'System') {
     ['gameTitle', 'currencyUnit', 'game_title', 'currency_unit'].forEach((k) => add([k], 'field', 'system', json[k]));
     walk(json.terms, ['terms']);
     (ace ? SYS_LISTS_ACE : SYS_LISTS).forEach((k) => Array.isArray(json[k]) && walk(json[k], [k]));
@@ -1197,7 +1221,13 @@ function fixAceCmds(v) {
  * @param {{path:string,text:string}[]} files origFiles
  * @returns {{ok:boolean, empty?:boolean, problems:string[], files:{name:string,data:Uint8Array}[], report:string, stat:object}}
  */
-export function buildPatch(files, entries, { model = '', date = new Date(), wrap = null, notes = [], allow = null } = {}) {
+/** Format ulang JSON file bahasa mengikuti file asli: indentasi (spasi/tab) dan akhir baris CRLF. */
+function fmtLang(work, orig) {
+  const m = /\n([ \t]+)\S/.exec(orig), ind = m ? (m[1][0] === '\t' ? '\t' : m[1].length) : 0;
+  const s = JSON.stringify(work, null, ind || undefined);
+  return /\r\n/.test(orig) ? s.replace(/\n/g, '\r\n') : s;
+}
+export function buildPatch(files, entries, { model = '', date = new Date(), wrap = null, notes = [], allow = null, bom = null } = {}) {
   const byFile = new Map(), out = [], problems = [], warnings = [], badAll = [], stat = { files: 0, applied: 0, pending: 0, error: 0, skipped: 0, wrapped: 0, long: 0, mismatch: 0 };
   for (const e of entries) {
     if (!byFile.has(e.file)) byFile.set(e.file, []); byFile.get(e.file).push(e);
@@ -1221,7 +1251,7 @@ export function buildPatch(files, entries, { model = '', date = new Date(), wrap
     }
     stat.wrapped += st.wrapped; stat.long += st.long;
     if (!use.length) continue;
-    const text = isPl ? buildPluginsJs(pj, work) : JSON.stringify(work); let re = null;
+    const lang = LANG_PATH.test(f.path), text = isPl ? buildPluginsJs(pj, work) : lang ? fmtLang(work, f.text) : JSON.stringify(work); let re = null;
     try { re = isPl ? parsePluginsJs(text)?.arr : JSON.parse(text); if (!re) throw new Error('x'); } catch { pr.push(`${f.path}: hasil tidak bisa dibaca ulang`); }
     if (!pr.length) pr.push(...diffGuard(orig, re, f.path, allow));
     let data = null;
@@ -1232,7 +1262,7 @@ export function buildPatch(files, entries, { model = '', date = new Date(), wrap
       } catch (e) { pr.push(`${f.path}: gagal menulis rvdata2 (${e.message})`); }
     }
     if (pr.length) { problems.push(...pr); continue; }
-    out.push({ name: f.path, data: data || new TextEncoder().encode(text) }); stat.files++; stat.applied += use.length;
+    out.push({ name: f.path, data: data || new TextEncoder().encode((lang && bom?.[f.path] ? '\uFEFF' : '') + text) }); stat.files++; stat.applied += use.length;
   }
   const report = ['RPG Maker Translator - patch-report', `Tanggal: ${date.toISOString()}`, `Model: ${model}`, ...notes, `File diubah: ${stat.files}`, `Teks diterapkan: ${stat.applied}`, `Teks dipecah ulang agar muat: ${stat.wrapped}`, `Deskripsi/profil lebih dari 2 baris (mungkin terpotong di game): ${stat.long}`,
     `Belum diterjemahkan (tetap asli): ${stat.pending}`, `Error (tetap asli): ${stat.error}`, `Dilewati: ${stat.skipped}`, `Posisi tidak cocok dengan file asli (tetap asli): ${stat.mismatch}`, ...(warnings.length ? ['', ...warnings.slice(0, 50), ...(warnings.length > 50 ? [`...dan ${warnings.length - 50} lainnya`] : [])] : []), '', ...out.map((x) => x.name)].join('\n');
@@ -1241,9 +1271,9 @@ export function buildPatch(files, entries, { model = '', date = new Date(), wrap
 /** Ekspor proyek: JSON asli + terjemahan, lolos diff guard, lalu zip. Bila gagal, tidak ada zip. */
 export async function exportProject(project, model = '', wrap = null) {
   const plug = project.msgPlugins?.length ? project.msgPlugins : null;
-  if (plug) wrap = null;
+  if (plug || project.langFile) wrap = null;
   const files = await dbPrefix('origFiles', project.id + ':'), entries = await dbQuery('entries', 'projectId', project.id);
-  const r = buildPatch(files, entries, { model, wrap, allow: project.allow, notes: plug ? [`Plugin message terdeteksi (${plug.join(', ')}): pemecahan baris otomatis dimatikan. Cek hasil di game.`] : [] });
+  const r = buildPatch(files, entries, { model, wrap, allow: project.allow, bom: project.bom, notes: plug ? [`Plugin message terdeteksi (${plug.join(', ')}): pemecahan baris otomatis dimatikan. Cek hasil di game.`] : project.langFile ? ['File bahasa: salin hasilnya ke folder languages game. Nama file boleh diganti sesuai bahasa yang dipilih di menu game (backup dulu).'] : [] });
   if (!r.ok) return r;
   return { ...r, blob: await writeZip([...r.files, { name: 'patch-report.txt', data: new TextEncoder().encode(r.report) }]) };
 }
@@ -1305,6 +1335,44 @@ export async function restoreBackup(file, { overwrite = false } = {}) {
   await dbPut('settings', { key: 'current', value: id });
   return { project, done: doneCount(rows), settings: m.settings && typeof m.settings === 'object' ? m.settings : {} };
 }
+/**
+ * Bangun proyek dari file bahasa JSON (tanpa IndexedDB, agar bisa diuji). Kunci dan struktur tidak diubah; hanya nilai teks yang jadi entri.
+ * @param {File[]} files file .json (mis. languages/en.json)
+ */
+export async function buildLangProject(files, src = 'en', onProgress = () => {}) {
+  const id = 'p' + Date.now().toString(36), orig = [], entries = [], broken = [], counts = {}, bom = {}, langSkip = {}, keySkip = { n: 0 };
+  let i = 0;
+  for (const f of files) {
+    const name = String(f.name || 'bahasa.json').replace(/[\\/]/g, '_'), path = 'languages/' + name;
+    onProgress(`Membaca ${name} (${++i} dari ${files.length})`, i - 1, files.length);
+    let text, json;
+    try {
+      const u8 = new Uint8Array(await f.arrayBuffer());
+      text = new TextDecoder('utf-8').decode(u8); // BOM dibuang saat decode; dicatat agar ekspor bisa memasangnya lagi
+      json = JSON.parse(text);
+      if (!json || typeof json !== 'object') throw new Error('x');
+      if (u8[0] === 0xef && u8[1] === 0xbb && u8[2] === 0xbf) bom[path] = true;
+    } catch { broken.push(name); continue; }
+    orig.push({ key: `${id}:${path}`, projectId: id, path, text });
+    for (const e of extractFile(path, json, { src, strict: true, stats: langSkip, skipKeys: true, skipped: keySkip })) {
+      e.projectId = id; e.hash = await sha256(e.original); entries.push(e);
+      counts[e.category] = (counts[e.category] || 0) + 1;
+      if (entries.length % 2000 === 0) { onProgress(`Membaca ${name}: ${entries.length} teks`, i - 1, files.length); await new Promise((r) => setTimeout(r)); }
+    }
+  }
+  if (!orig.length) throw new Error(UI.langBad);
+  const project = { id, engine: 'File bahasa', langFile: true, src, tgt: 'id', scriptsDiag: null, gaps: [], langSkip, msgPlugins: [], pluginsSeen: false, allow: parseAllow(''), paramNote: '', catV: 2, files: orig.length, broken, counts, total: entries.length, keySkipped: keySkip.n, bom, updatedAt: Date.now() };
+  return { project, orig, entries };
+}
+export async function importLangFiles(files, src = 'en', onProgress = () => {}) {
+  const { project, orig, entries } = await buildLangProject(files, src, onProgress);
+  onProgress(`Menyimpan ${entries.length} teks…`, files.length, files.length);
+  await dbPutMany('origFiles', orig);
+  await dbPutMany('entries', entries);
+  await dbPut('projects', project);
+  await dbPut('settings', { key: 'current', value: project.id });
+  return project;
+}
 /** Impor folder/zip: simpan JSON asli dan entries ke IndexedDB. */
 const engine_isAce = (e) => e === 'VX Ace';
 export async function importProject(files, src = 'ja', onProgress = () => {}, { allow: allowText = '' } = {}) {
@@ -1313,13 +1381,13 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
   const { engine: eng, data, plugins, scripts } = await collectSources(files);
   if (!data.size) throw new Error(UI.noData);
   const id = 'p' + Date.now().toString(36), orig = [], entries = [], broken = [], counts = {};
-  const gaps = new Map(), langSkip = {};
+  const gaps = new Map(), langSkip = {}, keySkip = { n: 0 };
   let sys = null, i = 0, msgPlugins = [], pluginsSeen = false, pluginsText = '';
   if (plugins) try { pluginsText = await plugins.read(); msgPlugins = detectMessagePlugins(pluginsText); pluginsSeen = true; } catch { /* plugins.js tidak terbaca */ }
   const ingest = async (path, json, text) => {
     orig.push({ key: `${id}:${path}`, projectId: id, path, text });
     const covered = new Set();
-    for (const e of extractFile(path, json, { src, allow, strict: true, stats: langSkip })) {
+    for (const e of extractFile(path, json, { src, allow, strict: true, stats: langSkip, skipKeys: true, skipped: keySkip })) {
       e.projectId = id; e.hash = await sha256(e.original); entries.push(e);
       counts[e.category] = (counts[e.category] || 0) + 1;
       e.original.split('\n').forEach((l) => covered.add(l.trim())); if (e.meta?.speaker) covered.add(e.meta.speaker.trim());
@@ -1352,7 +1420,7 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
     else paramNote = pluginsText ? 'js/plugins.js tidak bisa dibaca (bukan array JSON murni), parameter plugin dilewati' : 'js/plugins.js tidak ikut dipilih, parameter plugin dilewati';
   }
   const engine = eng || (sys && (sys.advanced || sys.itemCategories) ? 'MZ' : 'MV');
-  const project = { id, engine, src, tgt: 'id', scriptsDiag, gaps: [...gaps].sort((a, b) => b[1].n - a[1].n).slice(0, 10), langSkip, msgPlugins, pluginsSeen, allow, paramNote, catV: 2, files: orig.length, broken, counts, total: entries.length, updatedAt: Date.now() };
+  const project = { id, engine, src, tgt: 'id', scriptsDiag, gaps: [...gaps].sort((a, b) => b[1].n - a[1].n).slice(0, 10), langSkip, msgPlugins, pluginsSeen, allow, paramNote, catV: 2, files: orig.length, broken, counts, total: entries.length, keySkipped: keySkip.n, updatedAt: Date.now() };
   onProgress(`Menyimpan ${entries.length} teks…`, data.size, data.size);
   await dbPutMany('origFiles', orig);
   await dbPutMany('entries', entries);
@@ -1551,6 +1619,14 @@ export function foreignWords(t) {
 }
 const foreignMsg = (t) => `Ada kata bahasa asing (Portugis/Spanyol) yang tertinggal: ${foreignWords(t).slice(0, 3).join(', ')}`;
 const TODO = new Set(['pending', 'error', 'translating']);
+/** Entri pending/error yang hanya berisi kunci atau kode ditandai skipped (tidak dikirim ke model, tetap asli di ekspor). Mengubah `entries` di tempat. */
+export async function skipKeyOnly(entries) {
+  const hit = entries.filter((e) => TODO.has(e.status) && keyOnly(e.original));
+  if (!hit.length) return 0;
+  hit.forEach((e) => { e.status = 'skipped'; e.translation = ''; e.error = ''; });
+  await dbPutMany('entries', hit);
+  return hit.length;
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const abortErr = () => Object.assign(new Error('Aborted'), { name: 'AbortError' });
 /** Tidur yang langsung berhenti bila signal dibatalkan (tombol Berhenti tidak menunggu jeda). */
@@ -1801,6 +1877,7 @@ export function estimateCost(entries, cfg0, src = 'ja') {
 export async function runTranslation(project, cfg, o = {}) {
   const { signal, onProgress = () => {}, base = 0 } = o, ids = o.ids ? new Set(o.ids) : null, chat = o.chat || ((m, s) => llmChat(cfg, m, s));
   const all = (await dbQuery('entries', 'projectId', project.id)).sort((a, b) => a.id - b.id);
+  await skipKeyOnly(all);
   const cats = Array.isArray(o.cats) ? new Set(o.cats) : null; // null = semua kategori
   const pos = new Map(all.map((e, i) => [e.id, i])), todo = all.filter((e) => TODO.has(e.status) && (!cats || cats.has(e.category)) && (!ids || ids.has(e.id)));
   const stat = { done: 0, error: 0, cached: 0, tokensIn: 0, tokensOut: 0, stopped: false, expOut: 0, nb: 0 };
@@ -2109,10 +2186,27 @@ async function viewProyek() {
       pick('Folder data', 'Hasil ekstrak MV, MZ, atau VX Ace', { webkitdirectory: '', multiple: '' }),
       pick('File zip game', 'Zip yang berisi folder data', { accept: '.zip' }),
       pick('Game.rgss3a', 'Arsip terenkripsi VX Ace', {})), bar, msg);
-  const out = [box];
+  const lmsg = h('p', { class: 'mut' }), lbar = h('progress', { value: '0', max: '1', hidden: '' });
+  const runLang = async (ev) => {
+    const files = [...ev.target.files]; ev.target.value = '';
+    if (!files.length || busy) return;
+    busy = true; lbar.hidden = false; lbar.removeAttribute('value'); lmsg.className = 'mut'; lmsg.textContent = 'Mengimpor…';
+    try {
+      const p = await importLangFiles(files, src, (t, d, n) => { lmsg.textContent = t; if (n) { lbar.max = n; lbar.value = d; } else lbar.removeAttribute('value'); });
+      storageStatus(true).catch(() => {});
+      importNote = p.total
+        ? { text: `Impor selesai. ${p.total} teks dari ${p.files} file bahasa${p.keySkipped ? `, ${p.keySkipped} entri hanya-kunci dilewati` : ''}${p.broken.length ? `, ${p.broken.length} file rusak dilewati` : ''}. Lanjut ke tab Translate` }
+        : { bad: true, text: UI.emptyImp };
+      busy = false; await render();
+    } catch (e) { busy = false; lbar.hidden = true; lmsg.className = 'err'; lmsg.textContent = e.message; }
+  };
+  const langCard = card(h('h2', {}, 'Impor file bahasa'),
+    h('p', { class: 'mut' }, 'Untuk game yang menyimpan dialog di file bahasa (mis. languages/en.json) dan di event hanya ada kunci seperti #{Scenario.Msg1}. Kunci dan struktur tidak diubah, hanya teksnya. Jadi proyek baru. Bahasa sumber memakai pilihan di atas (pilih Inggris untuk en.json).'),
+    h('div', { class: 'picks' }, pickRow('File bahasa JSON', 'Berkas .json bertingkat atau datar (kunci: teks)', { accept: '.json,application/json', multiple: '' }, runLang)), lbar, lmsg);
+  const out = [box, langCard];
   const p = await currentProject();
   if (p) out.push(card(h('h2', {}, 'Ringkasan'),
-    kv(`Engine: ${p.engine}\nSumber: ${srcLabel(p.src)}\nFile data: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\nPlugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan)` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`),
+    kv(`Engine: ${p.engine}\nSumber: ${srcLabel(p.src)}\nFile data: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\n${p.langFile ? `Jenis: file bahasa (kunci dan struktur tetap)\nDilewati (hanya kunci/kode): ${p.keySkipped || 0}` : `Plugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan)` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`}`),
     p.paramNote ? h('p', { class: 'err' }, p.paramNote) : '',
     h('details', { class: 'fold-in', ...((uiGet('diag', (p.scriptsDiag?.hits || p.scriptsDiag?.error || p.gaps?.length) ? '1' : '0') === '1') ? { open: '' } : {}), ontoggle: (e) => uiSet('diag', e.currentTarget.open ? '1' : '0') },
       h('summary', {}, (p.scriptsDiag?.hits || p.scriptsDiag?.error || p.gaps?.length) ? 'Diagnostik impor (ada temuan)' : 'Diagnostik impor'),
@@ -2234,6 +2328,7 @@ async function viewTranslate() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
   const cfg = await loadConfig(), all = await dbQuery('entries', 'projectId', p.id);
+  await skipKeyOnly(all);
   // Kategori yang masih punya teks belum diterjemahkan (pending/error). Default: semua kecuali komentar/skrip.
   const todoBy = syncCatSel(p, all);
   const cnt = (s) => all.filter((e) => e.status === s).length;
@@ -2654,6 +2749,7 @@ async function viewEkspor() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
   const cfg = await loadConfig(), rows = await dbQuery('entries', 'projectId', p.id);
+  await skipKeyOnly(rows);
   const n = (f) => rows.filter(f).length, out = h('div');
   const ready = n((e) => (e.status === 'done' || e.status === 'edited') && e.translation.trim()), pend = n((e) => e.status === 'pending' || e.status === 'translating'), err = n((e) => e.status === 'error');
   const rgMsg = h('p', { class: 'mut' }), rgOut = h('div');
@@ -2708,7 +2804,8 @@ async function viewEkspor() {
   const prepare = async () => {
     chatUrls.forEach((u) => URL.revokeObjectURL(u)); chatUrls = [];
     // Pakai pilihan kategori dari tab Translate (kalau sudah dibuka); teks yang sudah selesai tidak terpengaruh.
-    const allEntries = await dbQuery('entries', 'projectId', p.id), sel = catSel.pid === p.id && catSel.set ? catSel.set : null;
+    const allEntries = await dbQuery('entries', 'projectId', p.id); await skipKeyOnly(allEntries);
+    const sel = catSel.pid === p.id && catSel.set ? catSel.set : null;
     const parts = buildChatParts(p, sel ? allEntries.filter((e) => !TODO.has(e.status) || sel.has(e.category)) : allEntries, await loadConfig(), Number(perPart.value) || 150, Number(perChars.value) || 6000);
     chatMsg.className = 'mut'; chatMsg.textContent = '';
     if (!parts.length) { chatOut.replaceChildren(h('p', { class: 'mut' }, todoBy.size && !catSel.set.size ? 'Pilih minimal satu kategori dulu.' : 'Tidak ada teks yang belum selesai.')); return; }
