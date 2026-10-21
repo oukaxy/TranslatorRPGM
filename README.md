@@ -75,6 +75,7 @@ Navigasi memakai empat tab di bawah layar, dengan Pengaturan di pojok kanan atas
 | Atur kecepatan otomatis | Ukuran batch dan konkurensi diatur sendiri | aktif |
 | Ukuran batch, batas karakter, konkurensi, jeda | Dipakai bila mode otomatis dimatikan | 30, 4000, 4, 100 ms |
 | Batas waktu per request | Dalam detik | `120` |
+| Batas token keluar | Dikirim sebagai `max_tokens`. `0` = otomatis (dihitung dari ukuran batch, 6.000 sampai 20.000). Bila Body tambahan sudah memuat `max_tokens` atau `max_completion_tokens`, nilai itu yang dipakai | `0` |
 | Lebar baris maks | Dengan face dan tanpa face (0 = mati) | 38 dan 48 |
 | Harga token masuk/keluar | Per 1 juta token, untuk perkiraan biaya | 0 |
 | Matikan mode berpikir | Khusus OpenRouter, agar lebih cepat | mati |
@@ -144,6 +145,7 @@ Menerjemahkan teks game berarti harus menjaga kode di dalamnya agar game tidak r
 - **Validasi token**: terjemahan ditolak bila token hilang, berubah, atau model menulis kode sendiri.
 - **Deteksi kata kunci kode**: kata seperti `if`, `else`, atau `true` yang hilang atau ikut diterjemahkan akan ditandai.
 - **Deteksi teks setengah terjemah**: hasil yang masih bercampur huruf Jepang atau aksara asing ditandai error.
+- **Batas token keluar**: setiap request membawa `max_tokens` agar model penalar (mis. MiniMax) tidak berpikir atau mengulang tanpa henti. Jawaban yang terpotong (`finish_reason: length`) tidak dipakai; batch dipecah dua dan dicoba lagi, sedangkan token yang terpakai tetap dihitung di ringkasan.
 - **Diff guard saat ekspor**: file hasil dibandingkan dengan file asli. Bila ada perubahan di luar teks, tidak ada zip yang dibuat. Entri yang posisinya tidak cocok dilewati dan tetap asli.
 - **Verifikasi `.rvdata2`**: hasil penulisan ulang format Marshal dibaca balik dan dibandingkan dengan data yang diterjemahkan.
 

@@ -22,6 +22,7 @@ export const UI = {
   codeAdded: 'AI menulis kode game sendiri (bukan token). Coba terjemahkan ulang',
   codeWord: 'Kata kunci kode (if, else, true, dll) hilang atau diterjemahkan. Coba terjemahkan ulang',
   timeout: 'Provider terlalu lama menjawab. Coba lagi atau naikkan batas waktu di Pengaturan',
+  tooLong: 'Jawaban model terpotong karena kena batas token (kemungkinan berpikir terlalu panjang atau mengulang). Teks ini dilewati; coba terjemahkan ulang, kecilkan ukuran batch, atau naikkan batas token di Pengaturan',
   tooMany: 'Tiga batch gagal berturut-turut. Periksa Pengaturan atau koneksi, lalu lanjutkan',
   exportEmpty: 'Belum ada terjemahan yang bisa diekspor. Terjemahkan dulu di tab Translate',
   urlBad: 'Base URL harus memakai https. Untuk lokal pakai localhost',
@@ -1535,7 +1536,7 @@ export function applyChatRows(entries, rows) {
 // ===== 5. TRANSLATE (batch, cache, retry, resume, klien LLM, biaya) =====
 export const DEFAULT_CONFIG = {
   baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', remember: false, model: 'google/gemini-2.5-flash',
-  temperature: 0.3, batchSize: 30, maxChars: 4000, concurrency: 4, delay: 100, priceIn: 0, priceOut: 0,
+  temperature: 0.3, maxTokens: 0, batchSize: 30, maxChars: 4000, concurrency: 4, delay: 100, priceIn: 0, priceOut: 0,
   fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '', timeout: 120, extraBody: '', auto: true,
 };
 const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian', all: 'any language (each item may be Japanese, English, Indonesian, Korean, etc.; if an item is already entirely clean Indonesian, return it unchanged; if it mixes Indonesian with other languages or has typos, rewrite it as clean Indonesian)', auto: 'Japanese or English (each item may be in either language; if an item is already entirely clean Indonesian, return it unchanged; if it mixes Indonesian with other languages or has typos, rewrite it as clean Indonesian)' };
@@ -1562,7 +1563,7 @@ let memKey = '';
 
 /** Galat dari klien LLM. fatal=true berarti retry tidak berguna. */
 export class LlmError extends Error {
-  constructor(msg, { status = 0, fatal = false, retryAfter = null, split = false, noRetry = false } = {}) { super(msg); this.name = 'LlmError'; this.status = status; this.fatal = fatal; this.retryAfter = retryAfter; this.split = split; this.noRetry = noRetry; }
+  constructor(msg, { status = 0, fatal = false, retryAfter = null, split = false, noRetry = false, usage = null } = {}) { super(msg); this.usage = usage; this.name = 'LlmError'; this.status = status; this.fatal = fatal; this.retryAfter = retryAfter; this.split = split; this.noRetry = noRetry; }
 }
 /** Baca pengaturan. Bila "ingat key" mati, key hanya ada di memori tab ini. */
 export async function loadConfig() {
@@ -1596,6 +1597,12 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
     catch { throw new LlmError('Body tambahan di Pengaturan bukan objek JSON yang valid', { fatal: true }); }
     delete extra.model; delete extra.messages;
   }
+  // Batas token keluar: mencegah model penalar berpikir/mengulang tanpa henti (dan tagihan membengkak).
+  // Otomatis dari panjang pesan pengguna (teks batch) ditambah ruang berpikir; diisi manual lewat pengaturan atau Body tambahan.
+  const lastLen = String(messages[messages.length - 1]?.content || '').length;
+  const autoCap = Math.min(20000, Math.max(6000, Math.ceil(lastLen / 1.5) + 4000));
+  const capTok = Number(cfg.maxTokens) > 0 ? Math.round(Number(cfg.maxTokens)) : autoCap;
+  const capFromExtra = 'max_tokens' in extra || 'max_completion_tokens' in extra;
   // Batas waktu per request; pembatalan dari pengguna tetap diteruskan.
   const ctl = new AbortController(); let timedOut = false;
   const onAbort = () => ctl.abort();
@@ -1606,7 +1613,7 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
     try {
       res = await fetchFn(cfg.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
         method: 'POST', signal: ctl.signal, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
-        body: JSON.stringify({ model: cfg.model, temperature: cfg.temperature, messages, ...(cfg.fast && /(^|\.)openrouter\.ai$/.test(new URL(cfg.baseUrl).hostname) ? { reasoning: { enabled: false } } : {}), ...extra }),
+        body: JSON.stringify({ model: cfg.model, temperature: cfg.temperature, messages, ...(capFromExtra ? {} : { max_tokens: capTok }), ...(cfg.fast && /(^|\.)openrouter\.ai$/.test(new URL(cfg.baseUrl).hostname) ? { reasoning: { enabled: false } } : {}), ...extra }),
       });
     } catch (e) {
       if (e.name === 'AbortError') { if (timedOut) throw new LlmError(UI.timeout); throw e; }
@@ -1624,6 +1631,8 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
       throw new LlmError(`Provider menolak permintaan (${s}). ${d || (fatal ? 'Periksa model di Pengaturan' : 'Coba lagi nanti')}`.trim(), { status: s, fatal, retryAfter, split, noRetry: split });
     }
     const j = await res.json().catch((e) => { if (timedOut) throw new LlmError(UI.timeout); return null; }), content = j?.choices?.[0]?.message?.content;
+    // Terpotong karena batas token: jangan dipakai. Batch dipecah (split) agar yang ngaco terisolasi; token yang terpakai tetap dihitung.
+    if (j?.choices?.[0]?.finish_reason === 'length') throw new LlmError(UI.tooLong, { split: true, noRetry: true, usage: j.usage || null });
     let text = content;
     if (typeof text !== 'string') throw new LlmError(UI.badResp);
     // Model penalar (mis. MiniMax) menaruh proses berpikir di <think>…</think>; buang supaya JSON balasan terbaca.
@@ -1697,6 +1706,7 @@ export async function translateBatch(units, o, why = new Map()) {
     o.onUsage?.(r.usage); arr = toArray(parseJsonLoose(r.text));
   } catch (e) {
     if (e.fatal || e.name === 'AbortError') throw e;
+    if (e.usage) o.onUsage?.(e.usage);
     // Error karena isi batch (400/413/422): pecah dua untuk mengisolasi teks bermasalah, dengan batas jumlah pecahan per batch.
     if (e.split && units.length > 1 && (o.budget ??= { left: 12 }).left-- > 0) {
       const h2 = units.length >> 1;
@@ -1797,7 +1807,7 @@ export async function runTranslation(project, cfg, o = {}) {
   const auto = cfg.auto !== false, eff = auto ? autoTune(todo, cfg) : cfg;
   // Jumlah batch yang berjalan bersamaan: mulai 6, turun saat provider membatasi, naik tiap 4 batch lancar (sampai batas konkurensi).
   const lim = { cur: auto ? Math.min(eff.concurrency, 6) : eff.concurrency, max: eff.concurrency, active: 0, okRun: 0 };
-  let n = 0; const tick = (t) => onProgress(n + base, todo.length + base, (stat.tokensIn ? `${t} · token masuk ${stat.tokensIn}, keluar ${stat.tokensOut}` : t) + (stat.nb >= 3 && stat.tokensOut > stat.expOut * 2.5 ? ' · Token keluar jauh di atas wajar: model mungkin memakai mode berpikir (lihat Body tambahan di Pengaturan)' : ''));
+  let n = 0; const tick = (t) => onProgress(n + base, todo.length + base, (stat.tokensIn ? `${t} · token masuk ${stat.tokensIn}, keluar ${stat.tokensOut}` : t) + (stat.nb >= 3 && stat.tokensOut > stat.expOut * 2.5 ? ' · Token keluar jauh di atas wajar: model memakai mode berpikir. Batas token otomatis menahan lonjakan; atur manual di Pengaturan bila perlu' : ''));
   const groups = new Map();
   for (const e of todo) { if (!groups.has(e.original)) groups.set(e.original, []); groups.get(e.original).push(e); }
   const units = [], hits = [], gl = parseGlossary(cfg.glossary), cn = parseNotes(cfg.charNotes); let uid = 0;
@@ -2302,7 +2312,7 @@ async function viewTranslate() {
 const FIELDS = [
   ['baseUrl', 'Base URL', 'url'], ['apiKey', 'API key', 'password'], ['model', 'Model', 'text'], ['extraBody', 'Body tambahan JSON (opsional)', 'text'], ['temperature', 'Temperature (0 sampai 2)', 'number'],
   ['batchSize', 'Ukuran batch (teks)', 'number'], ['maxChars', 'Batas karakter per batch', 'number'], ['concurrency', 'Konkurensi maks (1 sampai 12)', 'number'],
-  ['delay', 'Jeda antar request (ms)', 'number'], ['timeout', 'Batas waktu per request (detik)', 'number'], ['wrapWidth', 'Lebar baris maks tanpa face (0 = mati)', 'number'], ['wrapFace', 'Lebar baris maks dengan face', 'number'], ['priceIn', 'Harga token masuk per 1 juta', 'number'], ['priceOut', 'Harga token keluar per 1 juta', 'number'],
+  ['delay', 'Jeda antar request (ms)', 'number'], ['timeout', 'Batas waktu per request (detik)', 'number'], ['maxTokens', 'Batas token keluar per request (0 = otomatis)', 'number'], ['wrapWidth', 'Lebar baris maks tanpa face (0 = mati)', 'number'], ['wrapFace', 'Lebar baris maks dengan face', 'number'], ['priceIn', 'Harga token masuk per 1 juta', 'number'], ['priceOut', 'Harga token keluar per 1 juta', 'number'],
 ];
 async function viewSettings() {
   const c = await loadConfig(), msg = h('p', { class: 'mut' }), inp = {};
@@ -2320,7 +2330,7 @@ async function viewSettings() {
   const gather = () => ({
     baseUrl: inp.baseUrl.value.trim(), apiKey: inp.apiKey.value.trim(), remember: remember.checked, model: inp.model.value.trim() || DEFAULT_CONFIG.model, extraBody: inp.extraBody.value.trim(),
     temperature: num('temperature', 0, 2), batchSize: Math.round(num('batchSize', 1, 100)), maxChars: Math.round(num('maxChars', 500, 12000)),
-    concurrency: Math.round(num('concurrency', 1, 12)), delay: Math.round(num('delay', 0, 10000)), timeout: Math.round(num('timeout', 10, 600)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), fast: fast.checked, auto: autoCb.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
+    concurrency: Math.round(num('concurrency', 1, 12)), delay: Math.round(num('delay', 0, 10000)), timeout: Math.round(num('timeout', 10, 600)), maxTokens: Math.round(num('maxTokens', 0, 200000)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), fast: fast.checked, auto: autoCb.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
   });
   const wipeBtn = h('button', { class: 'danger', disabled: '', onclick: async () => { try { await resetAll((m) => say(m, true)); location.hash = '#/proyek'; location.reload(); } catch (e) { say(e.message, true); } } }, 'Hapus semua data');
   const wipe = h('input', { type: 'text', placeholder: 'HAPUS', autocomplete: 'off', oninput: (e) => { wipeBtn.disabled = e.target.value !== 'HAPUS'; } });
