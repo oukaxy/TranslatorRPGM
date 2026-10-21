@@ -211,3 +211,10 @@ FOREIGN_MORE.forEach((w) => { if (!ID_W.has(w) && !ID_X.has(w) && !EN_W.has(w) &
 words(`although though crave craves craved craving yearning yearn swell swells swelling needy arousal aroused ceased cease forced satisfy
 desperate desperately within beneath against whilst while until unless however therefore moaning trembling shivering throbbing
 `).forEach((w) => { if (!ID_W.has(w) && !ID_X.has(w) && !EN_SKIP.has(w)) EN_W.add(w); });
+
+// Tambahan kata Inggris umum yang belum ada di kamus (hasil uji cakupan). Kata yang juga dipakai orang Indonesia (mis. share) sengaja tidak dimasukkan.
+words(`become best better body came care clean dear early far food glad gone happen human hurt idea important join late mean number pretty
+quiet seem serious show silent stand step stupid wear wonder lust desire pleasure orgasm climax cumming sweaty thrusts thrusting grind
+grinding rub rubbing squeeze squeezing slap spank spanking tied bound helpless struggle struggling resisting beg begging pleading
+whimper whimpers squirm squirms excited erect erection pulsing releasing pregnant breeding womb roughly greedily shamelessly lewd lewdly slut whore
+`).forEach((w) => { if (!ID_W.has(w) && !ID_X.has(w) && !EN_SKIP.has(w)) EN_W.add(w); });

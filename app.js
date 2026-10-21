@@ -1594,7 +1594,7 @@ export function applyChatRows(entries, rows) {
     if (!t) { out.empty.push(r.id); continue; }
     const mk = maskText(e0.original), u = unmaskText(t, mk.tokens);
     if (!u.ok || codeProblem(mk.text.replace(/\r?\n/g, '\n'), t)) { out.badToken.push(r.id); continue; }
-    if (foreignWords(t, e0.original).length) { out.foreign.push(r.id); continue; }
+    if (stray(t) || foreignWords(t, e0.original).length) { out.foreign.push(r.id); continue; }
     seen.add(e0.original); out.texts++;
     for (const e of byOrig.get(e0.original)) if (TODO.has(e.status)) out.updates.push({ ...e, translation: lead + u.text + trail, status: 'done', error: '' });
   }
@@ -1832,7 +1832,7 @@ export function englishLeft(t, tgt = 'id') {
   return ws.length >= 3 || (ws.length >= 2 && enShare(t) >= 0.3) ? ws : [];
 }
 /** Serpihan aneh seperti "_OS" yang muncul di hasil tetapi tidak ada di teks asli. */
-export const garbled = (t, orig = '') => (String(t || '').match(/(?:^|\s)_[A-Za-z]{2,}/g) || []).map((x) => x.trim()).filter((x) => !String(orig).includes(x));
+export const garbled = (t, orig = '') => (String(t || '').match(/(?:^|\s)_[A-Za-z]{2,}|\b[A-Z]{5,}\b/g) || []).map((x) => x.trim()).filter((x) => !String(orig).includes(x));
 const langScore = (t, orig, tgt) => englishLeft(t, tgt).length + garbled(t, orig).length * 3;
 const ENG_MSG = 'Hasil masih bercampur kata Inggris atau serpihan aneh, bukan bahasa target penuh';
 /** Hasil yang masih bercampur Inggris/serpihan diterjemah ulang (maks 2 kali) dengan catatan; hasil yang lebih bersih dipakai, selain itu hasil awal tetap. */
@@ -1991,7 +1991,7 @@ export async function retranslateEntry(project, cfg, e, chat) {
   const u0 = { id: 0, text: m.text, speaker: e.meta?.speaker || '', limit: limitFor(e, effCfg(project, cfg)), terms, notes, must: termsFor(parseGlossary(cfg.glossary), e.original) };
   const o1 = {
     chat: call, src: project.src, tgt: project.tgt, context: [], style: cfg.style,
-    check: (id, t) => (t.trim() ? (unmaskText(t, m.tokens).ok ? (foreignWords(t, m.text).length ? foreignMsg(t, m.text) : codeProblem(m.text, t)) : UI.tokenBad) : UI.emptyTr),
+    check: (id, t) => (t.trim() ? (unmaskText(t, m.tokens).ok ? (stray(t) ? STRAY_MSG : foreignWords(t, m.text).length ? foreignMsg(t, m.text) : codeProblem(m.text, t)) : UI.tokenBad) : UI.emptyTr),
   };
   const r = await translateBatch([u0], o1); await glossFix([u0], r, o1); await langFix([u0], r, o1);
   if (!r.ok.size) throw new LlmError(r.fail.get(0) || UI.badJson);
