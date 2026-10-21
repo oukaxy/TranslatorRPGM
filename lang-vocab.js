@@ -218,3 +218,7 @@ quiet seem serious show silent stand step stupid wear wonder lust desire pleasur
 grinding rub rubbing squeeze squeezing slap spank spanking tied bound helpless struggle struggling resisting beg begging pleading
 whimper whimpers squirm squirms excited erect erection pulsing releasing pregnant breeding womb roughly greedily shamelessly lewd lewdly slut whore
 `).forEach((w) => { if (!ID_W.has(w) && !ID_X.has(w) && !EN_SKIP.has(w)) EN_W.add(w); });
+
+// Istilah yang lazim dibiarkan Inggris/serapan di lokalisasi game Indonesia: tidak dihitung sebagai "sisa Inggris" oleh pengecekan hasil.
+words(`mission quest party guild dungeon setting save point reward player shop coin energy health potion elixir music like follow streaming`)
+  .forEach((w) => EN_SKIP.add(w));
