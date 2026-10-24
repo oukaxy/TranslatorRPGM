@@ -1614,7 +1614,7 @@ export const DEFAULT_CONFIG = {
 const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian', all: 'any language (each item may be Japanese, English, Indonesian, Korean, etc.; if an item is already entirely clean Indonesian, return it unchanged; if it mixes Indonesian with other languages or has typos, rewrite it as clean Indonesian)', auto: 'Japanese or English (each item may be in either language; if an item is already entirely clean Indonesian, return it unchanged; if it mixes Indonesian with other languages or has typos, rewrite it as clean Indonesian)' };
 /** Hasil terjemahan yang masih memuat huruf Jepang/Mandarin, Cyrillic, Arab, atau Hangul: tanda terjemahan setengah jalan atau ngaco. */
 // U+30FB (・, titik tengah katakana) hanya tanda poin, bukan huruf Jepang: hasil yang mempertahankannya tidak boleh ditolak.
-export const stray = (t) => JA.test(String(t).replace(/\u30fb/g, '')) || /[\u0400-\u04FF\u0600-\u06FF\uAC00-\uD7AF]/.test(t);
+export const stray = (t) => JA.test(String(t).replace(/[\u30fb\u30fc\u30a0\u309b\u309c]/g, '')) || /[\u0400-\u04FF\u0600-\u06FF\uAC00-\uD7AF]/.test(t);
 const STRAY_MSG = 'Hasil masih bercampur huruf Jepang/asing, bukan bahasa target';
 /** Kata khas Portugis/Spanyol yang tertinggal di teks (kode escape diabaikan). Mengembalikan kata unik berhuruf kecil. */
 export function foreignWords(t, orig = '') {
