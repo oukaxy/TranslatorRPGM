@@ -195,7 +195,7 @@ Menerjemahkan teks game berarti harus menjaga kode di dalamnya agar game tidak r
 - **Masking kode escape**: kode seperti `\C[2]`, `\V[1]`, `\N[1]`, tag `<...>`, `%1`, dan `$game...` diganti token sebelum dikirim ke model, lalu dikembalikan setelahnya.
 - **Validasi token**: terjemahan ditolak bila token hilang, berubah, atau model menulis kode sendiri.
 - **Deteksi kata kunci kode**: kata seperti `if`, `else`, atau `true` yang hilang atau ikut diterjemahkan akan ditandai.
-- **Deteksi teks setengah terjemah**: hasil yang masih bercampur huruf Jepang atau aksara asing ditandai error.
+- **Deteksi teks setengah terjemah**: hasil yang masih bercampur huruf Jepang atau aksara asing ditandai error. Tanda poin `・` (titik tengah katakana) tidak dihitung sebagai huruf Jepang, jadi teks yang mempertahankannya tidak ditolak.
 - **Batas token keluar**: setiap request membawa `max_tokens` agar model penalar (mis. MiniMax) tidak berpikir atau mengulang tanpa henti. Jawaban yang terpotong (`finish_reason: length`) tidak dipakai; batch dipecah dua dan dicoba lagi, sedangkan token yang terpakai tetap dihitung di ringkasan.
 - **Diff guard saat ekspor**: file hasil dibandingkan dengan file asli. Bila ada perubahan di luar teks, tidak ada zip yang dibuat. Entri yang posisinya tidak cocok dilewati dan tetap asli.
 - **Verifikasi `.rvdata2`**: hasil penulisan ulang format Marshal dibaca balik dan dibandingkan dengan data yang diterjemahkan.
