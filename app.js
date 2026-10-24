@@ -1609,7 +1609,7 @@ export function applyChatRows(entries, rows) {
 export const DEFAULT_CONFIG = {
   baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', remember: false, model: 'google/gemini-2.5-flash',
   temperature: 0.3, maxTokens: 0, batchSize: 30, maxChars: 4000, concurrency: 4, delay: 100, priceIn: 0, priceOut: 0,
-  fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '', timeout: 120, extraBody: '', auto: true,
+  fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '', timeout: 120, extraBody: '', auto: true, fixRounds: 1,
 };
 const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian', all: 'any language (each item may be Japanese, English, Indonesian, Korean, etc.; if an item is already entirely clean Indonesian, return it unchanged; if it mixes Indonesian with other languages or has typos, rewrite it as clean Indonesian)', auto: 'Japanese or English (each item may be in either language; if an item is already entirely clean Indonesian, return it unchanged; if it mixes Indonesian with other languages or has typos, rewrite it as clean Indonesian)' };
 /** Hasil terjemahan yang masih memuat huruf Jepang/Mandarin, Cyrillic, Arab, atau Hangul: tanda terjemahan setengah jalan atau ngaco. */
@@ -1675,6 +1675,10 @@ export function parseRetryAfter(v) {
 }
 // Pengali batas token otomatis: naik sendiri kalau model penalar kehabisan token saat berpikir (dipakai ulang sampai halaman dimuat ulang).
 let capBoost = 1;
+// Model penalar di provider selain OpenRouter: kirim reasoning_effort rendah otomatis supaya tidak berpikir panjang.
+// Dilewati bila Body tambahan sudah mengatur reasoning/reasoning_effort. Bila provider menolak field-nya, dimatikan sampai halaman dimuat ulang.
+let noEffort = false;
+const REASONER = /gpt-oss|(^|[\/:_-])o[134](-|$)|deepseek-?r1|qwq|magistral|reasoner/i;
 export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
   if (!cfg.apiKey) throw new LlmError(UI.noKey, { fatal: true });
   if (!urlOk(cfg.baseUrl)) throw new LlmError(UI.urlBad, { fatal: true });
@@ -1690,6 +1694,7 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
   const autoCap = Math.min(16000, Math.round(Math.max(6000, Math.ceil(lastLen / 1.5) + 4000) * capBoost));
   const capTok = Number(cfg.maxTokens) > 0 ? Math.round(Number(cfg.maxTokens)) : autoCap;
   const capFromExtra = 'max_tokens' in extra || 'max_completion_tokens' in extra;
+  const sendEffort = !noEffort && REASONER.test(String(cfg.model || '')) && !/(^|\.)openrouter\.ai$/.test(new URL(cfg.baseUrl).hostname) && !('reasoning_effort' in extra) && !('reasoning' in extra);
   // Batas waktu per request; pembatalan dari pengguna tetap diteruskan.
   const ctl = new AbortController(); let timedOut = false;
   const onAbort = () => ctl.abort();
@@ -1700,7 +1705,7 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
     try {
       res = await fetchFn(cfg.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
         method: 'POST', signal: ctl.signal, headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
-        body: JSON.stringify({ model: cfg.model, temperature: cfg.temperature, messages, ...(capFromExtra ? {} : { max_tokens: capTok }), ...(cfg.fast && /(^|\.)openrouter\.ai$/.test(new URL(cfg.baseUrl).hostname) ? { reasoning: { enabled: false } } : {}), ...extra }),
+        body: JSON.stringify({ model: cfg.model, temperature: cfg.temperature, messages, ...(capFromExtra ? {} : { max_tokens: capTok }), ...(cfg.fast && /(^|\.)openrouter\.ai$/.test(new URL(cfg.baseUrl).hostname) ? { reasoning: { enabled: false } } : {}), ...(sendEffort ? { reasoning_effort: 'low' } : {}), ...extra }),
       });
     } catch (e) {
       if (e.name === 'AbortError') { if (timedOut) throw new LlmError(UI.timeout, { split: true, noRetry: true }); throw e; }
@@ -1711,6 +1716,7 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
       if (s === 401 || s === 403) { let d = ''; try { d = (await res.json())?.error?.message || ''; } catch { /* abaikan */ } throw new LlmError(`${UI.keyBad} (${s}${d ? ': ' + String(d).slice(0, 160) : ''})`, { status: s, fatal: true }); }
       if (s === 402) throw new LlmError(UI.credit, { status: s, fatal: true });
       let d = ''; try { d = (await res.json())?.error?.message || ''; } catch { /* abaikan */ }
+      if (sendEffort && s === 400 && /reasoning|effort/i.test(d)) { noEffort = true; throw new LlmError('Provider tidak menerima reasoning_effort; diulang tanpa field itu', { status: s, retryAfter: 0 }); }
       // 400/413/422: biasanya satu teks bermasalah (filter konten, terlalu panjang). Batch dipecah untuk mencari yang bermasalah.
       // Pesan soal model/key/kuota tetap fatal agar tidak memboroskan request.
       const split = ([400, 413, 422].includes(s) && !/model|api.?key|auth|credit|quota|billing|permission/i.test(d)) || [408, 504, 524].includes(s); // 408/504/524: request terlalu lama (provider memutus); batch dipecah, bukan diulang utuh
@@ -1826,6 +1832,7 @@ export async function translateBatch(units, o, why = new Map()) {
 const glossMiss = (u, t) => (u.must || []).filter(([, b]) => !String(t).toLowerCase().includes(b.toLowerCase()));
 /** Unit yang hasilnya melewatkan istilah glosarium diterjemah ulang sekali dengan catatan; hasil yang lebih baik dipakai, selain itu hasil awal tetap. */
 export async function glossFix(units, r, o) {
+  if (o.fixRounds === 0) return;
   const bad = units.filter((u) => r.ok.has(u.id) && glossMiss(u, r.ok.get(u.id)).length);
   if (!bad.length) return;
   const r2 = await translateBatch(bad.map((u) => ({ ...u, hint: `Your previous translation missed required glossary terms: ${glossMiss(u, r.ok.get(u.id)).map(([a, b]) => `${a} -> ${b}`).join('; ')}. Use them exactly.` })), o);
@@ -1861,7 +1868,7 @@ export function lenOff(t, orig) {
 /** Hasil yang masih bercampur Inggris/serpihan diterjemah ulang (maks 2 kali) dengan catatan; hasil yang lebih bersih dipakai, selain itu hasil awal tetap. */
 export async function langFix(units, r, o) {
   if (o.tgt === 'en') return;
-  for (let i = 0; i < 2; i++) {
+  for (let i = 0; i < (o.fixRounds ?? 2); i++) {
     const cur = units.filter((u) => r.ok.has(u.id) && langScore(r.ok.get(u.id), u.text, o.tgt) > 0);
     if (!cur.length) return;
     const r2 = await translateBatch(cur.map((u) => {
@@ -1939,9 +1946,11 @@ export async function runTranslation(project, cfg, o = {}) {
   // Status berjalan: kemajuan khusus proses ini (bukan seluruh proyek), waktu berjalan, dan jumlah batch aktif; disegarkan tiap detik.
   const tStart = Date.now(); let gateRef = null;
   const fmtDur = (ms) => { const s = Math.round(ms / 1000), hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60; return hh ? `${hh}j ${mm}m` : mm ? `${mm}m ${ss}d` : `${ss}d`; };
+  const act = new Map(); let bcount = 0;
   const prog = () => {
     const w = gateRef ? Math.max(gateRef.until - Date.now(), gateRef.pace) : 0, total = todo.length || 1;
-    return (w > 1500 ? `Menunggu limit provider (${Math.round(w / 1000)} dtk) · ` : '') + `${n} dari ${todo.length} teks (${Math.floor((n * 100) / total)}%) · berjalan ${fmtDur(Date.now() - tStart)} · ${lim.active} batch aktif`;
+    return (w > 1500 ? `Menunggu limit provider (${Math.round(w / 1000)} dtk) · ` : '') + `${n} dari ${todo.length} teks (${Math.floor((n * 100) / total)}%) · berjalan ${fmtDur(Date.now() - tStart)} · ${lim.active} batch aktif`
+      + (act.size ? '\n' + [...act].slice(0, 8).map(([k, b]) => `#${k}: ${b.n} teks, ${b.ph} ${fmtDur(Date.now() - b.t0)}`).join('\n') : '');
   };
   const groups = new Map();
   for (const e of todo) { if (!groups.has(e.original)) groups.set(e.original, []); groups.get(e.original).push(e); }
@@ -1983,6 +1992,7 @@ export async function runTranslation(project, cfg, o = {}) {
     const o2 = {
       chat: guarded, retry: { signal }, src: project.src, tgt: project.tgt, context: batch[0].ctx, style: cfg.style,
       check: (id, t) => (!t.trim() ? UI.emptyTr : !unmaskText(t, byId.get(id).tokens).ok ? UI.tokenBad : stray(t) ? STRAY_MSG : foreignWords(t, byId.get(id).text).length ? foreignMsg(t, byId.get(id).text) : codeProblem(byId.get(id).text, t) || (lenOff(t, byId.get(id).text) ? LEN_MSG : '') || (numDiff(byId.get(id).text, t) ? NUM_MSG : '')),
+      fixRounds: Math.max(0, Math.min(2, Number.isFinite(Number(cfg.fixRounds)) ? Math.round(Number(cfg.fixRounds)) : 1)),
       onUsage: (u) => { stat.tokensIn += u?.prompt_tokens || 0; stat.tokensOut += u?.completion_tokens || 0; },
     };
     // Simpan hasil valid sesegera mungkin (checkpoint) dan selamatkan bila proses dihentikan/gagal di tengah jalan.
@@ -1993,10 +2003,11 @@ export async function runTranslation(project, cfg, o = {}) {
       if (cache.length) { await dbPutMany('cache', cache); await dbPutMany('entries', upd); }
       return upd.length;
     };
-    let r; const early = new Set(); let earlyN = 0; // unit yang sudah disimpan dan dihitung di checkpoint, supaya angka progres naik lebih awal tanpa terhitung dua kali
+    let r; const early = new Set(); const st = act.get(batch.bn); if (st) st.ph = 'menerjemahkan'; let earlyN = 0; // unit yang sudah disimpan dan dihitung di checkpoint, supaya angka progres naik lebih awal tanpa terhitung dua kali
     try {
       r = await translateBatch(batch, o2);
       earlyN = await saveOk(r.ok); r.ok.forEach((_, id) => early.add(id)); n += earlyN; stat.done += earlyN; tick(prog());
+      if (st) st.ph = 'memeriksa';
       await glossFix(batch, r, o2); await langFix(batch, r, o2);
     } catch (e) {
       let c = 0; try { c = Math.max(0, (await saveOk(keep)) - earlyN); } catch { /* abaikan */ }
@@ -2019,8 +2030,8 @@ export async function runTranslation(project, cfg, o = {}) {
   };
   const work = async (batch) => {
     while (lim.active >= lim.cur) await sleepSig(150, signal);
-    lim.active++;
-    try { await run(batch); } finally { lim.active--; }
+    lim.active++; const bn = ++bcount; batch.bn = bn; act.set(bn, { n: batch.length, t0: Date.now(), ph: 'mulai' });
+    try { await run(batch); } finally { lim.active--; act.delete(bn); }
   };
   gateRef = gate; const iv = setInterval(() => tick(prog()), 1000);
   try { await runPool(makeBatches(units, eff.batchSize, eff.maxChars), eff.concurrency, eff.delay, signal, work); }
@@ -2206,6 +2217,7 @@ function backupCard(p) {
       if (backupUrl) URL.revokeObjectURL(backupUrl); backupUrl = URL.createObjectURL(blob);
       say(`Cadangan siap (${mb(blob.size)}). Simpan di tempat aman, mis. Google Drive. API key tidak ikut.`);
       res.replaceChildren(h('a', { class: 'file', href: backupUrl, download: `rpgtl-cadangan-${p.id}.zip` }, 'Unduh cadangan'));
+      uiSet(`bk:${p.id}:t`, String(Date.now())); uiSet(`bk:${p.id}:n`, String((await dbQuery('entries', 'projectId', p.id)).filter((e) => e.status === 'done' || e.status === 'edited').length));
     } catch (e) { say(e?.message || String(e), true); }
     b.disabled = false;
   } }, 'Buat cadangan');
@@ -2359,10 +2371,21 @@ async function viewProyek() {
   out.push(backupCard(p));
   return out;
 }
-const job = { running: false, ctl: null, value: 0, max: 1, text: '', err: false, ui: null };
+/** Pengingat cadangan di tab Translate: belum pernah, sudah >= 3 hari dengan kemajuan, atau kemajuan besar sejak cadangan terakhir. */
+function backupNag(p, doneN) {
+  const last = Number(uiGet(`bk:${p.id}:t`, '0')), lastN = Number(uiGet(`bk:${p.id}:n`, '0')), snooze = Number(uiGet(`bk:${p.id}:s`, '0'));
+  const days = (Date.now() - last) / 864e5, gained = doneN - lastN;
+  if (doneN < 50 || Date.now() < snooze || !(!last || (days >= 3 && gained >= 50) || gained >= 1000)) return '';
+  return card(h('h2', {}, 'Saatnya buat cadangan'),
+    h('p', { class: 'mut' }, !last ? `${doneN} teks sudah diterjemahkan dan belum pernah dicadangkan. Data hanya ada di browser ini dan bisa hilang.` : `Cadangan terakhir ${Math.floor(days)} hari lalu; sejak itu ada ${gained} teks baru. Data hanya ada di browser ini.`),
+    h('div', { class: 'row' },
+      h('button', { class: 'pri', onclick: () => { location.hash = '#/proyek'; } }, 'Buka tab Proyek'),
+      h('button', { onclick: () => { uiSet(`bk:${p.id}:s`, String(Date.now() + 864e5)); render(); } }, 'Ingatkan besok')));
+}
+const job = { running: false, ctl: null, value: 0, max: 1, text: '', err: false, ui: null, warn: '' };
 const paintJob = (force) => {
   const u = job.ui; if (!u || !(force || u.bar.isConnected)) return;
-  u.bar.max = job.max; u.bar.value = job.value; u.txt.textContent = job.text; u.txt.className = job.err ? 'err' : 'mut';
+  u.bar.max = job.max; u.bar.value = job.value; u.txt.style.whiteSpace = 'pre-line'; u.txt.textContent = job.text + (job.warn ? '\n⚠ ' + job.warn : ''); u.txt.className = job.err ? 'err' : 'mut';
   u.start.disabled = job.running; u.stop.disabled = !job.running;
 };
 // Kategori yang dipilih untuk diterjemahkan (tab Translate). Disimpan per proyek selama halaman terbuka.
@@ -2385,18 +2408,35 @@ async function startJob(opts = {}) {
   if (cats && !cats.length) { job.err = true; job.text = 'Pilih minimal satu kategori dulu'; return paintJob(); }
   const before = await dbQuery('entries', 'projectId', p.id), base = ids ? 0 : before.filter((e) => e.status === 'done' || e.status === 'edited').length;
   job.running = true; job.ctl = new AbortController(); job.value = 0; job.max = before.filter((e) => TODO.has(e.status) && (!cats || cats.includes(e.category)) && (!ids || ids.has(e.id))).length || 1; job.text = 'Memulai…'; paintJob();
-  let lock = null; try { lock = await navigator.wakeLock?.request('screen'); } catch { /* layar tetap boleh mati */ }
+  let lock = null, hiddenAt = 0; job.warn = navigator.wakeLock ? '' : 'Browser ini tidak punya penjaga layar. Matikan kunci layar otomatis di HP dan biarkan app tetap di depan.';
+  const getLock = async () => { try { lock = await navigator.wakeLock?.request('screen'); } catch { /* layar tetap boleh mati */ } };
+  await getLock();
+  const onVis = async () => {
+    if (document.hidden) { hiddenAt = Date.now(); return; }
+    if (hiddenAt) { const sec = Math.round((Date.now() - hiddenAt) / 1000); hiddenAt = 0; if (sec >= 5) job.warn = `App sempat di latar belakang ${sec} detik. Request yang tertunda bisa gagal dan diulang otomatis. Biarkan layar menyala dan app tetap di depan.`; }
+    await getLock(); paintJob();
+  };
+  const onLeave = (e) => { e.preventDefault(); e.returnValue = ''; };
+  document.addEventListener('visibilitychange', onVis); addEventListener('beforeunload', onLeave);
   try {
-    let t0 = Date.now(), d0 = null;
+    let t0 = Date.now(), d0 = null; const smp = [];
     const r = await runTranslation(p, cfg, { signal: job.ctl.signal, base, cats, ids, onProgress: (d, t, txt) => {
       if (d0 === null) { d0 = d; t0 = Date.now(); }
+      // ETA dari kecepatan penyelesaian batch (jendela 5 menit terakhir), bukan dari awal proses.
+      const now = Date.now(); if (!smp.length || smp[smp.length - 1][1] !== d) smp.push([now, d]);
+      while (smp.length > 2 && now - smp[0][0] > 300000) smp.shift();
       let eta = '';
-      if (d > d0 && d < t) { const sec = ((t - d) * (Date.now() - t0)) / 1000 / (d - d0); eta = ` · sisa ±${sec >= 90 ? Math.round(sec / 60) + ' menit' : Math.round(sec) + ' detik'}`; }
+      if (d < t) {
+        const a = smp[0], b = smp[smp.length - 1];
+        if (smp.length >= 3 && b[0] - a[0] >= 15000 && b[1] > a[1]) { const sec = (t - d) / ((b[1] - a[1]) / ((b[0] - a[0]) / 1000)); eta = ` · sisa ±${sec >= 90 ? Math.round(sec / 60) + ' menit' : Math.round(sec) + ' detik'}`; }
+        else if (d > d0) eta = ' · menghitung sisa waktu…';
+      }
       job.value = d - base; job.max = (t - base) || 1; job.text = txt + eta; paintJob();
     } });
     job.text = !r.done && !r.error && !r.stopped ? UI.nothing
       : `${r.stopped ? 'Dihentikan' : 'Selesai'}. ${r.done} berhasil (${r.cached} dari cache), ${r.error} error${r.error ? '. Lihat di tab Review, filter Error' : ''}`;
   } catch (e) { job.err = true; job.text = e.message; }
+  document.removeEventListener('visibilitychange', onVis); removeEventListener('beforeunload', onLeave);
   try { await lock?.release(); } catch { /* abaikan */ }
   job.running = false; paintJob();
   if (/^#\/translate/.test(location.hash)) render();
@@ -2440,6 +2480,7 @@ async function viewTranslate() {
     card(h('h2', {}, 'Bahasa'), h('label', {}, 'Sumber'), h('p', { class: 'mut' }, srcLabel(p.src)), h('label', {}, 'Target'), tgt),
     card(h('h2', {}, 'Status'), ['pending', 'translating', 'done', 'edited', 'error', 'skipped'].filter(cnt).map((s) => h('span', { class: 'badge' }, `${s} ${cnt(s)}`)),
       estP),
+    backupNag(p, cnt('done') + cnt('edited')),
     todoBy.size ? card(h('h2', {}, 'Kategori yang diterjemahkan'),
       h('p', { class: 'mut' }, 'Centang kategori yang mau diterjemahkan sekarang. Hanya teks yang belum diterjemahkan (pending/error) di kategori itu yang dikirim ke LLM di Pengaturan. Kategori lain tidak disentuh.'),
       [...todoBy].sort((a, b) => b[1] - a[1]).map(([k, n]) => h('label', { class: 'row' },
@@ -2484,7 +2525,7 @@ async function viewTranslate() {
 const FIELDS = [
   ['baseUrl', 'Base URL', 'url'], ['apiKey', 'API key', 'password'], ['model', 'Model', 'text'], ['extraBody', 'Body tambahan JSON (opsional)', 'text'], ['temperature', 'Temperature (0 sampai 2)', 'number'],
   ['batchSize', 'Ukuran batch (teks)', 'number'], ['maxChars', 'Batas karakter per batch', 'number'], ['concurrency', 'Konkurensi maks (1 sampai 12)', 'number'],
-  ['delay', 'Jeda antar request (ms)', 'number'], ['timeout', 'Batas waktu per request (detik)', 'number'], ['maxTokens', 'Batas token keluar per request (0 = otomatis)', 'number'], ['wrapWidth', 'Lebar baris maks tanpa face (0 = mati)', 'number'], ['wrapFace', 'Lebar baris maks dengan face', 'number'], ['priceIn', 'Harga token masuk per 1 juta', 'number'], ['priceOut', 'Harga token keluar per 1 juta', 'number'],
+  ['delay', 'Jeda antar request (ms)', 'number'], ['timeout', 'Batas waktu per request (detik)', 'number'], ['maxTokens', 'Batas token keluar per request (0 = otomatis)', 'number'], ['fixRounds', 'Putaran perbaikan otomatis (0 = mati, 1 = hemat, 2 = penuh)', 'number'], ['wrapWidth', 'Lebar baris maks tanpa face (0 = mati)', 'number'], ['wrapFace', 'Lebar baris maks dengan face', 'number'], ['priceIn', 'Harga token masuk per 1 juta', 'number'], ['priceOut', 'Harga token keluar per 1 juta', 'number'],
 ];
 async function viewSettings() {
   const c = await loadConfig(), msg = h('p', { class: 'mut' }), inp = {};
@@ -2502,7 +2543,7 @@ async function viewSettings() {
   const gather = () => ({
     baseUrl: inp.baseUrl.value.trim(), apiKey: inp.apiKey.value.trim(), remember: remember.checked, model: inp.model.value.trim() || DEFAULT_CONFIG.model, extraBody: inp.extraBody.value.trim(),
     temperature: num('temperature', 0, 2), batchSize: Math.round(num('batchSize', 1, 100)), maxChars: Math.round(num('maxChars', 500, 12000)),
-    concurrency: Math.round(num('concurrency', 1, 12)), delay: Math.round(num('delay', 0, 10000)), timeout: Math.round(num('timeout', 10, 600)), maxTokens: Math.round(num('maxTokens', 0, 200000)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), fast: fast.checked, auto: autoCb.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
+    concurrency: Math.round(num('concurrency', 1, 12)), delay: Math.round(num('delay', 0, 10000)), timeout: Math.round(num('timeout', 10, 600)), maxTokens: Math.round(num('maxTokens', 0, 200000)), fixRounds: Math.round(num('fixRounds', 0, 2)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), fast: fast.checked, auto: autoCb.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
   });
   const wipeBtn = h('button', { class: 'danger', disabled: '', onclick: async () => { try { await resetAll((m) => say(m, true)); location.hash = '#/proyek'; location.reload(); } catch (e) { say(e.message, true); } } }, 'Hapus semua data');
   const wipe = h('input', { type: 'text', placeholder: 'HAPUS', autocomplete: 'off', oninput: (e) => { wipeBtn.disabled = e.target.value !== 'HAPUS'; } });
