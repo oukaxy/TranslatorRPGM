@@ -11,6 +11,9 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 - [File Bahasa (Plugin Lokalisasi)](#file-bahasa-plugin-lokalisasi)
 - [Cara Pakai](#cara-pakai)
 - [Pengaturan](#pengaturan)
+- [Tampilan Fokus di Review](#tampilan-fokus-di-review)
+- [Koreksi Cepat di Tampilan Fokus](#koreksi-cepat-di-tampilan-fokus)
+- [Penanda dan Kategori di Review](#penanda-dan-kategori-di-review)
 - [Aksi Massal di Review](#aksi-massal-di-review)
 - [Cadangan dan Pemulihan](#cadangan-dan-pemulihan)
 - [Terjemah Lewat Chat AI (Tanpa API)](#terjemah-lewat-chat-ai-tanpa-api)
@@ -38,7 +41,7 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 - **Cache terjemahan** untuk teks yang sama persis, plus **perkiraan token dan biaya** sebelum mulai.
 - **Pilih kategori** yang diterjemahkan (dialog, pilihan, nama, sistem, deskripsi item, dan seterusnya).
 - **Gaya bahasa, catatan per karakter, dan glosarium** yang dikirim ke model di setiap batch.
-- **Review**: edit manual, terjemah ulang per teks, filter status, pencarian (longgar, persis, atau regex), filter jenis kode escape, audit "kode berubah", dan ganti kata massal yang tidak menyentuh kode escape.
+- **Review**: tampilan fokus satu teks (tombol *Buka* atau ketuk teks asli di kartu), tanda *dicek*, tag *cek nanti*, terapkan ke teks sama persis, daftar kategori dengan persentase selesai, edit manual, terjemah ulang per teks, filter status, pencarian (longgar, persis, atau regex), filter jenis kode escape, audit "kode berubah", dan ganti kata massal yang tidak menyentuh kode escape.
 - **Filter temuan masalah**: "Kata asing Portugis/Spanyol" (semua status, termasuk hasil edit) dan "Belum diterjemahkan (sama dengan asli)" untuk teks Jepang atau bahasa lain yang lolos tanpa diterjemahkan.
 - **Filter bahasa terjemahan**: di panel Filter, pilih *Masih ada Jepang/aksara asing*, *Ada kata Inggris (semua)*, *Campuran* (Inggris di tengah kalimat Indonesia), *Dominan Inggris* (60% kata atau lebih berbahasa Inggris), *Spanyol/Portugis*, atau *Bahasa Indonesia (bersih)*. Deteksi memakai `lang-vocab.js` dan mengenali bentuk turunan (-s, -ed, -ing, -ly, -er). Kata yang terlewat: tambah ke `EN_MORE2`. Nama atau istilah Inggris yang sengaja dibiarkan: tambah ke `EN_SKIP`.
 - **Glosarium**: istilah dicocokkan tanpa membedakan huruf besar/kecil, dikirim per teks (bukan satu daftar untuk seluruh batch), dan hasil yang melewatkan padanan istilah diterjemah ulang sekali. Teks mirip yang sudah diterjemahkan (beda angka/huruf besar) dipakai sebagai acuan supaya pilihan katanya sama. Filter Review *Glosarium tidak dipakai* dan *Terjemahan tidak konsisten (teks mirip)* membantu memeriksa teks yang sudah selesai.
@@ -126,6 +129,30 @@ Contoh glosarium dan catatan karakter:
 アリス: sopan, pakai saya/Anda
 バルト: preman, pakai gue/lo, kasar
 ```
+
+## Tampilan Fokus di Review
+
+Ketuk **Buka** (atau teks asli) pada kartu di tab Review untuk membuka layar penuh berisi satu teks:
+
+- Teks asli (hanya baca), area edit terjemahan, pembicara, kategori, status, dan pesan error. Peringatan *baris panjang* dan *kode berbeda* tetap tampil.
+- **Konteks**: sampai 3 teks sebelumnya di file yang sama (asli dan terjemahan bila ada), dipotong rapi.
+- **Bantuan**: istilah glosarium yang cocok dengan teks asli, dan teks mirip yang sudah diterjemahkan (tombol *Pakai* menyalinnya ke area edit).
+- **Simpan** menyimpan lewat jalur yang sama dengan kartu daftar (status menjadi *edited*). **Berikutnya**, **Sebelumnya**, **Error berikutnya**, dan menutup layar juga menyimpan bila ada perubahan.
+- Kotak **Sudah dicek** menandai teks yang sudah kamu periksa. **Simpan** juga menandainya (mengetuk Simpan tanpa mengubah teks berarti "sudah saya cek").
+- Navigasi mengikuti daftar yang sedang terfilter atau terpencarikan, bukan seluruh proyek. Menutup layar mengembalikan ke posisi daftar semula.
+
+## Koreksi Cepat di Tampilan Fokus
+
+- **Terapkan ke teks yang sama persis**: bila ada teks lain dengan asli dan pembicara yang sama tetapi terjemahan berbeda, muncul tombol *Terapkan ke N teks lain yang aslinya sama persis*. Jumlahnya dihitung dari isi kotak edit saat itu, jadi terlihat sebelum disimpan. Konfirmasi dua ketukan, dan peringatannya menyebut berapa hasil edit manual yang akan ditimpa. Teks berstatus skipped atau sedang diterjemahkan tidak disentuh. Hasilnya berstatus *diedit* dan mewarisi tanda *dicek* dari teks sumber.
+- **Cek nanti**: tag untuk teks yang mau dilihat lagi. Badge *cek nanti* tampil di kartu, dan filter status **Tag: cek nanti** menampilkannya.
+- **Jangan diterjemahkan (lewati)**: mengubah status menjadi *skipped* (tidak dikirim ke model dan tetap asli di ekspor). Terjemahan lama disimpan; mematikan kotak ini mengembalikan status ke *diedit* (bila ada terjemahan) atau *pending*. Memakai filter status **Skipped** untuk melihatnya. Teks yang dilewati otomatis karena hanya berisi kunci juga muncul di sana.
+
+## Penanda dan Kategori di Review
+
+- **Sudah dicek** (`reviewed` di entri): edit manual, Simpan di tampilan fokus, atau kotak centang menandainya. Terjemah ulang otomatis (satu teks, aksi massal, atau tandai untuk diterjemah ulang) menghapus tanda. Mengosongkan terjemahan juga menghapusnya. Ganti kata massal tidak mengubah tanda. Cadangan lama tanpa field ini tetap bisa dipulihkan (dianggap belum dicek), dan field ini tidak ikut ke patch ekspor.
+- **Filter Belum dicek** menampilkan teks berstatus done atau diedit yang belum bertanda dicek, dan bisa digabung dengan filter lain.
+- **Garis warna di tepi kartu** menurut status: done (hijau), diedit (biru), error (merah), skipped (abu-abu). Badge teks status tetap ada, jadi warna bukan satu-satunya petunjuk.
+- **Kategori**: kartu di atas daftar menampilkan jumlah teks dan persentase selesai tiap kategori (done + diedit dibanding semua teks kecuali skipped, sama dengan angka di tab Translate). Mengetuk kategori menerapkan filter kategori yang sudah ada.
 
 ## Aksi Massal di Review
 

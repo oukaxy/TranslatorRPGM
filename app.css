@@ -157,3 +157,38 @@ dialog.sheet::backdrop{background:rgba(0,0,0,.45)}
 .actionbar .mut,.actionbar .err{margin:0 0 8px;font-size:13px;line-height:1.4;max-height:4.2em;overflow:auto}
 .actionbar .row>button{flex:1 1 0;width:auto;min-width:0;padding:0 12px;white-space:nowrap}
 body.kb nav,body.kb .actionbar{display:none}
+
+/* Tampilan fokus satu teks (Review) */
+.rowbtns{display:flex;gap:6px}
+.rowhead>.rowbtns{flex:0 0 auto}
+p.tap{cursor:pointer}
+dialog.sheet.focus{max-width:720px;height:100vh;height:100dvh;max-height:none;margin:0 auto;border-radius:0}
+.focus .sheet-head{padding-top:calc(12px + env(safe-area-inset-top));padding-bottom:8px;border-bottom:1px solid var(--bd)}
+.focus .sheet-body{padding-top:8px}
+.focus .orig{padding:12px;border-radius:var(--r-sm);background:var(--raise);white-space:pre-wrap;word-break:break-word}
+.focus textarea{min-height:120px}
+.focus .ctx{padding:6px 0;border-bottom:1px solid var(--bd)}
+.focus .ctx:last-child{border-bottom:0}
+.focus .ctx .mut,.focus .ctx .tr{margin:2px 0;font-size:13.5px}
+.focus .ctx .tr{color:var(--fg);word-break:break-word}
+.focus .help{margin:4px 0;font-size:14px;word-break:break-word}
+.focus .row.sim{padding:6px 0}
+.focus .row.sim>span{font-size:14px;word-break:break-word}
+.focus .row.sim>button{flex:0 0 auto;width:auto}
+.focus .sheet-foot{display:flex;flex-direction:column;gap:8px}
+.focus .sheet-foot .row>button{flex:1 1 0;width:auto;min-width:0;padding:0 6px;font-size:14px;white-space:nowrap}
+
+/* Penanda dicek, garis status kartu, dan daftar kategori (Review) */
+:root{--ok:#1a7f4b}
+@media(prefers-color-scheme:dark){:root{--ok:#5cc98a}}
+.badge.ok{background:transparent;border:1px solid var(--ok);color:var(--ok)}
+.card.st-done{border-left:4px solid var(--ok)}
+.card.st-edited{border-left:4px solid var(--acc)}
+.card.st-error{border-left:4px solid var(--err)}
+.card.st-skipped{border-left:4px solid var(--mut)}
+.catrow{display:grid;grid-template-columns:1fr auto;gap:2px 10px;align-items:center;margin:0 0 6px;padding:8px 12px;min-height:52px;text-align:left}
+.catrow .cm{font-size:13px;color:var(--mut)}
+.catrow progress{grid-column:1/-1;height:6px;margin:2px 0 0}
+.catrow.on{border-color:var(--acc);background:var(--acc-soft)}
+.badge.tag{background:var(--acc-soft);color:var(--acc)}
+.focus .sheet-body>button{margin-top:6px}

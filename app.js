@@ -2072,7 +2072,7 @@ export async function markRetranslate(project, cfg, list) {
     keys.add(await cacheKey(project, cfg, e.original, termsFor(gl, `${e.original}\n${sp}`), notesFor(cn, sp)));
   }
   await dbDeleteMany('cache', [...keys]);
-  await dbPutMany('entries', list.map((e) => ({ ...e, status: 'error', error: MARK_MSG })));
+  await dbPutMany('entries', list.map((e) => ({ ...e, status: 'error', error: MARK_MSG, reviewed: false })));
   return { entries: list.length, cache: keys.size };
 }
 
@@ -2582,7 +2582,7 @@ async function viewSettings() {
     h('div', { class: 'card danger-card' }, h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn),
     actionBar(msg, h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')))];
 }
-const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Bahasa asing (Prancis/Spanyol/Portugis/dll)'], ['same', 'Belum diterjemahkan (sama dengan asli)'], ['glmiss', 'Glosarium tidak dipakai'], ['inconsistent', 'Terjemahan tidak konsisten (teks mirip)']];
+const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Bahasa asing (Prancis/Spanyol/Portugis/dll)'], ['same', 'Belum diterjemahkan (sama dengan asli)'], ['glmiss', 'Glosarium tidak dipakai'], ['inconsistent', 'Terjemahan tidak konsisten (teks mirip)'], ['unreviewed', 'Belum dicek'], ['tag:cek', 'Tag: cek nanti']];
 const hasForeign = (e) => !!e.translation && foreignWords(e.translation, e.original).length > 0;
 /** Apakah k kata Inggris: ada di EN_W atau bentuk turunannya (-s, -es, -ies, -ed, -ing, -ly, -er, -est, 's) dari kata di EN_W. */
 function enHas(k) {
@@ -2657,6 +2657,8 @@ const FUNC_FILTERS = [
   ['tag', 'Tag <...>', /<\/?[A-Za-z][^>\n]{0,40}>/],
   ['ph', 'Placeholder %1', /%\d/],
 ];
+const edgeCls = (e) => `card st-${e.status}${e.reviewed ? ' rv' : ''}`;
+const CODEDIFF_MSG = 'Kode game berbeda dari teks asli (cek warna, nama, variabel, tag). Periksa sebelum ekspor';
 const longLine = (t) => t.split('\n').some((l) => stripEscapes(l).length > LINE_WARN);
 /** Ganti kata di terjemahan. Kode escape tidak disentuh. Mengembalikan {text, count}. */
 function replaceWord(text, find, rep, { whole = true, ignoreCase = true } = {}) {
@@ -2677,7 +2679,7 @@ async function viewReview() {
   let filter = 'all', lang = 'all', cat = 'all', fn = 'any', mode = 'loose', q = '', qRaw = '', qRe = null, page = 0, count = 0;
   const origNorm = new WeakMap(), normOf = (e) => { let v = origNorm.get(e); if (v === undefined) { v = searchNorm(e.original); origNorm.set(e, v); } return v; };
   const box = h('div'), info = h('p', { class: 'mut' });
-  let qErr = '', paintChips = () => {}, paintBulk = () => {};
+  let qErr = '', paintChips = () => {}, paintBulk = () => {}, paintCats = () => {}, curList = [];
   const fnTest = (k) => { const f = FUNC_FILTERS.find((x) => x[0] === k); if (!f || !f[2]) return null; return typeof f[2] === 'function' ? f[2]() : f[2]; };
   // Cocokkan kata kunci ke teks asli + terjemahan. 'loose' = abaikan spasi/tanda baca/kode (lama); 'exact' = potongan literal apa adanya (cocok untuk \v[, (\v, if); 'regex' = ekspresi reguler.
   const matchText = (e) => {
@@ -2693,39 +2695,148 @@ async function viewReview() {
     if (mode === 'regex' && v) { try { qRe = new RegExp(v, 'iu'); } catch (x) { qErr = `Regex tidak valid: ${x.message}`; } }
     page = 0; fill();
   };
+  // Satu jalur simpan dan terjemah ulang untuk kartu daftar dan tampilan fokus.
+  const unrev = (e) => (e.status === 'done' || e.status === 'edited') && !e.reviewed;
+  // Edit manual dianggap sudah dicek; terjemahan dikosongkan berarti belum.
+  const saveTr = async (e, text) => { const u = { ...e, translation: text, status: text.trim() ? 'edited' : 'pending', error: '', reviewed: !!text.trim() }; await dbPut('entries', u); Object.assign(e, u); };
+  const hasTag = (e, t) => Array.isArray(e.tags) && e.tags.includes(t);
+  const setTag = async (e, t, on) => { const cur = new Set(Array.isArray(e.tags) ? e.tags : []); if (on) cur.add(t); else cur.delete(t); const u = { ...e, tags: [...cur] }; await dbPut('entries', u); Object.assign(e, u); };
+  // "Jangan diterjemahkan" memakai status skipped yang sudah ada (tidak dikirim ke model, tetap asli di ekspor). Terjemahan lama disimpan agar bisa dipulihkan.
+  const setSkip = async (e, on) => { const u = { ...e, status: on ? 'skipped' : (e.translation?.trim() ? 'edited' : 'pending'), error: '' }; await dbPut('entries', u); Object.assign(e, u); };
+  const setReviewed = async (e, v) => { const u = { ...e, reviewed: !!v }; await dbPut('entries', u); Object.assign(e, u); };
+  // Terjemah ulang otomatis menghapus tanda dicek (hasilnya belum dilihat manusia).
+  const redoOne = async (e) => {
+    const cfg = await loadConfig(); if (!cfg.apiKey) throw new Error(UI.noKey);
+    Object.assign(e, await retranslateEntry(p, cfg, e)); e.error = '';
+    if (e.reviewed) await setReviewed(e, false);
+  };
+  // Tampilan fokus satu teks. Konteks dan bantuan dihitung hanya untuk entri yang sedang dibuka.
+  const fdlg = h('dialog', { class: 'sheet focus', 'aria-label': 'Koreksi satu teks' });
+  let fSeq = [], fi = 0, fScroll = 0, fCommit = async () => {};
+  const byFile = new Map();
+  const ctxOf = (e) => {
+    let l = byFile.get(e.file);
+    if (!l) { l = rows.filter((x) => x.file === e.file).sort((a, b) => ((a.order ?? a.id) - (b.order ?? b.id)) || a.id - b.id); byFile.set(e.file, l); }
+    const i = l.indexOf(e); return i < 0 ? [] : l.slice(Math.max(0, i - 3), i);
+  };
+  const clip = (t, n = 110) => {
+    const s = String(t || '').replace(/\s*\n\s*/g, ' / ').trim(); if (s.length <= n) return s;
+    const cut = s.slice(0, n), sp = cut.lastIndexOf(' '); return `${(sp > n * 0.6 ? cut.slice(0, sp) : cut).replace(/[\s,;:/]+$/, '')}…`;
+  };
+  const openFocus = (e) => { fSeq = curList.slice(); fi = Math.max(0, fSeq.indexOf(e)); fScroll = scrollY; paintFocus(); fdlg.showModal(); };
+  const paintFocus = () => {
+    const e = fSeq[fi]; if (!e) { fdlg.close(); return; }
+    const st = h('span', { class: 'badge' }, e.status), warn = h('span', { class: 'badge warn' }, 'baris panjang');
+    const msg = h('p', { class: 'err' }), note = h('p', { class: 'mut' }), cb = h('input', { type: 'checkbox' }), tagCb = h('input', { type: 'checkbox' }), skCb = h('input', { type: 'checkbox' });
+    const ta = h('textarea', { rows: String(Math.max(4, e.original.split('\n').length + 2)), 'aria-label': 'Terjemahan', spellcheck: 'false' }, e.translation);
+    const sync = () => { st.textContent = e.status; cb.checked = !!e.reviewed; tagCb.checked = hasTag(e, 'cek'); skCb.checked = e.status === 'skipped'; warn.hidden = !longLine(ta.value); msg.className = 'err'; msg.textContent = e.error || (codeDiff(e) ? CODEDIFF_MSG : ''); };
+    sync(); ta.addEventListener('input', () => { warn.hidden = !longLine(ta.value); note.textContent = ''; });
+    fCommit = async () => { if (ta.value !== e.translation) { await saveTr(e, ta.value); sync(); } };
+    const say = (t, bad) => { note.className = bad ? 'err' : 'mut'; note.textContent = t; };
+    cb.addEventListener('change', async () => { try { await fCommit(); await setReviewed(e, cb.checked); sync(); } catch (x) { say(x?.message || String(x), true); sync(); } });
+    const flip = (fn) => async () => { try { await fCommit(); await fn(); } catch (x) { say(x?.message || String(x), true); } sync(); paintDup(); };
+    tagCb.addEventListener('change', flip(() => setTag(e, 'cek', tagCb.checked)));
+    skCb.addEventListener('change', flip(() => setSkip(e, skCb.checked)));
+    // Terapkan ke teks lain yang aslinya sama persis (dan pembicara sama). Konfirmasi dua ketukan; yang sedang diterjemahkan atau dilewati tidak disentuh.
+    const spk = (x) => x.meta?.speaker || '';
+    const dups = rows.filter((x) => x !== e && x.original === e.original && spk(x) === spk(e) && x.status !== 'skipped' && x.status !== 'translating');
+    let dArmed = false, dTm = 0;
+    const dupInfo = () => { const t = ta.value, hit = t.trim() ? dups.filter((x) => x.translation !== t) : []; return { hit, manual: hit.filter((x) => x.status === 'edited' && x.translation?.trim()) }; };
+    const dupBtn = h('button', { onclick: async () => {
+      const { hit } = dupInfo(); if (!hit.length) return;
+      if (!dArmed) { dArmed = true; paintDup(); dTm = setTimeout(() => { dArmed = false; paintDup(); }, 5000); return; }
+      clearTimeout(dTm); dArmed = false; dupBtn.disabled = true;
+      try {
+        await fCommit();
+        const t = e.translation, targets = dups.filter((x) => x.translation !== t);
+        const upd = targets.map((x) => ({ ...x, translation: t, status: 'edited', error: '', reviewed: !!e.reviewed }));
+        await dbPutMany('entries', upd); targets.forEach((x, i) => Object.assign(x, upd[i]));
+        say(`Diterapkan ke ${upd.length} teks`);
+      } catch (x) { say(x?.message || String(x), true); }
+      dupBtn.disabled = false; paintDup();
+    } });
+    const paintDup = () => {
+      const { hit, manual } = dupInfo(); dupBtn.hidden = !hit.length;
+      dupBtn.textContent = dArmed ? `Yakin? Ketuk lagi: ${hit.length} teks ditimpa${manual.length ? `, termasuk ${manual.length} hasil edit manual yang berbeda` : ''}` : `Terapkan ke ${hit.length} teks lain yang aslinya sama persis`;
+    };
+    ta.addEventListener('input', () => { clearTimeout(dTm); dArmed = false; paintDup(); });
+    paintDup();
+    const move = (find) => async () => {
+      try { await fCommit(); } catch (x) { say(x?.message || String(x), true); return; }
+      const j = find(); if (j < 0) { say('Tidak ada lagi di daftar ini'); return; }
+      fi = j; paintFocus(); fdlg.querySelector('.sheet-body').scrollTop = 0;
+    };
+    const rt = h('button', { class: 'sm', onclick: async () => {
+      rt.disabled = true; msg.className = 'mut'; msg.textContent = 'Menerjemahkan…'; e.error = '';
+      try { await redoOne(e); ta.value = e.translation; } catch (x) { e.error = x?.message || String(x); }
+      rt.disabled = false; sync();
+    } }, 'Terjemah ulang');
+    const ctx = ctxOf(e), terms = termsFor(glRev, e.original), k = simNorm(stripEscapes(e.original)), seen = new Set(), sims = [];
+    if (k.length >= 3) for (const x of rows) {
+      if (x === e || !x.translation?.trim() || (x.status !== 'done' && x.status !== 'edited') || seen.has(x.translation) || simNorm(stripEscapes(x.original)) !== k) continue;
+      seen.add(x.translation); sims.push(x); if (sims.length >= 3) break;
+    }
+    const meta = [e.meta?.speaker && `Pembicara: ${e.meta.speaker}`, e.meta?.face && 'Ada wajah (face)'].filter(Boolean);
+    const body = h('div', { class: 'sheet-body' },
+      h('div', {}, h('span', { class: 'badge' }, e.category), st, warn), meta.length ? h('p', { class: 'mut' }, meta.join('\n')) : '',
+      ctx.length ? h('details', { class: 'fold-in', open: '' }, h('summary', {}, `Konteks (${ctx.length} sebelumnya)`),
+        ctx.map((x) => h('div', { class: 'ctx' }, h('p', { class: 'mut' }, clip(x.original)), x.translation?.trim() ? h('p', { class: 'tr' }, clip(x.translation)) : ''))) : '',
+      h('label', {}, 'Teks asli'), h('div', { class: 'orig' }, e.original),
+      h('label', {}, 'Terjemahan'), ta, msg, note,
+      h('label', { class: 'chk' }, cb, 'Sudah dicek'), h('label', { class: 'chk' }, tagCb, 'Cek nanti'), h('label', { class: 'chk' }, skCb, 'Jangan diterjemahkan (lewati)'), dupBtn,
+      (terms.length || sims.length) ? h('details', { class: 'fold-in', open: '' }, h('summary', {}, 'Bantuan'),
+        terms.length ? h('div', {}, h('p', { class: 'mut' }, 'Glosarium'), terms.map(([a, b]) => h('p', { class: 'help' }, `${a} = ${b}`))) : '',
+        sims.length ? h('div', {}, h('p', { class: 'mut' }, 'Teks mirip yang sudah diterjemahkan'), sims.map((x) => h('div', { class: 'row sim' }, h('span', {}, clip(x.translation, 140)),
+          h('button', { class: 'sm', onclick: () => { ta.value = x.translation; ta.dispatchEvent(new Event('input')); ta.focus(); } }, 'Pakai')))) : '') : '',
+      h('div', { class: 'row' }, rt));
+    fdlg.replaceChildren(
+      h('div', { class: 'sheet-head' }, h('h2', {}, `${fi + 1} / ${fSeq.length}`), h('button', { class: 'sm', onclick: async () => { try { await fCommit(); } catch (x) { say(x?.message || String(x), true); return; } fdlg.close(); } }, 'Tutup')),
+      body,
+      h('div', { class: 'sheet-foot' },
+        h('button', { class: 'pri', onclick: async () => { try { const d = ta.value !== e.translation, was = !!e.reviewed; await fCommit(); if (e.translation.trim() && !e.reviewed) await setReviewed(e, true); sync(); say(d ? 'Tersimpan' : was ? 'Tidak ada perubahan' : 'Ditandai sudah dicek'); } catch (x) { say(x?.message || String(x), true); } } }, 'Simpan'),
+        h('div', { class: 'row' },
+          h('button', { onclick: move(() => fi - 1), ...(fi > 0 ? {} : { disabled: '' }) }, 'Sebelumnya'),
+          h('button', { onclick: move(() => fSeq.findIndex((x, j) => j > fi && x.status === 'error')) }, 'Error berikutnya'),
+          h('button', { onclick: move(() => (fi < fSeq.length - 1 ? fi + 1 : -1)), ...(fi < fSeq.length - 1 ? {} : { disabled: '' }) }, 'Berikutnya'))));
+  };
+  // Menutup (tombol, Esc, atau tombol kembali) menyimpan sisa ketikan, lalu daftar digambar ulang di posisi semula.
+  fdlg.addEventListener('close', async () => { try { await fCommit(); } catch { /* abaikan */ } fCommit = async () => {}; fill(); scrollTo(0, fScroll); });
+  fdlg.addEventListener('click', (ev) => { if (ev.target === fdlg) fdlg.close(); });
   const rowCard = (e) => {
-    const st = h('span', { class: 'badge' }, e.status), warn = h('span', { class: 'badge warn' }, 'baris panjang'), msg = h('p', { class: 'err' }, e.error);
+    const st = h('span', { class: 'badge' }, e.status), warn = h('span', { class: 'badge warn' }, 'baris panjang'), rv = h('span', { class: 'badge ok' }, 'dicek'), tg = h('span', { class: 'badge tag' }, 'cek nanti'), msg = h('p', { class: 'err' }, e.error);
     warn.hidden = !longLine(e.translation);
     const ta = h('textarea', { rows: String(Math.max(2, e.original.split('\n').length + 1)) }, e.translation);
-    const sync = () => { st.textContent = e.status; warn.hidden = !longLine(e.translation); msg.className = 'err'; msg.textContent = e.error || (codeDiff(e) ? 'Kode game berbeda dari teks asli (cek warna, nama, variabel, tag). Periksa sebelum ekspor' : ''); };
+    const sync = () => { st.textContent = e.status; rv.hidden = !e.reviewed; tg.hidden = !hasTag(e, 'cek'); const c = ta.closest('.card'); if (c) c.className = edgeCls(e); warn.hidden = !longLine(e.translation); msg.className = 'err'; msg.textContent = e.error || (codeDiff(e) ? CODEDIFF_MSG : ''); };
     sync();
     ta.addEventListener('change', async () => {
-      const u = { ...e, translation: ta.value, status: ta.value.trim() ? 'edited' : 'pending', error: '' };
-      await dbPut('entries', u); Object.assign(e, u); sync();
+      await saveTr(e, ta.value); sync();
     });
     const rt = h('button', { class: 'sm', onclick: async () => {
       rt.disabled = true; msg.className = 'mut'; msg.textContent = 'Menerjemahkan…'; e.error = '';
       try {
-        const cfg = await loadConfig(); if (!cfg.apiKey) throw new Error(UI.noKey);
-        Object.assign(e, await retranslateEntry(p, cfg, e)); ta.value = e.translation; e.error = '';
+        await redoOne(e); ta.value = e.translation;
       } catch (x) { e.error = x.message || String(x); }
       rt.disabled = false; sync();
     } }, 'Terjemah ulang');
-    return card(h('div', { class: 'rowhead' }, h('div', {}, h('span', { class: 'badge' }, e.category), st, warn), rt), h('p', { class: 'mut' }, e.original), ta, msg);
+    const open = h('button', { class: 'sm', 'aria-label': 'Buka tampilan fokus', onclick: () => openFocus(e) }, 'Buka');
+    const orig = h('p', { class: 'mut tap', onclick: () => { if (!String(getSelection?.() || '')) openFocus(e); } }, e.original);
+    const c = card(h('div', { class: 'rowhead' }, h('div', {}, h('span', { class: 'badge' }, e.category), st, rv, tg, warn), h('div', { class: 'rowbtns' }, open, rt)), orig, ta, msg);
+    c.className = edgeCls(e); return c;
   };
   const fill = () => {
     uiSet('filters:' + p.id, JSON.stringify({ filter, lang, cat, fn, mode, q: qRaw }));
     const fnRe = fnTest(fn), incSet = filter === 'inconsistent' ? inconsistentIds(rows) : null;
-    const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : filter === 'foreign' ? hasForeign(e) : filter === 'same' ? leftUntranslated(e, p.tgt) : filter === 'glmiss' ? !!e.translation && glossMissing(glRev, e.original, e.translation).length > 0 : filter === 'inconsistent' ? incSet.has(e.id) : e.status === filter)) && (lang === 'all' || !!transLang(e)?.[lang]) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
+    const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : filter === 'foreign' ? hasForeign(e) : filter === 'same' ? leftUntranslated(e, p.tgt) : filter === 'glmiss' ? !!e.translation && glossMissing(glRev, e.original, e.translation).length > 0 : filter === 'inconsistent' ? incSet.has(e.id) : filter === 'unreviewed' ? unrev(e) : filter === 'tag:cek' ? hasTag(e, 'cek') : e.status === filter)) && (lang === 'all' || !!transLang(e)?.[lang]) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
     if (incSet) list.sort((a, b) => (simNorm(stripEscapes(a.original)) < simNorm(stripEscapes(b.original)) ? -1 : simNorm(stripEscapes(a.original)) > simNorm(stripEscapes(b.original)) ? 1 : a.id - b.id));
+    curList = list;
     const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE)); page = Math.min(page, pages - 1);
-    info.textContent = qErr ? qErr : `${list.length} teks`; info.className = qErr ? 'err' : 'mut'; count = list.length; paintChips(); paintBulk(list);
+    info.textContent = qErr ? qErr : `${list.length} teks`; info.className = qErr ? 'err' : 'mut'; count = list.length; paintChips(); paintBulk(list); paintCats();
     const go = (n) => () => { page = n; fill(); scrollTo(0, 0); };
     box.replaceChildren(...list.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE).map(rowCard),
       h('div', { class: 'row' }, h('button', { onclick: go(page - 1), ...(page ? {} : { disabled: '' }) }, 'Sebelumnya'),
         h('button', { onclick: go(page + 1), ...(page < pages - 1 ? {} : { disabled: '' }) }, `Berikutnya (${page + 1}/${pages})`)));
   };
-  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); sCnt.set('codediff', rows.filter(codeDiff).length); sCnt.set('foreign', rows.filter(hasForeign).length); sCnt.set('same', rows.filter((e) => leftUntranslated(e, p.tgt)).length); sCnt.set('glmiss', glRev.length ? rows.filter((e) => e.translation && glossMissing(glRev, e.original, e.translation).length).length : 0); sCnt.set('inconsistent', inconsistentIds(rows).size);
+  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); sCnt.set('codediff', rows.filter(codeDiff).length); sCnt.set('foreign', rows.filter(hasForeign).length); sCnt.set('same', rows.filter((e) => leftUntranslated(e, p.tgt)).length); sCnt.set('glmiss', glRev.length ? rows.filter((e) => e.translation && glossMissing(glRev, e.original, e.translation).length).length : 0); sCnt.set('inconsistent', inconsistentIds(rows).size); sCnt.set('unreviewed', rows.filter(unrev).length); sCnt.set('tag:cek', rows.filter((e) => hasTag(e, 'cek')).length);
   const sel = h('select', { 'aria-label': 'Filter status', onchange: (e) => { filter = e.target.value; page = 0; fill(); } }, FILTERS.map(([v, t]) => h('option', { value: v }, v === 'all' ? `${t} (${rows.length})` : `${t} (${sCnt.get(v) || 0})`)));
   const lCnt = new Map(); rows.forEach((e) => { const f = transLang(e); if (f) for (const k of Object.keys(f)) if (f[k]) lCnt.set(k, (lCnt.get(k) || 0) + 1); });
   const langSel = h('select', { 'aria-label': 'Filter bahasa terjemahan', onchange: (e) => { lang = e.target.value; page = 0; fill(); } }, LANG_FILTERS.map(([v, t]) => h('option', { value: v }, v === 'all' ? t : `${t} (${lCnt.get(v) || 0})`)));
@@ -2735,6 +2846,26 @@ async function viewReview() {
   const cats = new Map(); rows.forEach((e) => cats.set(e.category, (cats.get(e.category) || 0) + 1));
   const catSel = h('select', { onchange: (e) => { cat = e.target.value; page = 0; fill(); } },
     h('option', { value: 'all' }, `Semua kategori (${rows.length})`), [...cats].sort((a, b) => a[0].localeCompare(b[0])).map(([c, n]) => h('option', { value: c }, `${c} (${n})`)));
+  // Pintu masuk: kategori dengan jumlah dan persentase selesai (done + edited dibanding semua kecuali skipped, sama dengan tab Translate).
+  const catList = h('div'), catCard = fold('Kategori', catList);
+  let catInit = false;
+  paintCats = () => {
+    const m = new Map(); let fin = 0, todo = 0;
+    for (const e of rows) {
+      let s = m.get(e.category); if (!s) m.set(e.category, s = { fin: 0, todo: 0 });
+      if (e.status === 'done' || e.status === 'edited') { s.fin++; fin++; } else if (e.status !== 'skipped') { s.todo++; todo++; }
+    }
+    const pct = (s) => (s.fin + s.todo ? Math.round((100 * s.fin) / (s.fin + s.todo)) : null);
+    const row = (key, label, n, s) => {
+      const v = pct(s);
+      return h('button', { class: `catrow${cat === key ? ' on' : ''}`, 'aria-pressed': String(cat === key), onclick: () => { cat = key; catSel.value = key; page = 0; catCard.open = false; fill(); scrollTo(0, 0); } },
+        h('span', {}, label), h('span', { class: 'cm' }, `${n} teks · ${v === null ? '—' : v + '%'}`), v === null ? '' : h('progress', { max: '100', value: String(v), 'aria-hidden': 'true' }));
+    };
+    catList.replaceChildren(row('all', 'Semua kategori', rows.length, { fin, todo }), ...[...cats].sort((a, b) => a[0].localeCompare(b[0])).map(([c, n]) => row(c, c, n, m.get(c) || { fin: 0, todo: 0 })));
+    const all = pct({ fin, todo });
+    catCard.querySelector('summary').textContent = `Kategori (${cats.size})${all === null ? '' : ` · ${all}% selesai`}`;
+    if (!catInit) { catInit = true; catCard.open = cat === 'all' && filter === 'all' && lang === 'all' && fn === 'any' && !qRaw; }
+  };
   let tmr = 0;
   const find = h('input', { type: 'search', placeholder: 'Cari teks, kode, atau fungsi', autocapitalize: 'off', autocomplete: 'off', spellcheck: 'false',
     oninput: (e) => { clearTimeout(tmr); const v = e.target.value; tmr = setTimeout(() => setQuery(v), 250); },
@@ -2805,7 +2936,7 @@ async function viewReview() {
   const warnTxt = (what) => `Yakin? Ketuk lagi: ${shown.length} teks ${what}${editedN() ? `, termasuk ${editedN()} hasil edit manual` : ''}`;
   const markBtn = bulkBtn('', () => `Tandai untuk diterjemah ulang (${shown.length})`, () => warnTxt('ditandai'), async () => {
     const r = await markRetranslate(p, cfg0, shown);
-    shown.forEach((e) => Object.assign(e, { status: 'error', error: MARK_MSG }));
+    shown.forEach((e) => Object.assign(e, { status: 'error', error: MARK_MSG, reviewed: false }));
     bSay(`${r.entries} teks ditandai (status Error; terjemahan lama tetap terlihat tapi tidak ikut ekspor). Buka tab Translate lalu tekan Lanjutkan, atau pakai chat AI di tab Ekspor.`); fill();
   });
   const redoBtn = bulkBtn('pri', () => `Terjemah ulang sekarang (${shown.length})`, () => {
@@ -2857,11 +2988,11 @@ async function viewReview() {
       if (ok(catSel, sv.cat)) { cat = sv.cat; catSel.value = cat; }
       if (ok(fnSel, sv.fn)) { fn = sv.fn; fnSel.value = fn; }
       if (ok(modeSel, sv.mode)) { mode = sv.mode; modeSel.value = mode; }
-      if (typeof sv.q === 'string' && sv.q) { find.value = sv.q; setQuery(sv.q); return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), replCard, bulkCard, box, sheet]; }
+      if (typeof sv.q === 'string' && sv.q) { find.value = sv.q; setQuery(sv.q); return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), catCard, replCard, bulkCard, box, sheet, fdlg]; }
     }
   } catch { /* abaikan */ }
   fill();
-  return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), replCard, bulkCard, box, sheet];
+  return [h('div', { class: 'searchbar' }, find, fbtn), h('div', { class: 'meta' }, info, chips), catCard, replCard, bulkCard, box, sheet, fdlg];
 }
 let exportUrl = '', rgUrl = '';
 /** Nama file patch: "<judul game> - ke <n>.zip". Judul diambil dari System (terjemahan kalau ada, kalau tidak aslinya); nomor naik tiap ekspor sukses per proyek. */
