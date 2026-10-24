@@ -16,6 +16,7 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 - [Terjemah Lewat Chat AI (Tanpa API)](#terjemah-lewat-chat-ai-tanpa-api)
 - [Keamanan Hasil Terjemahan](#keamanan-hasil-terjemahan)
 - [Privasi dan Penyimpanan Data](#privasi-dan-penyimpanan-data)
+- [Proxy CORS Opsional (Cloudflare Worker)](#proxy-cors-opsional-cloudflare-worker)
 - [Menjalankan Secara Lokal](#menjalankan-secara-lokal)
 - [Deploy ke Vercel](#deploy-ke-vercel)
 - [Struktur Proyek](#struktur-proyek)
@@ -30,6 +31,10 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 - **Deteksi bahasa sumber**: mode Otomatis (Jepang/Inggris campur), Jepang, Inggris, atau Semua teks (bahasa apa pun). Teks yang sudah berbahasa Indonesia dikenali dan tidak diterjemahkan ulang.
 - **Provider LLM bebas**: memakai format *chat completions* yang kompatibel dengan OpenAI. Bawaannya OpenRouter, tetapi base URL bisa diganti ke provider lain atau server lokal.
 - **Terjemahan per batch** dengan konkurensi otomatis, retry dengan backoff, penghormatan terhadap `Retry-After`, batas waktu per request, dan lanjut dari titik berhenti.
+- **Status proses yang jelas**: tab Translate menampilkan jumlah teks selesai, lama berjalan, batch aktif, token terpakai, dan baris per batch (jumlah teks, tahap *menerjemahkan* atau *memeriksa*, lama berjalan). Perkiraan sisa waktu dihitung dari kecepatan batch yang selesai dalam 5 menit terakhir, bukan dari awal proses.
+- **Pengaman layar**: selama proses berjalan, layar dijaga tetap menyala (Wake Lock) dan dipasang ulang saat app kembali ke depan. App yang sempat ke latar belakang memunculkan peringatan, dan browser meminta konfirmasi bila halaman ditutup di tengah proses.
+- **Pengingat cadangan** di tab Translate bila proyek belum pernah dicadangkan, sudah 3 hari atau lebih dengan kemajuan 50 teks atau lebih, atau kemajuan sudah 1000 teks atau lebih sejak cadangan terakhir. Bisa ditunda sehari.
+- **Mode berpikir otomatis ditekan** untuk model penalar di provider selain OpenRouter (lihat [Pengaturan](#pengaturan)).
 - **Cache terjemahan** untuk teks yang sama persis, plus **perkiraan token dan biaya** sebelum mulai.
 - **Pilih kategori** yang diterjemahkan (dialog, pilihan, nama, sistem, deskripsi item, dan seterusnya).
 - **Gaya bahasa, catatan per karakter, dan glosarium** yang dikirim ke model di setiap batch.
@@ -74,7 +79,7 @@ Navigasi memakai empat tab di bawah layar, dengan Pengaturan di pojok kanan atas
 
 1. **Pengaturan**: isi base URL, API key, dan model. Tekan **Tes koneksi** untuk memastikan semuanya benar.
 2. **Proyek**: pilih bahasa sumber, lalu impor folder data, zip game, atau `Game.rgss3a`. Ringkasan dan diagnostik impor muncul setelahnya.
-3. **Translate**: pilih bahasa target (Indonesia atau Inggris) dan kategori, cek perkiraan biaya, lalu tekan **Mulai translate**. Proses bisa dihentikan dan dilanjutkan kapan saja.
+3. **Translate**: pilih bahasa target (Indonesia atau Inggris) dan kategori, cek perkiraan biaya, lalu tekan **Mulai translate**. Proses bisa dihentikan dan dilanjutkan kapan saja. Biarkan layar menyala dan app tetap di depan selama proses berjalan.
 4. **Review**: periksa hasil, edit, atau terjemah ulang. Gunakan filter *Error*, *Kode berubah*, *Kata asing*, dan *Belum diterjemahkan* untuk menemukan masalah lebih cepat. Saat ada filter aktif, kartu **Aksi untuk hasil filter** muncul (lihat [Aksi Massal di Review](#aksi-massal-di-review)).
 5. **Ekspor**: tekan **Buat patch**, unduh zip, **backup folder data asli**, lalu timpa isinya dengan file di dalam zip. Untuk game VX Ace yang memakai `Game.rgss3a`, pilih arsip aslinya agar aplikasi membuat `Game.rgss3a` baru.
 
@@ -94,10 +99,13 @@ Navigasi memakai empat tab di bawah layar, dengan Pengaturan di pojok kanan atas
 | Lebar baris maks | Dengan face dan tanpa face (0 = mati) | 38 dan 48 |
 | Harga token masuk/keluar | Per 1 juta token, untuk perkiraan biaya | 0 |
 | Matikan mode berpikir | Khusus OpenRouter, agar lebih cepat | mati |
+| Putaran perbaikan otomatis | `0` = mati, `1` = hemat (perbaikan glosarium dan satu putaran sisa kata Inggris), `2` = penuh (dua putaran). Tiap putaran menambah request | `1` |
 | Gaya bahasa | Instruksi gaya untuk model | santai ala dialog game |
 | Catatan karakter | Format `nama: gaya bicara` | kosong |
 | Glosarium | Format `sumber = terjemahan`, satu per baris | kosong |
 | Daftar aman plugin | Menentukan perintah/parameter plugin yang boleh diterjemahkan | kosong |
+
+**Model penalar di provider selain OpenRouter.** Bila nama model mengandung `gpt-oss`, `o1`, `o3`, `o4`, `deepseek-r1`, `qwq`, `magistral`, atau `reasoner`, app otomatis menambahkan `reasoning_effort: "low"` ke request supaya model tidak berpikir panjang. Bila Body tambahan sudah memuat `reasoning` atau `reasoning_effort`, nilai milikmu yang dipakai. Bila provider menolak field itu (error 400 yang menyebut reasoning atau effort), app mematikannya sendiri sampai halaman dimuat ulang dan mengulang request. Apakah provider benar-benar meneruskannya ke model tergantung provider; cek lewat **Tes koneksi** (token keluar yang tinggi untuk contoh pendek berarti model masih berpikir panjang).
 
 **Daftar aman plugin** memakai tiga bentuk entri (satu per baris). Impor ulang proyek setelah mengubahnya:
 
@@ -138,6 +146,7 @@ Di tab **Proyek**, buka bagian **Cadangan dan pemulihan**:
 
 - **Buat cadangan**: mengunduh file zip berisi data proyek, semua teks dan terjemahannya, file data asli (supaya proyek langsung bisa diekspor lagi), serta glosarium, gaya bahasa, catatan karakter, dan daftar aman plugin. **API key dan cache tidak ikut.**
 - **Pulihkan dari cadangan**: memilih file zip tadi. Bila proyek yang sama sudah ada di perangkat, aplikasi menampilkan perbandingan jumlah teks yang sudah diterjemahkan dan meminta konfirmasi sebelum menimpa.
+- **Pengingat**: setiap kali **Buat cadangan** berhasil, app mencatat waktu dan jumlah teks selesai di browser ini. Dari catatan itu kartu pengingat di tab Translate menentukan kapan perlu cadangan lagi.
 - **Penyimpanan permanen**: aplikasi meminta browser agar datanya tidak dihapus otomatis (setelah impor atau lewat tombol di bagian yang sama). Browser boleh menolak, jadi file cadangan tetap pengaman yang sebenarnya. Memasang aplikasi ke layar utama biasanya membantu permintaan ini dikabulkan.
 
 File cadangan divalidasi sebelum dipakai: struktur, jumlah entri, id proyek, dan path file. Bila ada yang tidak cocok, tidak ada data yang diubah.
@@ -170,7 +179,19 @@ Menerjemahkan teks game berarti harus menjaga kode di dalamnya agar game tidak r
 - Teks yang diterjemahkan dikirim **hanya ke base URL** yang kamu atur.
 - API key **tidak disimpan** secara bawaan dan hanya hidup di memori tab. Key baru tersimpan bila kamu mencentang *Ingat key di perangkat ini*. Jangan aktifkan di perangkat bersama.
 - Proyek, terjemahan, cache, dan pengaturan disimpan di **IndexedDB** (`rpgtl-db`). Tombol **Hapus semua data** di Pengaturan menghapus semuanya tanpa menyentuh data lain di situs yang sama.
-- Karena berjalan di browser, provider harus mengizinkan request lintas-origin (CORS). Sebagian besar API LLM publik sudah mengizinkannya.
+- Preferensi tampilan dan catatan waktu cadangan disimpan di `localStorage` (kunci berawalan `rpgtl:ui:`), terpisah dari IndexedDB.
+- Karena berjalan di browser, provider harus mengizinkan request lintas-origin (CORS). Sebagian besar API LLM publik sudah mengizinkannya. Bila provider tidak mengizinkan, pakai [proxy CORS](#proxy-cors-opsional-cloudflare-worker).
+
+## Proxy CORS Opsional (Cloudflare Worker)
+
+Untuk provider yang tidak mengizinkan CORS, atau agar beberapa provider bisa dipakai lewat satu alamat, repo ini menyertakan `worker.js`: Cloudflare Worker sederhana yang meneruskan request ke provider. Worker ini di-deploy terpisah dari aplikasi (bukan bagian dari situs statis).
+
+- **Base URL di app**: `https://NAMA-WORKER.workers.dev/<alias>/<path provider>`, misalnya `/or/api/v1` untuk OpenRouter, `/ds/v1` untuk DeepSeek, `/groq/openai/v1` untuk Groq.
+- **Alias provider** ditulis di objek `PROVIDERS` pada `worker.js` (alias menjadi alamat dasar provider). Tambah atau ubah di sana. Alias bawaan: `or`, `ds`, `groq`, `tiar`, `sinar`.
+- **API key tidak disimpan di Worker**: key tetap diisi di app dan dikirim lewat header `Authorization`, lalu diteruskan apa adanya.
+- **Pembatasan origin**: hanya origin yang terdaftar yang boleh memakai proxy. Bawaannya satu origin di `DEFAULT_ORIGINS`; timpa dengan variabel `ALLOWED_ORIGINS` di Cloudflare (pisahkan dengan koma). Ganti nilai bawaan dengan alamat situsmu sendiri.
+- Body request diteruskan tanpa diubah, jadi field seperti `reasoning_effort` ikut sampai ke provider. Hanya metode `GET`, `POST`, dan `OPTIONS` yang diterima.
+- Teks game yang diterjemahkan melewati Worker milikmu sebelum sampai ke provider.
 
 ## Menjalankan Secara Lokal
 
@@ -209,7 +230,8 @@ Bila kamu memakai hosting lain, terapkan header yang setara.
 ├── lang-vocab.js    # Kosakata untuk deteksi bahasa Indonesia/Inggris
 ├── sw.js            # Service worker (cache app shell, mode offline)
 ├── manifest.json    # Manifest PWA
-└── vercel.json      # Konfigurasi deploy dan header keamanan
+├── vercel.json      # Konfigurasi deploy dan header keamanan
+└── worker.js        # Opsional: proxy CORS Cloudflare Worker (di-deploy terpisah)
 ```
 
 Bagian utama `app.js`:
@@ -220,7 +242,7 @@ Bagian utama `app.js`:
 | 2. Storage | Wrapper IndexedDB, hash SHA-256, hapus data |
 | 3. Parser dan extractor | Zip, Marshal (`.rvdata2`), `.rgss3a`, ekstraksi teks, masking kode |
 | 4. Impor dan ekspor | Impor proyek, `buildPatch`, diff guard, penulisan zip |
-| 5. Translate | Klien LLM, batch, cache, retry, resume, estimasi biaya, mode chat AI |
+| 5. Translate | Klien LLM, batch, cache, retry, putaran perbaikan, resume, estimasi biaya, mode chat AI |
 | 6. Tampilan | Proyek, Translate, Pengaturan, Review, Ekspor |
 | 7. Bootstrap | Router berbasis hash dan pendaftaran service worker |
 
