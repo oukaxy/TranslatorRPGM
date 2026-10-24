@@ -1687,7 +1687,7 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
   // Batas token keluar: mencegah model penalar berpikir/mengulang tanpa henti (dan tagihan membengkak).
   // Otomatis dari panjang pesan pengguna (teks batch) ditambah ruang berpikir; diisi manual lewat pengaturan atau Body tambahan.
   const lastLen = String(messages[messages.length - 1]?.content || '').length;
-  const autoCap = Math.min(32000, Math.round(Math.max(6000, Math.ceil(lastLen / 1.5) + 4000) * capBoost));
+  const autoCap = Math.min(16000, Math.round(Math.max(6000, Math.ceil(lastLen / 1.5) + 4000) * capBoost));
   const capTok = Number(cfg.maxTokens) > 0 ? Math.round(Number(cfg.maxTokens)) : autoCap;
   const capFromExtra = 'max_tokens' in extra || 'max_completion_tokens' in extra;
   // Batas waktu per request; pembatalan dari pengguna tetap diteruskan.
@@ -1703,7 +1703,7 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
         body: JSON.stringify({ model: cfg.model, temperature: cfg.temperature, messages, ...(capFromExtra ? {} : { max_tokens: capTok }), ...(cfg.fast && /(^|\.)openrouter\.ai$/.test(new URL(cfg.baseUrl).hostname) ? { reasoning: { enabled: false } } : {}), ...extra }),
       });
     } catch (e) {
-      if (e.name === 'AbortError') { if (timedOut) throw new LlmError(UI.timeout); throw e; }
+      if (e.name === 'AbortError') { if (timedOut) throw new LlmError(UI.timeout, { split: true, noRetry: true }); throw e; }
       throw new LlmError(UI.net);
     }
     if (!res.ok) {
@@ -1713,13 +1713,13 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
       let d = ''; try { d = (await res.json())?.error?.message || ''; } catch { /* abaikan */ }
       // 400/413/422: biasanya satu teks bermasalah (filter konten, terlalu panjang). Batch dipecah untuk mencari yang bermasalah.
       // Pesan soal model/key/kuota tetap fatal agar tidak memboroskan request.
-      const split = [400, 413, 422].includes(s) && !/model|api.?key|auth|credit|quota|billing|permission/i.test(d);
+      const split = ([400, 413, 422].includes(s) && !/model|api.?key|auth|credit|quota|billing|permission/i.test(d)) || [408, 504, 524].includes(s); // 408/504/524: request terlalu lama (provider memutus); batch dipecah, bukan diulang utuh
       const fatal = s !== 429 && s < 500 && !split;
       throw new LlmError(`Provider menolak permintaan (${s}). ${d || (fatal ? 'Periksa model di Pengaturan' : 'Coba lagi nanti')}`.trim(), { status: s, fatal, retryAfter, split, noRetry: split });
     }
     const j = await res.json().catch((e) => { if (timedOut) throw new LlmError(UI.timeout); return null; }), content = j?.choices?.[0]?.message?.content;
     // Terpotong karena batas token: jangan dipakai. Batch dipecah (split) agar yang ngaco terisolasi; token yang terpakai tetap dihitung.
-    if (j?.choices?.[0]?.finish_reason === 'length') { capBoost = Math.min(4, capBoost * 1.5); throw new LlmError(UI.tooLong, { split: true, noRetry: true, usage: j.usage || null }); }
+    if (j?.choices?.[0]?.finish_reason === 'length') { capBoost = Math.min(2, capBoost * 1.5); throw new LlmError(UI.tooLong, { split: true, noRetry: true, usage: j.usage || null }); }
     let text = content;
     if (typeof text !== 'string') throw new LlmError(UI.badResp);
     // Model penalar (mis. MiniMax) menaruh proses berpikir di <think>…</think>; buang supaya JSON balasan terbaca.
@@ -1936,6 +1936,13 @@ export async function runTranslation(project, cfg, o = {}) {
   // Jumlah batch yang berjalan bersamaan: mulai 6, turun saat provider membatasi, naik tiap 4 batch lancar (sampai batas konkurensi).
   const lim = { cur: auto ? Math.min(eff.concurrency, 6) : eff.concurrency, max: eff.concurrency, active: 0, okRun: 0 };
   let n = 0; const tick = (t) => onProgress(n + base, todo.length + base, (stat.tokensIn ? `${t} · token masuk ${stat.tokensIn}, keluar ${stat.tokensOut}` : t) + (stat.nb >= 3 && stat.tokensOut > stat.expOut * 2.5 ? ' · Token keluar jauh di atas wajar: model memakai mode berpikir. Batas token otomatis menahan lonjakan; atur manual di Pengaturan bila perlu' : ''));
+  // Status berjalan: kemajuan khusus proses ini (bukan seluruh proyek), waktu berjalan, dan jumlah batch aktif; disegarkan tiap detik.
+  const tStart = Date.now(); let gateRef = null;
+  const fmtDur = (ms) => { const s = Math.round(ms / 1000), hh = Math.floor(s / 3600), mm = Math.floor((s % 3600) / 60), ss = s % 60; return hh ? `${hh}j ${mm}m` : mm ? `${mm}m ${ss}d` : `${ss}d`; };
+  const prog = () => {
+    const w = gateRef ? Math.max(gateRef.until - Date.now(), gateRef.pace) : 0, total = todo.length || 1;
+    return (w > 1500 ? `Menunggu limit provider (${Math.round(w / 1000)} dtk) · ` : '') + `${n} dari ${todo.length} teks (${Math.floor((n * 100) / total)}%) · berjalan ${fmtDur(Date.now() - tStart)} · ${lim.active} batch aktif`;
+  };
   const groups = new Map();
   for (const e of todo) { if (!groups.has(e.original)) groups.set(e.original, []); groups.get(e.original).push(e); }
   const units = [], hits = [], gl = parseGlossary(cfg.glossary), cn = parseNotes(cfg.charNotes); let uid = 0;
@@ -1958,13 +1965,13 @@ export async function runTranslation(project, cfg, o = {}) {
     });
   }
   if (hits.length) { await dbPutMany('entries', hits); n += hits.length; stat.done = stat.cached = hits.length; }
-  tick(`${n + base} dari ${todo.length + base} teks`);
+  tick(prog());
   const byId = new Map(units.map((u) => [u.id, u])); let streak = 0;
   // Gerbang bersama: bila provider membatasi (429/5xx), semua worker menunggu dan lajunya diperlambat bertahap, lalu pulih saat sukses.
   const gate = { until: 0, pace: 0 };
   const guarded = async (m) => {
     const w = Math.max(gate.until - Date.now(), gate.pace);
-    if (w > 1500) tick(`Menunggu limit provider (${Math.round(w / 1000)} dtk) · ${n + base} dari ${todo.length + base} teks`);
+    if (w > 1500) tick(prog());
     if (w > 0) await sleepSig(w, signal);
     try { const r = await chat(m, signal); gate.pace = gate.pace < 200 ? 0 : gate.pace / 2; if (auto && ++lim.okRun >= 4 && lim.cur < lim.max) { lim.cur++; lim.okRun = 0; } return r; }
     catch (e) {
@@ -1992,7 +1999,7 @@ export async function runTranslation(project, cfg, o = {}) {
       await saveOk(r.ok);
       await glossFix(batch, r, o2); await langFix(batch, r, o2);
     } catch (e) {
-      const c = await saveOk(keep).catch(() => 0); stat.done += c; n += c; tick(`${n + base} dari ${todo.length + base} teks`);
+      const c = await saveOk(keep).catch(() => 0); stat.done += c; n += c; tick(prog());
       throw e;
     }
     stat.expOut += batch.reduce((a, u) => a + u.text.length + 5, 0); stat.nb++;
@@ -2005,7 +2012,7 @@ export async function runTranslation(project, cfg, o = {}) {
     });
     r.fail.forEach((msg, id) => { byId.get(id).entries.forEach((e) => upd.push({ ...e, status: 'error', error: msg })); stat.error += byId.get(id).entries.length; });
     await dbPutMany('cache', cache); await dbPutMany('entries', upd);
-    n += upd.length; tick(`${n + base} dari ${todo.length + base} teks`);
+    n += upd.length; tick(prog());
     streak = r.ok.size ? 0 : streak + 1;
     if (streak >= 3) throw new LlmError(UI.tooMany, { fatal: true });
   };
@@ -2014,8 +2021,10 @@ export async function runTranslation(project, cfg, o = {}) {
     lim.active++;
     try { await run(batch); } finally { lim.active--; }
   };
+  gateRef = gate; const iv = setInterval(() => tick(prog()), 1000);
   try { await runPool(makeBatches(units, eff.batchSize, eff.maxChars), eff.concurrency, eff.delay, signal, work); }
   catch (e) { if (e.name !== 'AbortError') throw e; }
+  finally { clearInterval(iv); }
   stat.stopped = !!signal?.aborted;
   return stat;
 }
@@ -2374,7 +2383,7 @@ async function startJob(opts = {}) {
   const cats = !ids && catSel.pid === p.id && catSel.set ? [...catSel.set] : null;
   if (cats && !cats.length) { job.err = true; job.text = 'Pilih minimal satu kategori dulu'; return paintJob(); }
   const before = await dbQuery('entries', 'projectId', p.id), base = ids ? 0 : before.filter((e) => e.status === 'done' || e.status === 'edited').length;
-  job.running = true; job.ctl = new AbortController(); job.value = base; job.max = base + before.filter((e) => TODO.has(e.status) && (!cats || cats.includes(e.category)) && (!ids || ids.has(e.id))).length || 1; job.text = 'Memulai…'; paintJob();
+  job.running = true; job.ctl = new AbortController(); job.value = 0; job.max = before.filter((e) => TODO.has(e.status) && (!cats || cats.includes(e.category)) && (!ids || ids.has(e.id))).length || 1; job.text = 'Memulai…'; paintJob();
   let lock = null; try { lock = await navigator.wakeLock?.request('screen'); } catch { /* layar tetap boleh mati */ }
   try {
     let t0 = Date.now(), d0 = null;
@@ -2382,7 +2391,7 @@ async function startJob(opts = {}) {
       if (d0 === null) { d0 = d; t0 = Date.now(); }
       let eta = '';
       if (d > d0 && d < t) { const sec = ((t - d) * (Date.now() - t0)) / 1000 / (d - d0); eta = ` · sisa ±${sec >= 90 ? Math.round(sec / 60) + ' menit' : Math.round(sec) + ' detik'}`; }
-      job.value = d; job.max = t || 1; job.text = txt + eta; paintJob();
+      job.value = d - base; job.max = (t - base) || 1; job.text = txt + eta; paintJob();
     } });
     job.text = !r.done && !r.error && !r.stopped ? UI.nothing
       : `${r.stopped ? 'Dihentikan' : 'Selesai'}. ${r.done} berhasil (${r.cached} dari cache), ${r.error} error${r.error ? '. Lihat di tab Review, filter Error' : ''}`;
