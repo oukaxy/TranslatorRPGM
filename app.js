@@ -1993,13 +1993,14 @@ export async function runTranslation(project, cfg, o = {}) {
       if (cache.length) { await dbPutMany('cache', cache); await dbPutMany('entries', upd); }
       return upd.length;
     };
-    let r;
+    let r; const early = new Set(); let earlyN = 0; // unit yang sudah disimpan dan dihitung di checkpoint, supaya angka progres naik lebih awal tanpa terhitung dua kali
     try {
       r = await translateBatch(batch, o2);
-      await saveOk(r.ok);
+      earlyN = await saveOk(r.ok); r.ok.forEach((_, id) => early.add(id)); n += earlyN; stat.done += earlyN; tick(prog());
       await glossFix(batch, r, o2); await langFix(batch, r, o2);
     } catch (e) {
-      const c = await saveOk(keep).catch(() => 0); stat.done += c; n += c; tick(prog());
+      let c = 0; try { c = Math.max(0, (await saveOk(keep)) - earlyN); } catch { /* abaikan */ }
+      stat.done += c; n += c; tick(prog());
       throw e;
     }
     stat.expOut += batch.reduce((a, u) => a + u.text.length + 5, 0); stat.nb++;
@@ -2008,11 +2009,11 @@ export async function runTranslation(project, cfg, o = {}) {
       const u = byId.get(id), text = unmaskText(t, u.tokens).text;
       cache.push({ key: u.key, text, at: Date.now() });
       if (u.entries[0].original.length <= 120) { const k = simNorm(u.entries[0].original); if (!tm.has(k)) tm.set(k, { original: u.entries[0].original, translation: text }); }
-      u.entries.forEach((e) => upd.push({ ...e, translation: text, status: 'done', error: '' })); stat.done += u.entries.length;
+      u.entries.forEach((e) => upd.push({ ...e, translation: text, status: 'done', error: '' })); if (!early.has(id)) stat.done += u.entries.length;
     });
     r.fail.forEach((msg, id) => { byId.get(id).entries.forEach((e) => upd.push({ ...e, status: 'error', error: msg })); stat.error += byId.get(id).entries.length; });
     await dbPutMany('cache', cache); await dbPutMany('entries', upd);
-    n += upd.length; tick(prog());
+    n += upd.length - earlyN; tick(prog());
     streak = r.ok.size ? 0 : streak + 1;
     if (streak >= 3) throw new LlmError(UI.tooMany, { fatal: true });
   };
