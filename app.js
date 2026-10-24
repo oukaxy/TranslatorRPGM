@@ -1852,11 +1852,19 @@ export const garbled = (t, orig = '') => (String(t || '').match(/(?:^|\s)_[A-Za-
 const langScore = (t, orig, tgt) => englishLeft(t, tgt, orig).length + garbled(t, orig).length * 3;
 const ENG_MSG = 'Hasil masih bercampur kata Inggris atau serpihan aneh, bukan bahasa target penuh';
 const NUM_MSG = 'Angka di hasil tidak sama dengan teks asli';
-/** Angka (digit) di hasil tidak sama dengan teks asli, mis. "Level 8" jadi "Level 9". Angka yang ditulis dengan kata (hasil tanpa digit) tidak dihitung salah. */
+/** Angka (digit) di hasil tidak sama dengan teks asli, mis. "Level 8" jadi "Level 9". Angka yang ditulis dengan kata (hasil tanpa digit) tidak dihitung salah. Angka yang di teks asli berupa kata Inggris ("Four") boleh jadi digit di hasil ("4"). */
+const NUM_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, twenty: 20, thirty: 30, forty: 40, fifty: 50, hundred: 100 };
+const NUM_WORD_RE = new RegExp(`\\b(?:${Object.keys(NUM_WORDS).join('|')})\\b`, 'g');
 export function numDiff(orig, t) {
-  const nums = (x) => (String(x || '').replace(/⟦\d+⟧/g, ' ').replace(ESC, ' ').replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).match(/\d+/g) || []).sort().join(',');
-  const a = nums(orig), b = nums(t);
-  return !!a && !!b && a !== b;
+  const digits = (x) => String(x || '').replace(/⟦\d+⟧/g, ' ').replace(ESC, ' ').replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).match(/\d+/g) || [];
+  const a = digits(orig), b = digits(t);
+  if (!a.length || !b.length) return false;
+  const cnt = (arr, d) => arr.filter((x) => x === d).length;
+  for (const w of String(orig).toLowerCase().match(NUM_WORD_RE) || []) {
+    const d = String(NUM_WORDS[w]);
+    if (cnt(b, d) > cnt(a, d)) b.splice(b.indexOf(d), 1);
+  }
+  return a.sort().join(',') !== b.sort().join(',');
 }
 const LEN_MSG = 'Panjang hasil tidak wajar dibanding teks asli (mungkin terjemahan baris lain)';
 /** Hasil jauh lebih pendek (<30%) atau jauh lebih panjang (>3,5x) dari teks asli: tanda model menjawab baris lain atau menghilangkan isi. Teks Jepang dan teks pendek (<40 huruf) tidak diperiksa. */
