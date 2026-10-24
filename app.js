@@ -1706,7 +1706,7 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
     }
     if (!res.ok) {
       const s = res.status, retryAfter = parseRetryAfter(res.headers?.get?.('retry-after'));
-      if (s === 401 || s === 403) throw new LlmError(UI.keyBad, { status: s, fatal: true });
+      if (s === 401 || s === 403) { let d = ''; try { d = (await res.json())?.error?.message || ''; } catch { /* abaikan */ } throw new LlmError(`${UI.keyBad} (${s}${d ? ': ' + String(d).slice(0, 160) : ''})`, { status: s, fatal: true }); }
       if (s === 402) throw new LlmError(UI.credit, { status: s, fatal: true });
       let d = ''; try { d = (await res.json())?.error?.message || ''; } catch { /* abaikan */ }
       // 400/413/422: biasanya satu teks bermasalah (filter konten, terlalu panjang). Batch dipecah untuk mencari yang bermasalah.
