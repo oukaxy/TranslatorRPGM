@@ -1,6 +1,6 @@
 export const config = { runtime: "edge" };
 
-const TARGET = "https://ai.sinarcloud.com/v1/chat/completions";
+const TARGET = "https://api.ontoken.id/v1";
 
 export default async function handler(req) {
   if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
