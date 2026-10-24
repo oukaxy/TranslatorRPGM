@@ -1807,7 +1807,7 @@ export async function translateBatch(units, o, why = new Map()) {
     const id = Number(r?.id);
     if (!ids.has(id) || typeof r.text !== 'string' || ok.has(id)) continue;
     const bad = o.check?.(id, r.text) || '';
-    if (bad) why.set(id, bad); else ok.set(id, r.text);
+    if (bad) why.set(id, bad); else { ok.set(id, r.text); if (o.keep && !o.keep.has(id)) o.keep.set(id, r.text); }
   }
   const missing = units.filter((u) => !ok.has(u.id));
   if (!missing.length) return { ok, fail };
@@ -1976,7 +1976,23 @@ export async function runTranslation(project, cfg, o = {}) {
       check: (id, t) => (!t.trim() ? UI.emptyTr : !unmaskText(t, byId.get(id).tokens).ok ? UI.tokenBad : stray(t) ? STRAY_MSG : foreignWords(t, byId.get(id).text).length ? foreignMsg(t, byId.get(id).text) : codeProblem(byId.get(id).text, t) || (lenOff(t, byId.get(id).text) ? LEN_MSG : '') || (numDiff(byId.get(id).text, t) ? NUM_MSG : '')),
       onUsage: (u) => { stat.tokensIn += u?.prompt_tokens || 0; stat.tokensOut += u?.completion_tokens || 0; },
     };
-    const r = await translateBatch(batch, o2); await glossFix(batch, r, o2); await langFix(batch, r, o2);
+    // Simpan hasil valid sesegera mungkin (checkpoint) dan selamatkan bila proses dihentikan/gagal di tengah jalan.
+    const keep = new Map(); o2.keep = keep;
+    const saveOk = async (map) => {
+      const upd = [], cache = [];
+      map.forEach((t, id) => { const u = byId.get(id), text = unmaskText(t, u.tokens).text; cache.push({ key: u.key, text, at: Date.now() }); u.entries.forEach((e) => upd.push({ ...e, translation: text, status: 'done', error: '' })); });
+      if (cache.length) { await dbPutMany('cache', cache); await dbPutMany('entries', upd); }
+      return upd.length;
+    };
+    let r;
+    try {
+      r = await translateBatch(batch, o2);
+      await saveOk(r.ok);
+      await glossFix(batch, r, o2); await langFix(batch, r, o2);
+    } catch (e) {
+      const c = await saveOk(keep).catch(() => 0); stat.done += c; n += c; tick(`${n + base} dari ${todo.length + base} teks`);
+      throw e;
+    }
     stat.expOut += batch.reduce((a, u) => a + u.text.length + 5, 0); stat.nb++;
     const upd = [], cache = [];
     r.ok.forEach((t, id) => {
