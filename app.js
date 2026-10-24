@@ -1673,6 +1673,8 @@ export function parseRetryAfter(v) {
   const n = Number(v); if (Number.isFinite(n)) return Math.max(0, n * 1000);
   const t = Date.parse(v); return Number.isFinite(t) ? Math.max(0, t - Date.now()) : null;
 }
+// Pengali batas token otomatis: naik sendiri kalau model penalar kehabisan token saat berpikir (dipakai ulang sampai halaman dimuat ulang).
+let capBoost = 1;
 export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
   if (!cfg.apiKey) throw new LlmError(UI.noKey, { fatal: true });
   if (!urlOk(cfg.baseUrl)) throw new LlmError(UI.urlBad, { fatal: true });
@@ -1685,14 +1687,14 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
   // Batas token keluar: mencegah model penalar berpikir/mengulang tanpa henti (dan tagihan membengkak).
   // Otomatis dari panjang pesan pengguna (teks batch) ditambah ruang berpikir; diisi manual lewat pengaturan atau Body tambahan.
   const lastLen = String(messages[messages.length - 1]?.content || '').length;
-  const autoCap = Math.min(20000, Math.max(6000, Math.ceil(lastLen / 1.5) + 4000));
+  const autoCap = Math.min(32000, Math.round(Math.max(6000, Math.ceil(lastLen / 1.5) + 4000) * capBoost));
   const capTok = Number(cfg.maxTokens) > 0 ? Math.round(Number(cfg.maxTokens)) : autoCap;
   const capFromExtra = 'max_tokens' in extra || 'max_completion_tokens' in extra;
   // Batas waktu per request; pembatalan dari pengguna tetap diteruskan.
   const ctl = new AbortController(); let timedOut = false;
   const onAbort = () => ctl.abort();
   if (signal?.aborted) ctl.abort(); else signal?.addEventListener('abort', onAbort, { once: true });
-  const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, Math.max(10, Number(cfg.timeout) || 120) * 1000);
+  const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, Math.max(10, Number(cfg.timeout) || Math.round(120 * Math.max(1, capBoost))) * 1000);
   try {
     let res;
     try {
@@ -1717,7 +1719,7 @@ export async function llmChat(cfg, messages, signal, fetchFn = fetch) {
     }
     const j = await res.json().catch((e) => { if (timedOut) throw new LlmError(UI.timeout); return null; }), content = j?.choices?.[0]?.message?.content;
     // Terpotong karena batas token: jangan dipakai. Batch dipecah (split) agar yang ngaco terisolasi; token yang terpakai tetap dihitung.
-    if (j?.choices?.[0]?.finish_reason === 'length') throw new LlmError(UI.tooLong, { split: true, noRetry: true, usage: j.usage || null });
+    if (j?.choices?.[0]?.finish_reason === 'length') { capBoost = Math.min(4, capBoost * 1.5); throw new LlmError(UI.tooLong, { split: true, noRetry: true, usage: j.usage || null }); }
     let text = content;
     if (typeof text !== 'string') throw new LlmError(UI.badResp);
     // Model penalar (mis. MiniMax) menaruh proses berpikir di <think>…</think>; buang supaya JSON balasan terbaca.
