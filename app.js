@@ -923,6 +923,7 @@ export function extractFile(path, json, { src = 'ja', allow = null, strict = fal
     else (json.events || []).forEach((ev, ei) => ev && pages(ev.pages, ['events', ei]));
   } else if (base === 'CommonEvents') (json || []).forEach((ev, i) => ev && scanList(ev.list, [i, 'list']));
   else if (base === 'Troops') (json || []).forEach((t, i) => t && pages(t.pages, [i]));
+  else if (isCmdMap(json)) Object.keys(json).forEach((k) => scanList(json[k], [/^\d+$/.test(k) ? Number(k) : k])); // file custom: { nama: [perintah event, ...] }, mis. Scenario.json
   else if (base === 'plugins.js' && Array.isArray(json)) json.forEach((pl, i) => {
     if (!pl || pl.status === false || !pl.parameters) return;
     for (const k of Object.keys(pl.parameters)) if (typeof pl.parameters[k] === 'string' && !looksStruct(pl.parameters[k]) && A.param.has(`${pl.name}.${k}`)) add([i, 'parameters', k], 'field', 'plugin', pl.parameters[k]);
@@ -1131,6 +1132,8 @@ const sameDeep = (a, b) => {
   return a === b;
 };
 const isCmd = (v) => v && typeof v === 'object' && !Array.isArray(v) && typeof v.code === 'number' && Array.isArray(v.parameters);
+/** Objek yang semua nilainya daftar perintah event non-kosong (file custom seperti Scenario.json). */
+const isCmdMap = (j) => !!j && typeof j === 'object' && !Array.isArray(j) && Object.keys(j).length > 0 && Object.values(j).every((v) => Array.isArray(v) && v.every(isCmd));
 const bodyOf = (c) => (c.code === 101 ? 401 : c.code === 105 ? 405 : 0);
 /** Pisahkan list perintah menjadi perintah biasa dan run baris dialog (401/405) di bawah header 101/105. */
 function splitList(list) {
@@ -1200,7 +1203,7 @@ export function diffGuard(orig, next, file = 'data/X.json', allow = null, src = 
       bad(p, 'teks di luar whitelist berubah'); return;
     }
     if (t === 'array') {
-      if (key === 'list' && a.every(isCmd) && b.every(isCmd)) return cmpList(a, b, p);
+      if ((key === 'list' || a.length) && a.every(isCmd) && b.every(isCmd)) return cmpList(a, b, p);
       if (a.length !== b.length) return bad(p, 'panjang array berubah');
       return a.forEach((x, i) => cmp(x, b[i], [...p, i]));
     }
