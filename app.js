@@ -1146,11 +1146,11 @@ function splitList(list) {
  * penyisipan/penghapusan baris 401/405 pada blok 101/105 yang boleh berbeda.
  * @returns {string[]} daftar masalah (kosong bila lolos), maksimal 20
  */
-export function diffGuard(orig, next, file = 'data/X.json', allow = null) {
+export function diffGuard(orig, next, file = 'data/X.json', allow = null, src = 'all') {
   const probs = [], allowS = new Set(), allowB = new Set(), allowN = new Set(), allowL = new Set(), allowM = new Map(), allowR = new Set();
   // Proyek lama menyimpan indeks array System.terms sebagai string; samakan jadi angka.
   const norm = (path) => JSON.stringify(JSON.parse(path).map((k) => (typeof k === 'string' && /^\d+$/.test(k) ? Number(k) : k)));
-  for (const e of extractFile(file, orig, { src: 'en', allow })) {
+  for (const e of extractFile(file, orig, { src, allow })) {
     // note-tag: yang boleh berubah hanya isi tag di dalam string note; path note-nya didaftarkan terpisah
     if (e.category === 'script-multi') {
       const pp = JSON.parse(e.path), n = pp.at(-1), i = pp.at(-3), lp = pp.slice(0, -3);
@@ -1231,7 +1231,7 @@ function fmtLang(work, orig) {
   const s = JSON.stringify(work, null, ind || undefined);
   return /\r\n/.test(orig) ? s.replace(/\n/g, '\r\n') : s;
 }
-export function buildPatch(files, entries, { model = '', date = new Date(), wrap = null, notes = [], allow = null, bom = null } = {}) {
+export function buildPatch(files, entries, { model = '', date = new Date(), wrap = null, notes = [], allow = null, bom = null, src = 'all' } = {}) {
   const byFile = new Map(), out = [], problems = [], warnings = [], badAll = [], stat = { files: 0, applied: 0, pending: 0, error: 0, skipped: 0, wrapped: 0, long: 0, mismatch: 0 };
   for (const e of entries) {
     if (!byFile.has(e.file)) byFile.set(e.file, []); byFile.get(e.file).push(e);
@@ -1257,7 +1257,7 @@ export function buildPatch(files, entries, { model = '', date = new Date(), wrap
     if (!use.length) continue;
     const lang = LANG_PATH.test(f.path), text = isPl ? buildPluginsJs(pj, work) : lang ? fmtLang(work, f.text) : JSON.stringify(work); let re = null;
     try { re = isPl ? parsePluginsJs(text)?.arr : JSON.parse(text); if (!re) throw new Error('x'); } catch { pr.push(`${f.path}: hasil tidak bisa dibaca ulang`); }
-    if (!pr.length) pr.push(...diffGuard(orig, re, f.path, allow));
+    if (!pr.length) pr.push(...diffGuard(orig, re, f.path, allow, src));
     let data = null;
     if (!pr.length && /\.rvdata2$/i.test(f.path)) {
       try {
@@ -1277,7 +1277,7 @@ export async function exportProject(project, model = '', wrap = null) {
   const plug = project.msgPlugins?.length ? project.msgPlugins : null;
   if (plug || project.langFile) wrap = null;
   const files = await dbPrefix('origFiles', project.id + ':'), entries = await dbQuery('entries', 'projectId', project.id);
-  const r = buildPatch(files, entries, { model, wrap, allow: project.allow, bom: project.bom, notes: plug ? [`Plugin message terdeteksi (${plug.join(', ')}): pemecahan baris otomatis dimatikan. Cek hasil di game.`] : project.langFile ? ['File bahasa: salin hasilnya ke folder languages game. Nama file boleh diganti sesuai bahasa yang dipilih di menu game (backup dulu).'] : [] });
+  const r = buildPatch(files, entries, { model, wrap, allow: project.allow, src: project.src || 'all', bom: project.bom, notes: plug ? [`Plugin message terdeteksi (${plug.join(', ')}): pemecahan baris otomatis dimatikan. Cek hasil di game.`] : project.langFile ? ['File bahasa: salin hasilnya ke folder languages game. Nama file boleh diganti sesuai bahasa yang dipilih di menu game (backup dulu).'] : [] });
   if (!r.ok) return r;
   return { ...r, blob: await writeZip([...r.files, { name: 'patch-report.txt', data: new TextEncoder().encode(r.report) }]) };
 }
