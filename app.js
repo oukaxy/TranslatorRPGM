@@ -203,7 +203,7 @@ export function unmaskText(text, tokens) {
 }
 // Kata kunci kode yang tidak boleh hilang/diterjemahkan, hanya diperiksa bila teks asli terlihat seperti kode (ada operator, if(...), atau x = y).
 const CODE_WORDS = /\b(?:if|elsif|else|unless|while|true|false|nil|null|return)\b/g;
-const CODEY = /[=!<>]=|&&|\|\||\b(?:if|elsif|unless|while)\b\s*[($!\\]|\b[A-Za-z_]\w*\s*=\s*[^\s=]/;
+const CODEY = /[=!<>]=|&&|\|\||\b(?:if|elsif|unless|while)\b\s*\(|\b(?:if|elsif|unless|while)\s+[!$@]+[A-Za-z_]|\b[A-Za-z_]\w*\s*=\s*[^\s=]/;
 /** True bila teks asli berbau kode dan jumlah kata kuncinya di terjemahan lebih sedikit. */
 export function kwLost(orig, tr) {
   if (!CODEY.test(orig)) return false;
