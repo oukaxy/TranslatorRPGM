@@ -136,7 +136,8 @@ const rbLit = () => /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g;
 const ESC = /\\[A-Za-z]{1,12}<[^>\n\u3000-\u9fff\uff00-\uffef]*>|\\[Ff][RrIiBb](?![A-Za-z])|\\(?:[A-Za-z]+\[(?:\d+|#[0-9A-Fa-f]{3,8}|[0-9A-Fa-f]{6}|auto)\]|[A-Za-z]|[{}.|!^$<>\\])|<\/?[A-Za-z][ -;=?-~]{0,40}>|\b[A-Za-z_]\w*\((?=[^)\n]*(?:\[\d+\]|\\[A-Za-z]+\[))(?:[^()\n]|\([^()\n]*\))*\)|\b[sv]\[\d+\]|\$game[A-Za-z]+(?:\.\w+|\[[^\]\n]*\])*|%\d|#\{[^}\n]*\}|\$\{[^}\n]*\}|\{\{[^}\n]*\}\}|\{\d+\}|[¥￥]/g;
 // Pola masking yang lebih lengkap dari ESC: variabel bersarang \V[\V[1]], placeholder printf (%1$s, %s, %d) dan entitas HTML.
 // Hanya dipakai untuk masking terjemahan dan audit kode; ESC dipakai tetap oleh heuristik impor supaya hasil ekstraksi proyek lama tidak bergeser.
-const MASK = new RegExp(['\\\\[A-Za-z]+\\[\\\\[A-Za-z]+\\[\\d+\\]\\]', '%\\d+\\$[sd]', ESC.source, '%[sd]\\b', '&(?:nbsp|amp|lt|gt|quot|#\\d+);'].join('|'), 'g');
+// Kode plugin dengan parameter huruf (\AA[F], \FH[ON], \FH[OFF]) juga dikenali utuh; tanpa ini hanya \A / \F yang jadi token dan sisanya (A[F], H[ON]) ikut dikirim ke AI sebagai teks.
+const MASK = new RegExp(['\\\\[A-Za-z]+\\[\\\\[A-Za-z]+\\[\\d+\\]\\]', '%\\d+\\$[sd]', '\\\\[A-Za-z]+\\[[A-Za-z0-9_]{1,12}\\]', ESC.source, '%[sd]\\b', '&(?:nbsp|amp|lt|gt|quot|#\\d+);'].join('|'), 'g');
 // Plugin message yang punya word-wrap sendiri. Bila aktif, pemecahan baris manual dimatikan.
 const MSG_PLUGIN = /^(YEP_MessageCore|VisuMZ_1_MessageCore)$|word.?wrap|line.?wrap|auto.?wrap|text.?wrap|message.?wrap/i;
 /** Daftar nama plugin message aktif dari isi js/plugins.js. */
