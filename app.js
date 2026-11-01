@@ -2173,9 +2173,9 @@ const actionBar = (...k) => {
   return el;
 };
 /** Baris pilih file: judul + keterangan di kiri, tombol di kanan. */
-const pickRow = (title, hint, attrs, onpick) => h('div', { class: 'row' },
+const pickRow = (title, hint, attrs, onpick, onopen) => h('div', { class: 'row' },
   h('span', {}, h('b', {}, title), hint ? h('small', {}, hint) : ''),
-  h('label', { class: 'file' }, 'Pilih', h('input', { type: 'file', 'aria-label': `Pilih ${title}`, onchange: onpick, ...attrs })));
+  h('label', { class: 'file' }, 'Pilih', h('input', { type: 'file', 'aria-label': `Pilih ${title}`, onchange: onpick, onclick: onopen, ...attrs })));
 /** Proyek lama: pecah kategori database (items -> items-label/items-deskripsi, dst.). Sekali jalan per proyek. */
 async function migrateCats(p) {
   if (p.catV >= 2) return p;
@@ -2331,7 +2331,8 @@ async function viewProyek() {
   const run = async (ev) => {
     const files = [...ev.target.files]; ev.target.value = '';
     if (!files.length || busy) return;
-    lock(true); bar.removeAttribute('value'); msg.className = 'mut'; msg.textContent = 'Mengimpor…';
+    lock(true); bar.removeAttribute('value'); msg.className = 'mut'; msg.textContent = `Mengimpor ${files.length} file…`;
+    await new Promise((r) => setTimeout(r, 50)); // beri waktu layar menampilkan pesan sebelum kerja berat
     try {
       const p = await importProject(files, src, (t, d, n) => { msg.textContent = t; if (n) { bar.max = n; bar.value = d; } else bar.removeAttribute('value'); }, { allow: (await loadConfig()).pluginAllow });
       storageStatus(true).catch(() => {});
@@ -2344,10 +2345,11 @@ async function viewProyek() {
   const sel = h('select', { onchange: (e) => { src = e.target.value; uiSet('src', src); } },
     h('option', { value: 'auto' }, 'Otomatis (Jepang/Inggris campur)'), h('option', { value: 'all' }, 'Semua teks (bahasa apa pun, impor penuh)'), h('option', { value: 'ja' }, 'Jepang'), h('option', { value: 'en' }, 'Inggris'));
   sel.value = src;
-  const pick = (title, hint, attrs) => pickRow(title, hint, attrs, run);
+  const pick = (title, hint, attrs, onopen) => pickRow(title, hint, attrs, run, onopen);
+  const folderWait = () => { msg.className = 'mut'; msg.textContent = 'Browser sedang membaca daftar file folder. Pada game besar (ribuan file) ini bisa lama dan progres belum muncul. Bila terlalu lama, pakai zip game atau folder kecil berisi data dan js/plugins.js.'; };
   box.append(h('label', {}, 'Bahasa sumber'), sel,
     h('div', { class: 'picks' },
-      pick('Folder data', 'Hasil ekstrak MV, MZ, atau VX Ace', { webkitdirectory: '', multiple: '' }),
+      pick('Folder data', 'Hasil ekstrak MV, MZ, atau VX Ace', { webkitdirectory: '', multiple: '' }, folderWait),
       pick('File zip game', 'Zip yang berisi folder data', { accept: '.zip' }),
       pick('Game.rgss3a', 'Arsip terenkripsi VX Ace', {})), bar, msg);
   const lmsg = h('p', { class: 'mut' }), lbar = h('progress', { value: '0', max: '1', hidden: '' });
