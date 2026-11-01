@@ -628,7 +628,14 @@ async function collectSources(files) {
   files = files.filter((f) => !/\.rgss3a$/i.test(f.name));
   if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
     const z = await readZip(files[0]);
-    z.entries.forEach((e) => list.push({ path: e.name, read: async () => new TextDecoder().decode(await z.read(e)), readBin: () => z.read(e) }));
+    for (const e of z.entries) {
+      if (/\.rgss3a$/i.test(e.name)) { // Game.rgss3a di dalam zip: ekstrak ke memori lalu baca seperti arsip biasa
+        let bin; try { bin = await z.read(e); } catch (x) { if (x instanceof RangeError) throw new Error('Game.rgss3a di dalam zip terlalu besar untuk dibaca di memori. Ekstrak dulu zip-nya, lalu pilih Game.rgss3a langsung'); throw x; }
+        list.push(...await readRgss3a(new Blob([bin])));
+        continue;
+      }
+      list.push({ path: e.name, read: async () => new TextDecoder().decode(await z.read(e)), readBin: () => z.read(e) });
+    }
   } else for (const f of files) list.push({ path: f.webkitRelativePath || f.name, read: () => f.text(), readBin: async () => new Uint8Array(await f.arrayBuffer()) });
   const has = (re) => list.some((i) => re.test(i.path));
   const data = new Map();
@@ -2358,7 +2365,7 @@ async function viewProyek() {
         } catch (e) { res.className = 'err'; res.textContent = e?.message || String(e); }
         b.disabled = false;
       } }, 'Cari'), res));
-    const cats = [...new Set([...ALL_CATS, ...Object.keys(p.counts || {})])];
+    const cats = Object.keys(p.counts || {}); // hanya kategori yang tampil di Ringkasan proyek
 
     const fillC = new Set(cats.filter((c) => /-label$/.test(c))), fillBoxes = [];
     const setFill = (on) => { fillC.clear(); if (on) cats.forEach((c) => fillC.add(c)); fillBoxes.forEach((b) => { b.checked = on; }); };
