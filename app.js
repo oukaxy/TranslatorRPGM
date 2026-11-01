@@ -1626,6 +1626,40 @@ const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian', all: 'any langua
 // U+30FB (・, titik tengah katakana) hanya tanda poin, bukan huruf Jepang: hasil yang mempertahankannya tidak boleh ditolak.
 export const stray = (t) => JA.test(String(t).replace(/[\u30fb\u30fc\u30a0\u309b\u309c]/g, '')) || /[\u0400-\u04FF\u0600-\u06FF\uAC00-\uD7AF]/.test(t);
 const STRAY_MSG = 'Hasil masih bercampur huruf Jepang/asing, bukan bahasa target';
+/**
+ * Kana yang tertinggal di hasil (biasanya erangan/suara: あっ, んっ, 〜っ) diubah ke romaji sederhana alih-alih menolak seluruh teks.
+ * っ di akhir jadi "h" (あっ -> ah, んっ -> nn), っ sebelum konsonan menggandakannya (ちょっと -> chotto).
+ * Tidak dipakai bila ada kanji, atau ada rentetan kana panjang yang beragam (kalimat Jepang yang disalin utuh): biar tetap ditolak.
+ */
+const KB = { あ: 'a', い: 'i', う: 'u', え: 'e', お: 'o', か: 'ka', き: 'ki', く: 'ku', け: 'ke', こ: 'ko', さ: 'sa', し: 'shi', す: 'su', せ: 'se', そ: 'so', た: 'ta', ち: 'chi', つ: 'tsu', て: 'te', と: 'to', な: 'na', に: 'ni', ぬ: 'nu', ね: 'ne', の: 'no', は: 'ha', ひ: 'hi', ふ: 'fu', へ: 'he', ほ: 'ho', ま: 'ma', み: 'mi', む: 'mu', め: 'me', も: 'mo', や: 'ya', ゆ: 'yu', よ: 'yo', ら: 'ra', り: 'ri', る: 'ru', れ: 're', ろ: 'ro', わ: 'wa', を: 'o', ん: 'n', が: 'ga', ぎ: 'gi', ぐ: 'gu', げ: 'ge', ご: 'go', ざ: 'za', じ: 'ji', ず: 'zu', ぜ: 'ze', ぞ: 'zo', だ: 'da', ぢ: 'ji', づ: 'zu', で: 'de', ど: 'do', ば: 'ba', び: 'bi', ぶ: 'bu', べ: 'be', ぼ: 'bo', ぱ: 'pa', ぴ: 'pi', ぷ: 'pu', ぺ: 'pe', ぽ: 'po', ゔ: 'vu', ゎ: 'wa', ゕ: 'ka', ゖ: 'ke', ぁ: 'a', ぃ: 'i', ぅ: 'u', ぇ: 'e', ぉ: 'o' };
+const KSV = { ぁ: 'a', ぃ: 'i', ぅ: 'u', ぇ: 'e', ぉ: 'o' }, KSY = { ゃ: 'a', ゅ: 'u', ょ: 'o' }, KRUN = /[\u3041-\u3096\u30a1-\u30f6\u30fc]+/g;
+function kanaRun(run) {
+  const h = [...run].map((c) => (c >= '\u30a1' && c <= '\u30f6' ? String.fromCharCode(c.charCodeAt(0) - 0x60) : c));
+  let out = '';
+  for (let i = 0; i < h.length; i++) {
+    const c = h[i];
+    if (c === 'っ') {
+      const n = h[i + 1], r = n && KB[n] && !'あいうえおん'.includes(n) && !KSV[n] ? KB[n] : '';
+      if (r) out += r[0] === 'c' ? 't' : r[0]; else if (out) out += out.endsWith('n') ? 'n' : 'h';
+    } else if (c === 'ー') { const v = out.match(/[aiueo](?=[^aiueo]*$)/); if (v) out += v[0]; }
+    else if (KB[c]) {
+      let r = KB[c]; const d = h[i + 1];
+      if (d && KSY[d] && /i$/.test(r)) { const st = r.slice(0, -1); r = (/^(sh|ch|j)$/.test(st) ? st : st + 'y') + KSY[d]; i++; }
+      else if (d && KSV[d] && !KSV[c] && r.length > 1) { r = r.slice(0, -1) + KSV[d]; i++; }
+      else if (d && KSV[d] && r === 'u') { r = 'w' + KSV[d]; i++; }
+      out += r;
+    } else out += c;
+  }
+  return out;
+}
+export function fixKana(t) {
+  t = String(t);
+  if (/[\u3400-\u9fff]/.test(t) || !KRUN.test(t)) { KRUN.lastIndex = 0; return t; }
+  KRUN.lastIndex = 0;
+  let sentence = false;
+  const r = t.replace(KRUN, (run) => { if (run.length >= 8 && new Set(run).size >= 5) { sentence = true; return run; } return kanaRun(run); });
+  return sentence ? t : r;
+}
 /** Kata khas Portugis/Spanyol yang tertinggal di teks (kode escape diabaikan). Mengembalikan kata unik berhuruf kecil. */
 export function foreignWords(t, orig = '') {
   const ws = String(t || '').replace(ESC, ' ').match(/\p{L}+/gu) || [], out = new Set();
@@ -1825,8 +1859,8 @@ export async function translateBatch(units, o, why = new Map()) {
   for (const r of arr || []) {
     const id = Number(r?.id);
     if (!ids.has(id) || typeof r.text !== 'string' || ok.has(id)) continue;
-    const bad = o.check?.(id, r.text) || '';
-    if (bad) why.set(id, bad); else { ok.set(id, r.text); if (o.keep && !o.keep.has(id)) o.keep.set(id, r.text); }
+    const txt = fixKana(r.text), bad = o.check?.(id, txt) || '';
+    if (bad) why.set(id, bad); else { ok.set(id, txt); if (o.keep && !o.keep.has(id)) o.keep.set(id, txt); }
   }
   const missing = units.filter((u) => !ok.has(u.id));
   if (!missing.length) return { ok, fail };
