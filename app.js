@@ -655,14 +655,35 @@ async function collectSources(files) {
  *   param Plugin.key       -> parameter plugin di js/plugins.js (hanya string biasa)
  */
 export function parseAllow(text = '') {
-  const o = { mz: [], mv: [], param: [] };
+  const o = { mz: [], mv: [], param: [], auto: false, skip: [] };
   for (const line of String(text).split('\n')) {
     const m = line.trim().match(/^(mz|mv|param)\s+(\S.*)$/i);
-    if (m) o[m[1].toLowerCase()].push(m[2].trim());
+    if (!m) continue;
+    const k = m[1].toLowerCase(), v = m[2].trim();
+    if (k === 'param' && /^auto$/i.test(v)) o.auto = true; // deteksi otomatis parameter plugin (lihat autoParam)
+    else if (k === 'param' && v[0] === '!') o.skip.push(v.slice(1).trim()); // kecualikan satu parameter dari deteksi otomatis
+    else o[k].push(v);
   }
   return o;
 }
-const allowSets = (a) => ({ mz: new Set(a?.mz), mv: new Set(a?.mv), param: new Set(a?.param) });
+const allowSets = (a) => ({ mz: new Set(a?.mz), mv: new Set(a?.mv), param: new Set(a?.param), auto: !!a?.auto, skip: new Set(a?.skip) });
+// Kunci parameter yang hampir pasti bukan teks tampil: nama file/folder, suara, script/rumus, simbol/tag, font, dsb.
+const PARAM_RISKY_KEY = /file|folder|path|image|picture|pict\b|movie|video|sound|bgm|bgs|script|formula|condition|eval|regex|symbol|\btag\b|notetag|meta|\burl\b|font|event\s*name|eventname|plugin\s*command/i;
+// switch/variabel: berisiko kecuali kuncinya berakhiran label (switchABButtonsName = label opsi, bukan ID).
+const PARAM_SOFT_KEY = /switch|variable/i, PARAM_LABEL_END = /(?:name|text|label|title|message|msg|word|term|caption|help)s?$/i;
+/**
+ * Deteksi otomatis parameter plugin yang aman diterjemahkan (js/plugins.js). Syarat, semuanya:
+ * string biasa (bukan JSON bersarang), plugin aktif, mengandung bahasa sumber, kunci tidak mirip nama file/script/simbol/event name,
+ * isi tidak berbau kode (=, $, @, {}, snake_case, //), bukan nama file/path, bukan string berkutip (nilai JSON, mis. "...\n..."),
+ * dan tidak memuat placeholder plugin berbentuk \kata (\name, \count) yang tidak dikenali sebagai kode escape.
+ * Yang lolos tetap dilindungi saat terjemahan (\C[16], %1, \n). Yang tidak lolos masih bisa ditambah manual lewat "param Plugin.kunci".
+ */
+export function autoParam(k, v, src = 'ja') {
+  if (typeof v !== 'string' || looksStruct(v) || PARAM_RISKY_KEY.test(k) || (PARAM_SOFT_KEY.test(k) && !PARAM_LABEL_END.test(k)) || !isTranslatable(v, src)) return false;
+  if (/[=$@{}]|\w_\w|\/\/|\/\*/.test(v) || /^\s*"[\s\S]*"\s*$/.test(v) || /\\[A-Za-z]{2,}(?![A-Za-z[])/.test(v)) return false;
+  const t = v.replace(ESC, '').trim();
+  return !(/\.(?:png|jpe?g|gif|webp|ogg|m4a|wav|mp3|webm|mp4|js|json|css|html?)\s*$/i.test(t) || /^[\w\-./]+$/.test(t));
+}
 const looksStruct = (v) => /^\s*[\[{]/.test(v);
 /** Pecah js/plugins.js menjadi {pre, arr, post}; null bila bukan array JSON murni. */
 export function parsePluginsJs(text) {
@@ -934,7 +955,7 @@ export function extractFile(path, json, { src = 'ja', allow = null, strict = fal
   else if (isCmdMap(json)) Object.keys(json).forEach((k) => scanList(json[k], [/^\d+$/.test(k) ? Number(k) : k])); // file custom: { nama: [perintah event, ...] }, mis. Scenario.json
   else if (base === 'plugins.js' && Array.isArray(json)) json.forEach((pl, i) => {
     if (!pl || pl.status === false || !pl.parameters) return;
-    for (const k of Object.keys(pl.parameters)) if (typeof pl.parameters[k] === 'string' && !looksStruct(pl.parameters[k]) && A.param.has(`${pl.name}.${k}`)) add([i, 'parameters', k], 'field', 'plugin', pl.parameters[k]);
+    for (const k of Object.keys(pl.parameters)) if (typeof pl.parameters[k] === 'string' && !looksStruct(pl.parameters[k]) && (A.param.has(`${pl.name}.${k}`) || (A.auto && !A.skip.has(`${pl.name}.${k}`) && autoParam(k, pl.parameters[k], src)))) add([i, 'parameters', k], 'field', 'plugin', pl.parameters[k]);
   });
   else if (DB_FIELDS[base]) (json || []).forEach((it, i) => {
     if (!it) return;
@@ -1429,7 +1450,7 @@ export async function importProject(files, src = 'ja', onProgress = () => {}, { 
     catch (e) { scriptsDiag = { error: e?.message || String(e) }; }
   } else if (engine_isAce(eng)) scriptsDiag = { missing: true };
   let paramNote = '';
-  if (allow.param.length) {
+  if (allow.param.length || allow.auto) {
     const pj = pluginsText ? parsePluginsJs(pluginsText) : null;
     if (pj) await ingest(normPluginsPath(plugins.path), pj.arr, pluginsText);
     else paramNote = pluginsText ? 'js/plugins.js tidak bisa dibaca (bukan array JSON murni), parameter plugin dilewati' : 'js/plugins.js tidak ikut dipilih, parameter plugin dilewati';
@@ -2587,7 +2608,7 @@ async function viewSettings() {
     inp[k] = h('input', { type, value: String(c[k]), autocomplete: 'off', ...(type === 'number' ? { step: 'any', inputmode: 'decimal' } : {}) });
     return [h('label', {}, label), inp[k]];
   });
-  const allowTa = h('textarea', { rows: '6', spellcheck: 'false', autocomplete: 'off', placeholder: 'mz NamaPlugin.namaPerintah.namaArgumen\nmv NamaPerintah\nparam NamaPlugin.namaParameter' }, c.pluginAllow || '');
+  const allowTa = h('textarea', { rows: '6', spellcheck: 'false', autocomplete: 'off', placeholder: 'param auto\nparam !NamaPlugin.parameterYangDikecualikan\nmz NamaPlugin.namaPerintah.namaArgumen\nmv NamaPerintah\nparam NamaPlugin.namaParameter' }, c.pluginAllow || '');
   const styleTa = h('textarea', { rows: '8', spellcheck: 'false' }, c.style ?? DEFAULT_STYLE), notesTa = h('textarea', { rows: '5', spellcheck: 'false', autocomplete: 'off', placeholder: 'アリス: sopan, pakai saya/Anda\nバルト: preman, pakai gue/lo, kasar' }, c.charNotes || '');
   const glossTa = h('textarea', { rows: '6', spellcheck: 'false', autocomplete: 'off', placeholder: 'アリス = Alice\nポーション = Ramuan' }, c.glossary || '');
   const remember = h('input', { type: 'checkbox', ...(c.remember ? { checked: '' } : {}) });
@@ -2632,7 +2653,7 @@ async function viewSettings() {
       ...advKeys.flatMap((k) => pair[k]),
       h('label', { class: 'chk' }, fast, 'Matikan mode berpikir model (khusus OpenRouter, lebih cepat)'),
       h('label', {}, 'Daftar aman plugin (opsional)'),
-      h('p', { class: 'mut' }, 'Kosong = perintah dan parameter plugin tidak disentuh. Isi hanya entri yang kamu yakin berisi teks tampil. Berlaku saat impor, jadi impor ulang proyek setelah mengubahnya.'), allowTa),
+      h('p', { class: 'mut' }, 'Kosong = perintah dan parameter plugin tidak disentuh. Tulis "param auto" agar parameter plugin berupa label/pesan biasa terdeteksi otomatis (nama file, switch, script, dan JSON bersarang dilewati); kecualikan satu parameter dengan "param !Plugin.kunci". Isi entri manual hanya yang kamu yakin berisi teks tampil. Berlaku saat impor, jadi impor ulang proyek setelah mengubahnya.'), allowTa),
     h('div', { class: 'card danger-card' }, h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn),
     actionBar(msg, h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')))];
 }
