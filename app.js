@@ -679,10 +679,45 @@ const PARAM_SOFT_KEY = /switch|variable/i, PARAM_LABEL_END = /(?:name|text|label
  * Yang lolos tetap dilindungi saat terjemahan (\C[16], %1, \n). Yang tidak lolos masih bisa ditambah manual lewat "param Plugin.kunci".
  */
 export function autoParam(k, v, src = 'ja') {
-  if (typeof v !== 'string' || looksStruct(v) || PARAM_RISKY_KEY.test(k) || (PARAM_SOFT_KEY.test(k) && !PARAM_LABEL_END.test(k)) || !isTranslatable(v, src)) return false;
+  if (typeof v !== 'string' || looksStruct(v) || PARAM_RISKY_KEY.test(k) || (PARAM_SOFT_KEY.test(k) && !PARAM_LABEL_END.test(k))) return false;
+  return autoVal(v, src);
+}
+/** Cek isi (bukan kunci) untuk deteksi otomatis: bahasa sumber, tidak berbau kode, bukan nama file, tidak berkutip, tanpa placeholder \kata. */
+function autoVal(v, src) {
+  if (typeof v !== 'string' || !isTranslatable(v, src)) return false;
   if (/[=$@{}]|\w_\w|\/\/|\/\*/.test(v) || /^\s*"[\s\S]*"\s*$/.test(v) || /\\[A-Za-z]{2,}(?![A-Za-z[])/.test(v)) return false;
   const t = v.replace(ESC, '').trim();
   return !(/\.(?:png|jpe?g|gif|webp|ogg|m4a|wav|mp3|webm|mp4|js|json|css|html?)\s*$/i.test(t) || /^[\w\-./]+$/.test(t));
+}
+// JSON bersarang: hanya daun dengan kunci berakhiran label (CategoryName, helpText, title, ...) yang diambil; symbol/key/id/file dsb. tidak pernah.
+const LEAF_KEY = /(?:name|text|label|title|message|msg|word|term|caption|help|desc|description|comment|info|format|display|string)s?$/i;
+const autoLeaf = (k, v, src) => typeof k === 'string' && !PARAM_RISKY_KEY.test(k) && LEAF_KEY.test(k) && autoVal(v, src);
+/**
+ * Daun teks di dalam parameter plugin berbentuk JSON bersarang (string JSON, atau array string JSON, bisa berlapis).
+ * Path: [indeks, 'parameters', kunci, '@json', ...] dengan '@json' = "string di posisi ini adalah JSON, buka dulu". Maks 4 lapis.
+ * @returns {Array<{path: Array<string|number>, text: string}>}
+ */
+export function nestedLeaves(str, basePath, src = 'ja', depth = 0) {
+  const out = [];
+  let node; try { node = JSON.parse(str); } catch { return out; }
+  const walk = (x, path, key) => {
+    if (typeof x === 'string') {
+      if (/^\s*[\[{]/.test(x)) { if (depth < 4) out.push(...nestedLeaves(x, path, src, depth + 1)); return; }
+      if (autoLeaf(key, x, src)) out.push({ path, text: x });
+    } else if (Array.isArray(x)) x.forEach((y, i) => walk(y, [...path, i], key));
+    else if (x && typeof x === 'object') for (const [k, y] of Object.entries(x)) walk(y, [...path, k], k);
+  };
+  walk(node, [...basePath, '@json'], null);
+  return out;
+}
+/** Tulis teks ke daun di path ber-'@json' (buka string JSON, ganti, rakit ulang). Melempar Error bila path/teks asli tidak cocok. */
+export function setDeep(root, path, text, orig) {
+  const j = path.indexOf('@json'), head = j < 0 ? path : path.slice(0, j);
+  const parent = head.slice(0, -1).reduce((o, k) => o?.[k], root), key = head.at(-1), nz = (x) => String(x ?? '').replace(/\s+/g, ' ').trim();
+  if (parent === null || typeof parent !== 'object' || typeof parent[key] !== 'string') throw new Error('path tidak cocok dengan file asli');
+  if (j < 0) { if (nz(parent[key]) !== nz(orig)) throw new Error('teks asli di posisi ini berbeda (posisi bergeser)'); parent[key] = text; return; }
+  let inner; try { inner = JSON.parse(parent[key]); } catch { throw new Error('JSON bersarang di file asli tidak valid'); }
+  const box = [inner]; setDeep(box, [0, ...path.slice(j + 1)], text, orig); parent[key] = JSON.stringify(box[0]);
 }
 const looksStruct = (v) => /^\s*[\[{]/.test(v);
 /** Pecah js/plugins.js menjadi {pre, arr, post}; null bila bukan array JSON murni. */
@@ -956,6 +991,7 @@ export function extractFile(path, json, { src = 'ja', allow = null, strict = fal
   else if (base === 'plugins.js' && Array.isArray(json)) json.forEach((pl, i) => {
     if (!pl || pl.status === false || !pl.parameters) return;
     for (const k of Object.keys(pl.parameters)) if (typeof pl.parameters[k] === 'string' && !looksStruct(pl.parameters[k]) && (A.param.has(`${pl.name}.${k}`) || (A.auto && !A.skip.has(`${pl.name}.${k}`) && autoParam(k, pl.parameters[k], src)))) add([i, 'parameters', k], 'field', 'plugin', pl.parameters[k]);
+    else if (A.auto && typeof pl.parameters[k] === 'string' && looksStruct(pl.parameters[k]) && !A.skip.has(`${pl.name}.${k}`) && !PARAM_RISKY_KEY.test(k)) for (const lf of nestedLeaves(pl.parameters[k], [i, 'parameters', k], src)) add(lf.path, 'field', 'plugin', lf.text);
   });
   else if (DB_FIELDS[base]) (json || []).forEach((it, i) => {
     if (!it) return;
@@ -1103,6 +1139,10 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
       });
       continue;
     }
+    if (p.includes('@json')) { // daun di dalam parameter plugin berbentuk JSON bersarang
+      try { const ws = /^([ \u3000]*)[\s\S]*?([ \u3000]*)$/.exec(String(e.original)); setDeep(json, p, (e.meta?.prefix || '') + (ws?.[1] || '') + e.translation.replace(/\s*\n\s*/g, ' ').trim() + (ws?.[2] || ''), e.original); } catch (x) { fail(e, x.message || String(x)); }
+      continue;
+    }
     if (e.category === 'note-tag') {
       // path = [..., indeks, 'note', namaTag, urutan]; hanya isi tag ke-urutan yang diganti
       const noteP = p.slice(0, -2), tag = p.at(-2), nth = p.at(-1), holder = getAt(json, noteP.slice(0, -1)), nk = noteP.at(-1);
@@ -1179,10 +1219,13 @@ function splitList(list) {
  * @returns {string[]} daftar masalah (kosong bila lolos), maksimal 20
  */
 export function diffGuard(orig, next, file = 'data/X.json', allow = null, src = 'all') {
-  const probs = [], allowS = new Set(), allowB = new Set(), allowN = new Set(), allowL = new Set(), allowM = new Map(), allowR = new Set();
+  const probs = [], allowS = new Set(), allowB = new Set(), allowN = new Set(), allowL = new Set(), allowM = new Map(), allowR = new Set(), allowJ = new Set(), allowJL = new Set();
   // Proyek lama menyimpan indeks array System.terms sebagai string; samakan jadi angka.
   const norm = (path) => JSON.stringify(JSON.parse(path).map((k) => (typeof k === 'string' && /^\d+$/.test(k) ? Number(k) : k)));
   for (const e of extractFile(file, orig, { src, allow })) {
+    if (e.path.includes('"@json"')) { // parameter plugin JSON bersarang: hanya daun whitelist yang boleh berubah
+      const pp = JSON.parse(e.path); allowJL.add(norm(e.path)); allowJ.add(norm(JSON.stringify(pp.slice(0, pp.indexOf('@json'))))); continue;
+    }
     // note-tag: yang boleh berubah hanya isi tag di dalam string note; path note-nya didaftarkan terpisah
     if (e.category === 'script-multi') {
       const pp = JSON.parse(e.path), n = pp.at(-1), i = pp.at(-3), lp = pp.slice(0, -3);
@@ -1208,12 +1251,26 @@ export function diffGuard(orig, next, file = 'data/X.json', allow = null, src = 
       for (const x of rb) if (x.code !== bodyOf(c) || x.indent !== c.indent || x.parameters.length !== 1 || typeof x.parameters[0] !== 'string' || Object.keys(x).length !== 3) return bad(hp, 'baris dialog baru tidak valid');
     });
   };
+  // Bandingkan dua string JSON bersarang: struktur harus identik, hanya daun di allowJL yang boleh berbeda.
+  const cmpJson = (a, b, p) => {
+    let A, B; try { A = JSON.parse(a); B = JSON.parse(b); } catch { return bad(p, 'JSON bersarang tidak valid setelah diubah'); }
+    const walk = (x, y, q) => {
+      if (probs.length >= 20) return;
+      const t = kindOf(x); if (t !== kindOf(y)) return bad(q, 'tipe berubah');
+      if (t === 'string') { if (x === y || allowJL.has(JSON.stringify(q))) return; if (/^\s*[\[{]/.test(x)) return cmpJson(x, y, q); return bad(q, 'teks di luar whitelist berubah'); }
+      if (t === 'array') { if (x.length !== y.length) return bad(q, 'jumlah elemen berubah'); return x.forEach((v, i) => walk(v, y[i], [...q, i])); }
+      if (t === 'object') { const kx = Object.keys(x), ky = Object.keys(y); if (kx.length !== ky.length || kx.some((k) => !(k in y))) return bad(q, 'kunci berubah'); return kx.forEach((k) => walk(x[k], y[k], [...q, k])); }
+      if (x !== y) bad(q, 'nilai berubah');
+    };
+    walk(A, B, [...p, '@json']);
+  };
   const cmp = (a, b, p, key) => {
     if (probs.length >= 20) return;
     const t = kindOf(a);
     if (t !== kindOf(b)) return bad(p, 'tipe berubah');
     if (t === 'string') {
       if (a === b || allowS.has(JSON.stringify(p))) return;
+      if (allowJ.has(JSON.stringify(p))) return cmpJson(a, b, p);
       if (allowR.has(JSON.stringify(p))) {
         const rm = (x) => { const m = LIT.exec(x); return m ? m[1] + m[2] + m[2] + m[4] : EXPR.test(x) ? x : null; };
         const ma = rm(a), mb = rm(b);
@@ -2655,7 +2712,7 @@ async function viewSettings() {
       ...advKeys.flatMap((k) => pair[k]),
       h('label', { class: 'chk' }, fast, 'Matikan mode berpikir model (khusus OpenRouter, lebih cepat)'),
       h('label', {}, 'Daftar aman plugin (opsional)'),
-      h('p', { class: 'mut' }, 'Kosong = perintah dan parameter plugin tidak disentuh. Tulis "param auto" agar parameter plugin berupa label/pesan biasa terdeteksi otomatis (nama file, switch, script, dan JSON bersarang dilewati); kecualikan satu parameter dengan "param !Plugin.kunci". Isi entri manual hanya yang kamu yakin berisi teks tampil. Berlaku saat impor, jadi impor ulang proyek setelah mengubahnya.'), allowTa),
+      h('p', { class: 'mut' }, 'Kosong = perintah dan parameter plugin tidak disentuh. Tulis "param auto" agar parameter plugin berupa label/pesan terdeteksi otomatis, termasuk teks berkunci label (name, text, title, help, dst.) di dalam parameter JSON bersarang (nama file, switch, script, symbol, dan kunci pengenal dilewati); kecualikan satu parameter dengan "param !Plugin.kunci". Isi entri manual hanya yang kamu yakin berisi teks tampil. Berlaku saat impor, jadi impor ulang proyek setelah mengubahnya.'), allowTa),
     h('div', { class: 'card danger-card' }, h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn),
     actionBar(msg, h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')))];
 }
