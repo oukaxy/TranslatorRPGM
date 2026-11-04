@@ -216,15 +216,19 @@ export function kwLost(orig, tr) {
  * Pengaman kode untuk balasan AI (teks masih bertoken ⟦n⟧): tolak bila AI menulis kode game mentah sendiri
  * (yang seharusnya hanya ada lewat token) atau kata kunci kode asli hilang/diterjemahkan. Hasil '' bila aman.
  */
+// <teks Jepang> di teks asli (mis. nama dalam kurung siku) bukan tag; hasil terjemahannya <Teks Latin> jangan dianggap kode buatan AI.
+const JA_ANGLE = /<[^<>\n]*[\u3000-\u9fff\uff00-\uffef][^<>\n]*>/, ANGLE_TAG = /^<\/?[A-Za-z][^<>]*>$/;
 export function codeProblem(maskedOrig, maskedTr) {
-  if (new RegExp(MASK.source).test(String(maskedTr))) return UI.codeAdded;
+  const ign = JA_ANGLE.test(String(maskedOrig));
+  if ((String(maskedTr).match(MASK) || []).some((m) => !(ign && ANGLE_TAG.test(m)))) return UI.codeAdded;
   return kwLost(maskedOrig, maskedTr) ? UI.codeWord : '';
 }
 /** Audit: terjemahan yang kode game atau kata kunci kodenya tidak sama dengan teks asli. */
 export function codeDiff(e) {
   const t = String(e.translation ?? '').trim();
   if (!t || e.status === 'skipped' || e.status === 'pending') return false;
-  return escSig(e.original) !== escSig(t) || kwLost(stripEscapes(e.original), stripEscapes(t));
+  const ign = JA_ANGLE.test(String(e.original)), sig = (x) => (String(x ?? '').match(MASK) || []).filter((m) => !(ign && ANGLE_TAG.test(m))).sort().join('\u0001');
+  return sig(e.original) !== sig(t) || kwLost(stripEscapes(e.original), stripEscapes(t));
 }
 /** Teks tanpa kode escape (untuk mengukur panjang baris yang terlihat). */
 export const stripEscapes = (s) => s.replace(ESC, '');
@@ -1978,8 +1982,16 @@ const NUM_MSG = 'Angka di hasil tidak sama dengan teks asli';
 /** Angka (digit) di hasil tidak sama dengan teks asli, mis. "Level 8" jadi "Level 9". Angka yang ditulis dengan kata (hasil tanpa digit) tidak dihitung salah. Angka yang di teks asli berupa kata Inggris ("Four") boleh jadi digit di hasil ("4"). */
 const NUM_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, twenty: 20, thirty: 30, forty: 40, fifty: 50, hundred: 100 };
 const NUM_WORD_RE = new RegExp(`\\b(?:${Object.keys(NUM_WORDS).join('|')})\\b`, 'g');
+// Satuan angka: 10万 = 100.000, 2割 = 20 (persen), "100 ribu" / "100.000" / "100k" dianggap sama dengan 100000.
+const NUM_UNIT = { '万': 1e4, '萬': 1e4, '億': 1e8, '千': 1e3, '百': 100, '割': 10, ribu: 1e3, rb: 1e3, k: 1e3, thousand: 1e3, ratus: 100, juta: 1e6, jt: 1e6, million: 1e6, miliar: 1e9, billion: 1e9 };
+const NUM_RE = /(\d+(?:\.\d+)?)(?:\s*(?:(万|萬|億|千|百|割)|(ribu|rb|k|thousand|ratus|juta|jt|million|miliar|billion)(?![A-Za-z])))?/gi;
+const numVals = (x) => {
+  const t = String(x || '').replace(/⟦\d+⟧/g, ' ').replace(ESC, ' ').replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+    .replace(/(\d)[.,](?=\d{3}(?!\d))/g, '$1').replace(/(\d+)万(\d{1,4})(?!\d)/g, (m, a, b) => String(Number(a) * 1e4 + Number(b)));
+  return [...t.matchAll(NUM_RE)].map((m) => String(Math.round(Number(m[1]) * (m[2] ? NUM_UNIT[m[2]] : m[3] ? NUM_UNIT[m[3].toLowerCase()] : 1) * 1000) / 1000));
+};
 export function numDiff(orig, t) {
-  const digits = (x) => String(x || '').replace(/⟦\d+⟧/g, ' ').replace(ESC, ' ').replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).match(/\d+/g) || [];
+  const digits = numVals;
   const a = digits(orig), b = digits(t);
   if (!a.length || !b.length) return false;
   const cnt = (arr, d) => arr.filter((x) => x === d).length;
