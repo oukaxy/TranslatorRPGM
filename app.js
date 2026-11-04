@@ -1985,8 +1985,13 @@ const NUM_WORD_RE = new RegExp(`\\b(?:${Object.keys(NUM_WORDS).join('|')})\\b`, 
 // Satuan angka: 10万 = 100.000, 2割 = 20 (persen), "100 ribu" / "100.000" / "100k" dianggap sama dengan 100000.
 const NUM_UNIT = { '万': 1e4, '萬': 1e4, '億': 1e8, '千': 1e3, '百': 100, '割': 10, ribu: 1e3, rb: 1e3, k: 1e3, thousand: 1e3, ratus: 100, juta: 1e6, jt: 1e6, million: 1e6, miliar: 1e9, billion: 1e9 };
 const NUM_RE = /(\d+(?:\.\d+)?)(?:\s*(?:(万|萬|億|千|百|割)|(ribu|rb|k|thousand|ratus|juta|jt|million|miliar|billion)(?![A-Za-z])))?/gi;
-const numVals = (x) => {
-  const t = String(x || '').replace(/⟦\d+⟧/g, ' ').replace(ESC, ' ').replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+// Angka kanji di depan satuan (五割 = 50%, 三万 = 30.000): hanya dihitung bila kanji=true, dan sifatnya opsional di numDiff (terjemahan boleh menulis "separuh").
+const KANJI_D = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+const kanjiNum = (k) => { const i = k.indexOf('十'); if (i < 0) return KANJI_D[k] ?? null; const a = k.slice(0, i), b = k.slice(i + 1); return (a ? KANJI_D[a] : 1) * 10 + (b ? KANJI_D[b] : 0); };
+const numVals = (x, kanji = false) => {
+  let t0 = String(x || '').replace(/⟦\d+⟧/g, ' ').replace(ESC, ' ');
+  if (kanji) t0 = t0.replace(/([一二三四五六七八九十]{1,3})(?=万|萬|億|千|百|割)/g, (m) => { const v = kanjiNum(m); return v == null ? m : String(v); });
+  const t = t0.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
     .replace(/(\d)[.,](?=\d{3}(?!\d))/g, '$1').replace(/(\d+)万(\d{1,4})(?!\d)/g, (m, a, b) => String(Number(a) * 1e4 + Number(b)));
   return [...t.matchAll(NUM_RE)].map((m) => String(Math.round(Number(m[1]) * (m[2] ? NUM_UNIT[m[2]] : m[3] ? NUM_UNIT[m[3].toLowerCase()] : 1) * 1000) / 1000));
 };
@@ -1995,6 +2000,8 @@ export function numDiff(orig, t) {
   const a = digits(orig), b = digits(t);
   if (!a.length || !b.length) return false;
   const cnt = (arr, d) => arr.filter((x) => x === d).length;
+  const soft = numVals(orig, true); a.forEach((d) => { const i = soft.indexOf(d); if (i >= 0) soft.splice(i, 1); }); // soft = angka yang hanya berasal dari kanji
+  for (const d of soft) if (cnt(b, d) > cnt(a, d)) b.splice(b.indexOf(d), 1);
   for (const w of String(orig).toLowerCase().match(NUM_WORD_RE) || []) {
     const d = String(NUM_WORDS[w]);
     if (cnt(b, d) > cnt(a, d)) b.splice(b.indexOf(d), 1);
