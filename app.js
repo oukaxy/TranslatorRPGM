@@ -975,7 +975,11 @@ export function extractFile(path, json, { src = 'ja', allow = null, strict = fal
         for (const k of Object.keys(P[3])) if (typeof P[3][k] === 'string' && !looksStruct(P[3][k]) && A.mz.has(`${P[0]}.${P[1]}.${k}`)) add([...p, i, 'parameters', 3, k], 'field', 'plugin', P[3][k]);
       } else if (c.code === 356 && A.mv.size && typeof P[0] === 'string') {
         const m = P[0].match(/^(\S+)\s+(\S[\s\S]*)$/);
-        if (m && A.mv.has(m[1])) add([...p, i, 'parameters', 0], 'field', 'plugin', m[2], { prefix: P[0].slice(0, P[0].length - m[2].length) });
+        if (m && A.mv.has(m[1])) {
+          // argumen angka di ujung (ukuran font, posisi, ...) tidak dikirim ke model: disimpan sebagai suffix dan dipasang lagi saat ekspor
+          const tm = /^([\s\S]*?\S)((?:\s+[-+]?\d+(?:\.\d+)?)+)\s*$/.exec(m[2]), body = tm ? tm[1] : m[2];
+          add([...p, i, 'parameters', 0], 'field', 'plugin', body, { prefix: P[0].slice(0, P[0].length - m[2].length), suffix: m[2].slice(body.length) });
+        }
       } else if ((c.code === 355 || c.code === 655) && typeof P[0] === 'string') {
         scriptLits(P[0], [...p, i, 'parameters', 0]);
         const ml = readMulti(list, i);
@@ -1198,7 +1202,7 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
     const old = parent[key];
     // Pengaman: pilihan di posisi ini harus sama dengan teks asli entri, supaya terjemahan tidak masuk ke pilihan lain
     if (e.kind === 'choice' && nz(old) !== nz(e.original)) { fail(e, 'teks asli di posisi ini berbeda (posisi bergeser)'); continue; }
-    parent[key] = e.kind === 'choice' || /^comment/.test(e.category) ? e.translation.replace(/\s*\n\s*/g, ' ') : e.category === 'plugin' ? (e.meta?.prefix || '') + e.translation.replace(/\s*\n\s*/g, ' ').trim() : e.translation;
+    parent[key] = e.kind === 'choice' || /^comment/.test(e.category) ? e.translation.replace(/\s*\n\s*/g, ' ') : e.category === 'plugin' ? (e.meta?.prefix || '') + e.translation.replace(/\s*\n\s*/g, ' ').trim() + (e.meta?.suffix || '') : e.translation;
     if (e.kind === 'field' && e.category !== 'plugin' && opts.wrap && WRAP_KEYS.test(String(key))) {
       const w = wrapLines(parent[key], opts.wrap.width);
       if (w) { parent[key] = w.join('\n'); if (opts.stats) opts.stats.wrapped++; }

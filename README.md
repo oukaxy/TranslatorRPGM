@@ -127,6 +127,8 @@ mv NamaPerintah
 param NamaPlugin.namaParameter
 ```
 
+Pada entri `mv`, argumen angka di ujung perintah (misalnya ukuran font `32` pada `D_TEXT teks 32`) tidak dikirim ke model dan dipasang lagi apa adanya saat ekspor. Angka di tengah teks tetap ikut diterjemahkan.
+
 Contoh glosarium dan catatan karakter:
 
 ```text
