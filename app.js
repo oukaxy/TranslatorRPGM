@@ -260,6 +260,34 @@ export function limitFor(e, cfg) {
   else if (e.kind === 'field' && e.category !== 'plugin' && /^message\d$/.test(key)) { line = cfg.wrapWidth; lines = 1; }
   return line ? { line, lines } : null;
 }
+/** Lebar maksimum (satuan visWidth) teks pendek di UI game sebelum berisiko terpotong. Sesuaikan dengan game bila perlu. */
+export const CUT_MAX = { label: 20, system: 20, actorname: 16, speaker: 20, choice: 36, map: 30 };
+/** Terjemahan dianggap berisiko bila lebih lebar dari asli sekian kali (kotak menu dibuat untuk teks asli). */
+export const CUT_RATIO = 1.5;
+/**
+ * Perkiraan teks terjemahan yang kemungkinan terpotong di game. Mengembalikan alasan singkat, atau '' bila aman.
+ * - dialog/deskripsi/pesan: baris melebihi lebar atau jumlah baris melebihi batas (memakai limitFor, mati bila plugin message terdeteksi).
+ * - label/nama/istilah/pilihan/nama peta: lebih lebar dari batas CUT_MAX dan lebih lebar dari asli, atau lebih dari CUT_RATIO kali asli.
+ * Ini heuristik: lebar kotak sebenarnya tergantung game, jadi hasilnya penanda untuk dicek, bukan kepastian.
+ */
+export function cutRisk(e, cfg) {
+  const t = String(e.translation ?? '');
+  if (!t.trim() || e.status === 'skipped' || e.status === 'pending') return '';
+  const lim = limitFor(e, cfg);
+  if (lim) {
+    const lines = t.replace(/^\n+|\n+$/g, '').split('\n');
+    if (lines.length > lim.lines) return `${lines.length} baris (maks ${lim.lines})`;
+    const w = Math.max(...lines.map(visWidth));
+    if (w > lim.line) return `baris ${w} (maks ${lim.line})`;
+    return '';
+  }
+  const c = e.category, key = /(?:^|-)label$/.test(c) ? 'label' : c;
+  const max = CUT_MAX[key]; if (!max) return '';
+  const tw = visWidth(t.replace(/\n/g, ' ').trim()), ow = visWidth(String(e.original ?? '').replace(/\n/g, ' ').trim());
+  if (tw > max && tw > ow) return `lebar ${tw} (asli ${ow})`;
+  if (tw >= 10 && ow > 0 && tw > ow * CUT_RATIO) return `lebar ${tw} (asli ${ow})`;
+  return '';
+}
 /** Apakah string layak diterjemahkan (bukan kosong/hanya escape; sumber ja harus ada kana/kanji). */
 export function isTranslatable(s, src = 'ja') {
   if (typeof s !== 'string') return false;
@@ -2769,7 +2797,7 @@ async function viewSettings() {
     h('div', { class: 'card danger-card' }, h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn),
     actionBar(msg, h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')))];
 }
-const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Bahasa asing (Prancis/Spanyol/Portugis/dll)'], ['same', 'Belum diterjemahkan (sama dengan asli)'], ['glmiss', 'Glosarium tidak dipakai'], ['inconsistent', 'Terjemahan tidak konsisten (teks mirip)'], ['unreviewed', 'Belum dicek'], ['tag:cek', 'Tag: cek nanti']];
+const FILTERS = [['all', 'Semua status'], ['pending', 'Pending'], ['done', 'Done'], ['edited', 'Diedit'], ['error', 'Error'], ['skipped', 'Skipped'], ['codediff', 'Kode berubah (audit)'], ['foreign', 'Bahasa asing (Prancis/Spanyol/Portugis/dll)'], ['same', 'Belum diterjemahkan (sama dengan asli)'], ['glmiss', 'Glosarium tidak dipakai'], ['inconsistent', 'Terjemahan tidak konsisten (teks mirip)'], ['unreviewed', 'Belum dicek'], ['tag:cek', 'Tag: cek nanti'], ['cut', 'Mungkin terpotong']];
 const hasForeign = (e) => !!e.translation && foreignWords(e.translation, e.original).length > 0;
 /** Apakah k kata Inggris: ada di EN_W atau bentuk turunannya (-s, -es, -ies, -ed, -ing, -ly, -er, -est, 's) dari kata di EN_W. */
 function enHas(k) {
@@ -2862,7 +2890,8 @@ async function viewReview() {
   const p = await currentProject();
   if (!p) return [card(h('p', { class: 'mut' }, UI.none))];
   const rows = (await dbQuery('entries', 'projectId', p.id)).sort((a, b) => a.id - b.id);
-  const glRev = parseGlossary((await loadConfig()).glossary);
+  const revCfg = await loadConfig(), glRev = parseGlossary(revCfg.glossary), rcfg = effCfg(p, revCfg);
+  const cut = (e) => cutRisk(e, rcfg);
   let filter = 'all', lang = 'all', cat = 'all', fn = 'any', mode = 'loose', q = '', qRaw = '', qRe = null, page = 0, count = 0;
   const origNorm = new WeakMap(), normOf = (e) => { let v = origNorm.get(e); if (v === undefined) { v = searchNorm(e.original); origNorm.set(e, v); } return v; };
   const box = h('div'), info = h('p', { class: 'mut' });
@@ -2913,11 +2942,12 @@ async function viewReview() {
   const openFocus = (e) => { fSeq = curList.slice(); fi = Math.max(0, fSeq.indexOf(e)); fScroll = scrollY; paintFocus(); fdlg.showModal(); };
   const paintFocus = () => {
     const e = fSeq[fi]; if (!e) { fdlg.close(); return; }
-    const st = h('span', { class: 'badge' }, e.status), warn = h('span', { class: 'badge warn' }, 'baris panjang');
+    const st = h('span', { class: 'badge' }, e.status), warn = h('span', { class: 'badge warn' }, 'baris panjang'), ct = h('span', { class: 'badge warn' }, 'mungkin terpotong');
+    const syncCut = (t) => { const r = cut({ ...e, translation: t }); ct.hidden = !r; ct.title = r; };
     const msg = h('p', { class: 'err' }), note = h('p', { class: 'mut' }), cb = h('input', { type: 'checkbox' }), tagCb = h('input', { type: 'checkbox' }), skCb = h('input', { type: 'checkbox' });
     const ta = h('textarea', { rows: String(Math.max(4, e.original.split('\n').length + 2)), 'aria-label': 'Terjemahan', spellcheck: 'false' }, e.translation);
-    const sync = () => { st.textContent = e.status; cb.checked = !!e.reviewed; tagCb.checked = hasTag(e, 'cek'); skCb.checked = e.status === 'skipped'; warn.hidden = !longLine(ta.value); msg.className = 'err'; msg.textContent = e.error || (codeDiff(e) ? CODEDIFF_MSG : ''); };
-    sync(); ta.addEventListener('input', () => { warn.hidden = !longLine(ta.value); note.textContent = ''; });
+    const sync = () => { st.textContent = e.status; cb.checked = !!e.reviewed; tagCb.checked = hasTag(e, 'cek'); skCb.checked = e.status === 'skipped'; warn.hidden = !longLine(ta.value); syncCut(ta.value); msg.className = 'err'; msg.textContent = e.error || (codeDiff(e) ? CODEDIFF_MSG : ''); };
+    sync(); ta.addEventListener('input', () => { warn.hidden = !longLine(ta.value); syncCut(ta.value); note.textContent = ''; });
     fCommit = async () => { if (ta.value !== e.translation) { await saveTr(e, ta.value); sync(); } };
     const say = (t, bad) => { note.className = bad ? 'err' : 'mut'; note.textContent = t; };
     cb.addEventListener('change', async () => { try { await fCommit(); await setReviewed(e, cb.checked); sync(); } catch (x) { say(x?.message || String(x), true); sync(); } });
@@ -2965,7 +2995,7 @@ async function viewReview() {
     }
     const meta = [e.meta?.speaker && `Pembicara: ${e.meta.speaker}`, e.meta?.face && 'Ada wajah (face)'].filter(Boolean);
     const body = h('div', { class: 'sheet-body' },
-      h('div', {}, h('span', { class: 'badge' }, e.category), st, warn), meta.length ? h('p', { class: 'mut' }, meta.join('\n')) : '',
+      h('div', {}, h('span', { class: 'badge' }, e.category), st, warn, ct), meta.length ? h('p', { class: 'mut' }, meta.join('\n')) : '',
       ctx.length ? h('details', { class: 'fold-in', open: '' }, h('summary', {}, `Konteks (${ctx.length} sebelumnya)`),
         ctx.map((x) => h('div', { class: 'ctx' }, h('p', { class: 'mut' }, clip(x.original)), x.translation?.trim() ? h('p', { class: 'tr' }, clip(x.translation)) : ''))) : '',
       h('label', {}, 'Teks asli'), h('div', { class: 'orig' }, e.original),
@@ -2990,10 +3020,11 @@ async function viewReview() {
   fdlg.addEventListener('close', async () => { try { await fCommit(); } catch { /* abaikan */ } fCommit = async () => {}; fill(); scrollTo(0, fScroll); });
   fdlg.addEventListener('click', (ev) => { if (ev.target === fdlg) fdlg.close(); });
   const rowCard = (e) => {
-    const st = h('span', { class: 'badge' }, e.status), warn = h('span', { class: 'badge warn' }, 'baris panjang'), rv = h('span', { class: 'badge ok' }, 'dicek'), tg = h('span', { class: 'badge tag' }, 'cek nanti'), msg = h('p', { class: 'err' }, e.error);
+    const st = h('span', { class: 'badge' }, e.status), warn = h('span', { class: 'badge warn' }, 'baris panjang'), rv = h('span', { class: 'badge ok' }, 'dicek'), tg = h('span', { class: 'badge tag' }, 'cek nanti'), ct = h('span', { class: 'badge warn' }, 'mungkin terpotong'), msg = h('p', { class: 'err' }, e.error);
+    const syncCut = (t) => { const r = cut({ ...e, translation: t }); ct.hidden = !r; ct.title = r; }; syncCut(e.translation);
     warn.hidden = !longLine(e.translation);
     const ta = h('textarea', { rows: String(Math.max(2, e.original.split('\n').length + 1)) }, e.translation);
-    const sync = () => { st.textContent = e.status; rv.hidden = !e.reviewed; tg.hidden = !hasTag(e, 'cek'); const c = ta.closest('.card'); if (c) c.className = edgeCls(e); warn.hidden = !longLine(e.translation); msg.className = 'err'; msg.textContent = e.error || (codeDiff(e) ? CODEDIFF_MSG : ''); };
+    const sync = () => { st.textContent = e.status; rv.hidden = !e.reviewed; tg.hidden = !hasTag(e, 'cek'); const c = ta.closest('.card'); if (c) c.className = edgeCls(e); warn.hidden = !longLine(e.translation); syncCut(e.translation); msg.className = 'err'; msg.textContent = e.error || (codeDiff(e) ? CODEDIFF_MSG : ''); };
     sync();
     ta.addEventListener('change', async () => {
       await saveTr(e, ta.value); sync();
@@ -3007,13 +3038,13 @@ async function viewReview() {
     } }, 'Terjemah ulang');
     const open = h('button', { class: 'sm', 'aria-label': 'Buka tampilan fokus', onclick: () => openFocus(e) }, 'Buka');
     const orig = h('p', { class: 'mut tap', onclick: () => { if (!String(getSelection?.() || '')) openFocus(e); } }, e.original);
-    const c = card(h('div', { class: 'rowhead' }, h('div', {}, h('span', { class: 'badge' }, e.category), st, rv, tg, warn), h('div', { class: 'rowbtns' }, open, rt)), orig, ta, msg);
+    const c = card(h('div', { class: 'rowhead' }, h('div', {}, h('span', { class: 'badge' }, e.category), st, rv, tg, warn, ct), h('div', { class: 'rowbtns' }, open, rt)), orig, ta, msg);
     c.className = edgeCls(e); return c;
   };
   const fill = () => {
     uiSet('filters:' + p.id, JSON.stringify({ filter, lang, cat, fn, mode, q: qRaw }));
     const fnRe = fnTest(fn), incSet = filter === 'inconsistent' ? inconsistentIds(rows) : null;
-    const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : filter === 'foreign' ? hasForeign(e) : filter === 'same' ? leftUntranslated(e, p.tgt) : filter === 'glmiss' ? !!e.translation && glossMissing(glRev, e.original, e.translation).length > 0 : filter === 'inconsistent' ? incSet.has(e.id) : filter === 'unreviewed' ? unrev(e) : filter === 'tag:cek' ? hasTag(e, 'cek') : e.status === filter)) && (lang === 'all' || !!transLang(e)?.[lang]) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
+    const list = rows.filter((e) => (filter === 'all' || (filter === 'codediff' ? codeDiff(e) : filter === 'foreign' ? hasForeign(e) : filter === 'same' ? leftUntranslated(e, p.tgt) : filter === 'glmiss' ? !!e.translation && glossMissing(glRev, e.original, e.translation).length > 0 : filter === 'inconsistent' ? incSet.has(e.id) : filter === 'unreviewed' ? unrev(e) : filter === 'tag:cek' ? hasTag(e, 'cek') : filter === 'cut' ? !!cut(e) : e.status === filter)) && (lang === 'all' || !!transLang(e)?.[lang]) && (cat === 'all' || e.category === cat) && (!fnRe || fnRe.test(e.original)) && matchText(e));
     if (incSet) list.sort((a, b) => (simNorm(stripEscapes(a.original)) < simNorm(stripEscapes(b.original)) ? -1 : simNorm(stripEscapes(a.original)) > simNorm(stripEscapes(b.original)) ? 1 : a.id - b.id));
     curList = list;
     const pages = Math.max(1, Math.ceil(list.length / PAGE_SIZE)); page = Math.min(page, pages - 1);
@@ -3023,7 +3054,7 @@ async function viewReview() {
       h('div', { class: 'row' }, h('button', { onclick: go(page - 1), ...(page ? {} : { disabled: '' }) }, 'Sebelumnya'),
         h('button', { onclick: go(page + 1), ...(page < pages - 1 ? {} : { disabled: '' }) }, `Berikutnya (${page + 1}/${pages})`)));
   };
-  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); sCnt.set('codediff', rows.filter(codeDiff).length); sCnt.set('foreign', rows.filter(hasForeign).length); sCnt.set('same', rows.filter((e) => leftUntranslated(e, p.tgt)).length); sCnt.set('glmiss', glRev.length ? rows.filter((e) => e.translation && glossMissing(glRev, e.original, e.translation).length).length : 0); sCnt.set('inconsistent', inconsistentIds(rows).size); sCnt.set('unreviewed', rows.filter(unrev).length); sCnt.set('tag:cek', rows.filter((e) => hasTag(e, 'cek')).length);
+  const sCnt = new Map(); rows.forEach((e) => sCnt.set(e.status, (sCnt.get(e.status) || 0) + 1)); sCnt.set('codediff', rows.filter(codeDiff).length); sCnt.set('foreign', rows.filter(hasForeign).length); sCnt.set('same', rows.filter((e) => leftUntranslated(e, p.tgt)).length); sCnt.set('glmiss', glRev.length ? rows.filter((e) => e.translation && glossMissing(glRev, e.original, e.translation).length).length : 0); sCnt.set('inconsistent', inconsistentIds(rows).size); sCnt.set('unreviewed', rows.filter(unrev).length); sCnt.set('tag:cek', rows.filter((e) => hasTag(e, 'cek')).length); sCnt.set('cut', rows.filter((e) => cut(e)).length);
   const sel = h('select', { 'aria-label': 'Filter status', onchange: (e) => { filter = e.target.value; page = 0; fill(); } }, FILTERS.map(([v, t]) => h('option', { value: v }, v === 'all' ? `${t} (${rows.length})` : `${t} (${sCnt.get(v) || 0})`)));
   const lCnt = new Map(); rows.forEach((e) => { const f = transLang(e); if (f) for (const k of Object.keys(f)) if (f[k]) lCnt.set(k, (lCnt.get(k) || 0) + 1); });
   const langSel = h('select', { 'aria-label': 'Filter bahasa terjemahan', onchange: (e) => { lang = e.target.value; page = 0; fill(); } }, LANG_FILTERS.map(([v, t]) => h('option', { value: v }, v === 'all' ? t : `${t} (${lCnt.get(v) || 0})`)));
