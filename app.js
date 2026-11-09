@@ -137,7 +137,7 @@ const ESC = /\\[A-Za-z]{1,12}<[^>\n\u3000-\u9fff\uff00-\uffef]*>|\\[Ff][RrIiBb](
 // Pola masking yang lebih lengkap dari ESC: variabel bersarang \V[\V[1]], placeholder printf (%1$s, %s, %d) dan entitas HTML.
 // Hanya dipakai untuk masking terjemahan dan audit kode; ESC dipakai tetap oleh heuristik impor supaya hasil ekstraksi proyek lama tidak bergeser.
 // Kode plugin dengan parameter huruf (\AA[F], \FH[ON], \FH[OFF]) juga dikenali utuh; tanpa ini hanya \A / \F yang jadi token dan sisanya (A[F], H[ON]) ikut dikirim ke AI sebagai teks.
-const MASK = new RegExp(['\\\\[A-Za-z]+\\[\\\\[A-Za-z]+\\[\\d+\\]\\]', '%\\d+\\$[sd]', '\\\\[A-Za-z]+\\[[A-Za-z0-9_]{1,12}\\]', ESC.source, '%[sd]\\b', '&(?:nbsp|amp|lt|gt|quot|#\\d+);'].join('|'), 'g');
+const MASK = new RegExp(['\\\\[A-Za-z]+\\[\\\\[A-Za-z]+\\[\\d+\\]\\]', '%\\d+\\$[sd]', '\\\\[A-Za-z]+\\[[A-Za-z0-9_]{1,12}\\]', ESC.source, '\\{[A-Za-z_]\\w{0,24}\\}', '%[sd]\\b', '&(?:nbsp|amp|lt|gt|quot|#\\d+);'].join('|'), 'g');
 // Plugin message yang punya word-wrap sendiri. Bila aktif, pemecahan baris manual dimatikan.
 const MSG_PLUGIN = /^(YEP_MessageCore|VisuMZ_1_MessageCore)$|word.?wrap|line.?wrap|auto.?wrap|text.?wrap|message.?wrap/i;
 /** Daftar nama plugin message aktif dari isi js/plugins.js. */
@@ -672,7 +672,7 @@ export function parseAllow(text = '') {
 }
 const allowSets = (a) => ({ mz: new Set(a?.mz), mv: new Set(a?.mv), param: new Set(a?.param), auto: !!a?.auto, skip: new Set(a?.skip) });
 // Kunci parameter yang hampir pasti bukan teks tampil: nama file/folder, suara, script/rumus, simbol/tag, font, dsb.
-const PARAM_RISKY_KEY = /file|folder|path|image|picture|pict\b|movie|video|sound|bgm|bgs|script|formula|condition|eval|regex|symbol|\btag\b|notetag|meta|\burl\b|font|event\s*name|eventname|plugin\s*command/i;
+const PARAM_RISKY_KEY = /file|folder|path|image|picture|pict\b|movie|video|sound|bgm|bgs|script(?!ion)|formula|condition|eval|regex|symbol|\btag\b|notetag|meta|\burl\b|font|event\s*name|eventname|plugin\s*command/i;
 // switch/variabel: berisiko kecuali kuncinya berakhiran label (switchABButtonsName = label opsi, bukan ID).
 const PARAM_SOFT_KEY = /switch|variable/i, PARAM_LABEL_END = /(?:name|text|label|title|message|msg|word|term|caption|help)s?$/i;
 /**
@@ -687,41 +687,71 @@ export function autoParam(k, v, src = 'ja') {
   return autoVal(v, src);
 }
 /** Cek isi (bukan kunci) untuk deteksi otomatis: bahasa sumber, tidak berbau kode, bukan nama file, tidak berkutip, tanpa placeholder \kata. */
+const PLUGIN_PH = /\{[A-Za-z_]\w{0,24}\}/g; // placeholder plugin sederhana ({choice}); ikut dimasker saat terjemahan (MASK)
 function autoVal(v, src) {
   if (typeof v !== 'string' || !isTranslatable(v, src)) return false;
-  if (/[=$@{}]|\w_\w|\/\/|\/\*/.test(v) || /^\s*"[\s\S]*"\s*$/.test(v) || /\\[A-Za-z]{2,}(?![A-Za-z[])/.test(v)) return false;
+  if (/[=$@{}]|\w_\w|\/\/|\/\*/.test(v.replace(PLUGIN_PH, '')) || /^\s*"[\s\S]*"\s*$/.test(v) || /\\[A-Za-z]{2,}(?![A-Za-z[])/.test(v)) return false;
   const t = v.replace(ESC, '').trim();
   return !(/\.(?:png|jpe?g|gif|webp|ogg|m4a|wav|mp3|webm|mp4|js|json|css|html?)\s*$/i.test(t) || /^[\w\-./]+$/.test(t));
 }
 // JSON bersarang: hanya daun dengan kunci berakhiran label (CategoryName, helpText, title, ...) yang diambil; symbol/key/id/file dsb. tidak pernah.
-const LEAF_KEY = /(?:name|text|label|title|message|msg|word|term|caption|help|desc|description|comment|info|format|display|string)s?$/i;
+const LEAF_KEY = /(?:name|text|label|title|message|msg|word|term|caption|help|hint|desc|description|comment|info|format|display|string)s?$/i;
 const autoLeaf = (k, v, src) => typeof k === 'string' && !PARAM_RISKY_KEY.test(k) && LEAF_KEY.test(k) && autoVal(v, src);
+// Konteks label: bila induk (nama parameter atau kunci objek) berakhiran label, anak berkunci pendek (hit, eva, 0, 1, ...) ikut diambil
+// asalkan kuncinya bukan pengenal (id/key/code/type/symbol) dan isinya lolos autoVal. Contoh: {"XPARAM Name": {"hit": "命中率"}}, "xParamNames": ["命中率", ...].
+const LABEL_CTX = /(?:name|text|label|title|message|msg|word|term|caption|help|hint|desc|description|info|format|display|string)s?$/i, ID_KEY = /^(?:id|key|code|type|class|ext|switch|variable)s?$/i;
+// Literal teks pada pemanggilan drawText/drawTextEx di skrip parameter plugin (mis. ItemDrawScript SceneCustomMenu): argumen pertama berupa
+// literal murni (`...`, "..." atau '...') yang langsung disusul koma/kurung tutup. Diidentifikasi lewat urutan kemunculan (path '#d', n).
+const drawLits = (str) => [...String(str).matchAll(/\bdraw(?:TextEx|Text)\(\s*(`|"|')((?:\\[\s\S]|(?!\1)[^\\])*)\1(?=\s*[,)])/g)].map((m) => ({ q: m[1], raw: m[2], at: m.index + m[0].length - 1 - m[2].length }));
+// Isi literal JS -> teks tampil. Hanya escape \\ dan \<kutip> yang dikenal; literal dengan escape lain atau interpolasi ${...} dilewati (null).
+const decodeJsLit = (raw) => (raw.includes('${') || /\\(?![\\`"'])/.test(raw.replace(/\\[\\`"']/g, '')) ? null : raw.replace(/\\([\\`"'])/g, '$1'));
+const encodeJsLit = (t, q) => { let o = t.replace(/\\/g, '\\\\'); if (q === '`') o = o.replace(/`/g, '\\`').replace(/\$\{/g, '\\${'); else o = o.replace(new RegExp(q, 'g'), '\\' + q); return o; };
+// Nilai berupa literal string JSON ("...\n...", dipakai plugin yang memanggil JSON.parse sendiri): ambil isinya; saat tulis, dibungkus ulang.
+const quotedInner = (x) => { if (!/^\s*"[\s\S]*"\s*$/.test(x)) return null; try { const j = JSON.parse(x); return typeof j === 'string' ? j : null; } catch { return null; } };
 /**
  * Daun teks di dalam parameter plugin berbentuk JSON bersarang (string JSON, atau array string JSON, bisa berlapis).
  * Path: [indeks, 'parameters', kunci, '@json', ...] dengan '@json' = "string di posisi ini adalah JSON, buka dulu". Maks 4 lapis.
- * @returns {Array<{path: Array<string|number>, text: string}>}
+ * pkey = nama parameter plugin (untuk konteks label). Daun berupa literal string JSON bertanda quoted:true.
+ * @returns {Array<{path: Array<string|number>, text: string, quoted?: boolean}>}
  */
-export function nestedLeaves(str, basePath, src = 'ja', depth = 0) {
+export function nestedLeaves(str, basePath, src = 'ja', depth = 0, pkey = null) {
   const out = [];
   let node; try { node = JSON.parse(str); } catch { return out; }
-  const walk = (x, path, key) => {
+  const walk = (x, path, key, ctx) => {
     if (typeof x === 'string') {
-      if (/^\s*[\[{]/.test(x)) { if (depth < 4) out.push(...nestedLeaves(x, path, src, depth + 1)); return; }
-      if (autoLeaf(key, x, src)) out.push({ path, text: x });
-    } else if (Array.isArray(x)) x.forEach((y, i) => walk(y, [...path, i], key));
-    else if (x && typeof x === 'object') for (const [k, y] of Object.entries(x)) walk(y, [...path, k], k);
+      if (/^\s*[\[{]/.test(x)) { if (depth < 4) out.push(...nestedLeaves(x, path, src, depth + 1, key)); return; }
+      if (typeof key === 'string' && /script$/i.test(key) && /\bdraw(?:TextEx|Text)\(/.test(x)) { // skrip gambar teks: hanya isi literal pada drawText/drawTextEx
+        drawLits(x).forEach((l, n) => { const t = decodeJsLit(l.raw); if (t !== null && isTranslatable(t, src) && !/[=$@{}]|\w_\w|\/\/|\/\*/.test(t.replace(ESC, ''))) out.push({ path: [...path, '#d', n], text: t }); });
+        return;
+      }
+      const q = quotedInner(x), val = q ?? x;
+      if (autoLeaf(key, val, src) || (ctx && typeof key !== 'object' && !(typeof key === 'string' && (PARAM_RISKY_KEY.test(key) || ID_KEY.test(key))) && autoVal(val, src))) out.push(q === null ? { path, text: x } : { path, text: val, quoted: true });
+    } else if (Array.isArray(x)) x.forEach((y, i) => walk(y, [...path, i], key, ctx));
+    else if (x && typeof x === 'object') for (const [k, y] of Object.entries(x)) walk(y, [...path, k], k, ctx || LABEL_CTX.test(k));
   };
-  walk(node, [...basePath, '@json'], null);
+  walk(node, [...basePath, '@json'], pkey, typeof pkey === 'string' && LABEL_CTX.test(pkey) && !PARAM_RISKY_KEY.test(pkey));
   return out;
 }
 /** Tulis teks ke daun di path ber-'@json' (buka string JSON, ganti, rakit ulang). Melempar Error bila path/teks asli tidak cocok. */
-export function setDeep(root, path, text, orig) {
-  const j = path.indexOf('@json'), head = j < 0 ? path : path.slice(0, j);
+export function setDeep(root, path, text, orig, quoted = false) {
+  const dn = path.at(-2) === '#d' ? path.at(-1) : null, pa = dn === null ? path : path.slice(0, -2); // '#d', n = literal ke-n pada drawText di string skrip
+  const j = pa.indexOf('@json'), head = j < 0 ? pa : pa.slice(0, j);
   const parent = head.slice(0, -1).reduce((o, k) => o?.[k], root), key = head.at(-1), nz = (x) => String(x ?? '').replace(/\s+/g, ' ').trim();
   if (parent === null || typeof parent !== 'object' || typeof parent[key] !== 'string') throw new Error('path tidak cocok dengan file asli');
-  if (j < 0) { if (nz(parent[key]) !== nz(orig)) throw new Error('teks asli di posisi ini berbeda (posisi bergeser)'); parent[key] = text; return; }
+  if (j < 0) {
+    if (dn !== null) {
+      const l = drawLits(parent[key])[dn], cur = l ? decodeJsLit(l.raw) : null;
+      if (cur === null) throw new Error('literal teks di skrip tidak ditemukan');
+      if (nz(cur) !== nz(orig)) throw new Error('teks asli di posisi ini berbeda (posisi bergeser)');
+      parent[key] = parent[key].slice(0, l.at) + encodeJsLit(text, l.q) + parent[key].slice(l.at + l.raw.length); return;
+    }
+    let cur = parent[key];
+    if (quoted) { const q = quotedInner(cur); if (q === null) throw new Error('nilai asli bukan literal string JSON'); cur = q; }
+    if (nz(cur) !== nz(orig)) throw new Error('teks asli di posisi ini berbeda (posisi bergeser)');
+    parent[key] = quoted ? JSON.stringify(text) : text; return;
+  }
   let inner; try { inner = JSON.parse(parent[key]); } catch { throw new Error('JSON bersarang di file asli tidak valid'); }
-  const box = [inner]; setDeep(box, [0, ...path.slice(j + 1)], text, orig); parent[key] = JSON.stringify(box[0]);
+  const box = [inner]; setDeep(box, [0, ...pa.slice(j + 1), ...(dn === null ? [] : ['#d', dn])], text, orig, quoted); parent[key] = JSON.stringify(box[0]);
 }
 const looksStruct = (v) => /^\s*[\[{]/.test(v);
 /** Pecah js/plugins.js menjadi {pre, arr, post}; null bila bukan array JSON murni. */
@@ -995,7 +1025,7 @@ export function extractFile(path, json, { src = 'ja', allow = null, strict = fal
   else if (base === 'plugins.js' && Array.isArray(json)) json.forEach((pl, i) => {
     if (!pl || pl.status === false || !pl.parameters) return;
     for (const k of Object.keys(pl.parameters)) if (typeof pl.parameters[k] === 'string' && !looksStruct(pl.parameters[k]) && (A.param.has(`${pl.name}.${k}`) || (A.auto && !A.skip.has(`${pl.name}.${k}`) && autoParam(k, pl.parameters[k], src)))) add([i, 'parameters', k], 'field', 'plugin', pl.parameters[k]);
-    else if (A.auto && typeof pl.parameters[k] === 'string' && looksStruct(pl.parameters[k]) && !A.skip.has(`${pl.name}.${k}`) && !PARAM_RISKY_KEY.test(k)) for (const lf of nestedLeaves(pl.parameters[k], [i, 'parameters', k], src)) add(lf.path, 'field', 'plugin', lf.text);
+    else if (A.auto && typeof pl.parameters[k] === 'string' && looksStruct(pl.parameters[k]) && !A.skip.has(`${pl.name}.${k}`) && !PARAM_RISKY_KEY.test(k)) for (const lf of nestedLeaves(pl.parameters[k], [i, 'parameters', k], src, 0, k)) add(lf.path, 'field', 'plugin', lf.text, lf.quoted ? { quoted: true } : undefined);
   });
   else if (DB_FIELDS[base]) (json || []).forEach((it, i) => {
     if (!it) return;
@@ -1144,7 +1174,7 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
       continue;
     }
     if (p.includes('@json')) { // daun di dalam parameter plugin berbentuk JSON bersarang
-      try { const ws = /^([ \u3000]*)[\s\S]*?([ \u3000]*)$/.exec(String(e.original)); setDeep(json, p, (e.meta?.prefix || '') + (ws?.[1] || '') + e.translation.replace(/\s*\n\s*/g, ' ').trim() + (ws?.[2] || ''), e.original); } catch (x) { fail(e, x.message || String(x)); }
+      try { const ws = /^([ \u3000]*)[\s\S]*?([ \u3000]*)$/.exec(String(e.original)), qt = !!e.meta?.quoted; setDeep(json, p, (e.meta?.prefix || '') + (ws?.[1] || '') + (qt ? e.translation.trim() : e.translation.replace(/\s*\n\s*/g, ' ').trim()) + (ws?.[2] || ''), e.original, qt); } catch (x) { fail(e, x.message || String(x)); }
       continue;
     }
     if (e.category === 'note-tag') {
@@ -1223,12 +1253,12 @@ function splitList(list) {
  * @returns {string[]} daftar masalah (kosong bila lolos), maksimal 20
  */
 export function diffGuard(orig, next, file = 'data/X.json', allow = null, src = 'all') {
-  const probs = [], allowS = new Set(), allowB = new Set(), allowN = new Set(), allowL = new Set(), allowM = new Map(), allowR = new Set(), allowJ = new Set(), allowJL = new Set();
+  const probs = [], allowS = new Set(), allowB = new Set(), allowN = new Set(), allowL = new Set(), allowM = new Map(), allowR = new Set(), allowJ = new Set(), allowJL = new Set(), allowJD = new Set();
   // Proyek lama menyimpan indeks array System.terms sebagai string; samakan jadi angka.
   const norm = (path) => JSON.stringify(JSON.parse(path).map((k) => (typeof k === 'string' && /^\d+$/.test(k) ? Number(k) : k)));
   for (const e of extractFile(file, orig, { src, allow })) {
     if (e.path.includes('"@json"')) { // parameter plugin JSON bersarang: hanya daun whitelist yang boleh berubah
-      const pp = JSON.parse(e.path); allowJL.add(norm(e.path)); allowJ.add(norm(JSON.stringify(pp.slice(0, pp.indexOf('@json'))))); continue;
+      const pp = JSON.parse(e.path), di = pp.at(-2) === '#d', lp = di ? pp.slice(0, -2) : pp; allowJL.add(norm(JSON.stringify(lp))); if (di) allowJD.add(norm(JSON.stringify(lp))); allowJ.add(norm(JSON.stringify(pp.slice(0, pp.indexOf('@json'))))); continue;
     }
     // note-tag: yang boleh berubah hanya isi tag di dalam string note; path note-nya didaftarkan terpisah
     if (e.category === 'script-multi') {
@@ -1261,7 +1291,7 @@ export function diffGuard(orig, next, file = 'data/X.json', allow = null, src = 
     const walk = (x, y, q) => {
       if (probs.length >= 20) return;
       const t = kindOf(x); if (t !== kindOf(y)) return bad(q, 'tipe berubah');
-      if (t === 'string') { if (x === y || allowJL.has(JSON.stringify(q))) return; if (/^\s*[\[{]/.test(x)) return cmpJson(x, y, q); return bad(q, 'teks di luar whitelist berubah'); }
+      if (t === 'string') { if (x === y) return; if (allowJD.has(JSON.stringify(q))) { const mk = (z) => { let o = '', last = 0; for (const l of drawLits(z)) { o += z.slice(last, l.at); last = l.at + l.raw.length; } return o + z.slice(last); }; if (mk(x) !== mk(y)) bad(q, 'bagian skrip di luar teks berubah'); return; } if (allowJL.has(JSON.stringify(q))) return; if (/^\s*[\[{]/.test(x)) return cmpJson(x, y, q); return bad(q, 'teks di luar whitelist berubah'); }
       if (t === 'array') { if (x.length !== y.length) return bad(q, 'jumlah elemen berubah'); return x.forEach((v, i) => walk(v, y[i], [...q, i])); }
       if (t === 'object') { const kx = Object.keys(x), ky = Object.keys(y); if (kx.length !== ky.length || kx.some((k) => !(k in y))) return bad(q, 'kunci berubah'); return kx.forEach((k) => walk(x[k], y[k], [...q, k])); }
       if (x !== y) bad(q, 'nilai berubah');

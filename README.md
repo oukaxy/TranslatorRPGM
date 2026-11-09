@@ -64,6 +64,15 @@ Engine dideteksi otomatis dari file yang ada (`rmmz_core.js`, `rpg_core.js`, ata
 
 Teks yang diekstrak meliputi: dialog (Show Text), Scroll Text, pilihan, nama pembicara, nama aktor, istilah sistem, nama peta, dan field database (Actors, Classes, Skills, Items, Weapons, Armors, Enemies, States). Komentar, teks di dalam script, tag note, serta perintah dan parameter plugin bersifat opsional dan hanya diambil bila ada di *daftar aman*.
 
+Deteksi otomatis parameter plugin (`param auto`) juga mengambil:
+
+- teks di dalam parameter JSON bersarang yang bernilai literal string JSON, misalnya deskripsi dan hint prestasi Torigoya_Achievement2 (`"..."` dibungkus ulang saat ekspor, `key` pengenal tidak disentuh);
+- anak objek atau elemen array yang induknya berkunci label (misalnya `XPARAM Name`: `{"hit": "命中率"}`), selama kunci anaknya bukan pengenal (`id`, `key`, `symbol`, dan sejenisnya);
+- nilai dengan placeholder sederhana seperti `{choice}` (dilindungi saat terjemahan).
+- literal teks pada pemanggilan `drawText`/`drawTextEx` di skrip parameter (mis. `ItemDrawScript` SceneCustomMenu: `\\c[23]所持金\\c[0]`, `\\{ロロン\\}`). Hanya isi literal yang diganti; literal dengan `${...}` atau escape selain `\\` dan kutip dilewati, dan diff guard menolak perubahan di luar literal.
+
+Yang sengaja tidak diambil: kunci parameter, `description` plugin di editor, kata kunci fungsional (`triggerButton`, perintah `ChoiceHelp`), tag `<角度: 0>`, dan skrip parameter selain literal teks pada `drawText`/`drawTextEx`. Impor ulang proyek setelah memperbarui app agar deteksi baru berlaku.
+
 ## File Bahasa (Plugin Lokalisasi)
 
 Sebagian game memakai plugin lokalisasi: di event hanya ada kunci seperti `#{Scenario_H.Brothel.Msg9}`, sedangkan teks aslinya ada di file bahasa (mis. `www/languages/en.json`, `jp.json`). Teks di event itu bukan kalimat, jadi menerjemahkannya sia-sia. Terjemahkan file bahasanya.
