@@ -1396,7 +1396,8 @@ export function diffGuard(orig, next, file = 'data/X.json', allow = null, src = 
   }
   const maskLit = (x) => x.replace(rbLit(), (all, d) => (d !== undefined ? '""' : "''"));
   const maskNote = (x) => NOTE_TAGS.reduce((acc, tag) => acc.replace(noteTagRe(tag), (all, raw) => all.slice(0, all.length - raw.length - 1) + '>'), x);
-  const bad = (p, why) => { if (probs.length < 20) probs.push(`${file} ${JSON.stringify(p)}: ${why}`); };
+  let dry = null; // mode uji: hitung ketidakcocokan tanpa mencatatnya (dipakai untuk memilih penyejajaran)
+  const bad = (p, why) => { if (dry) { dry.n++; return; } if (probs.length < 20) probs.push(`${file} ${JSON.stringify(p)}: ${why}`); };
   const cmpList = (a, b, p) => {
     const A = splitList(a), B = splitList(b), n = A.rest.length, extra = B.rest.length - n, ks = new Array(n).fill(0);
     if (extra < 0) return bad(p, 'perintah lain bergeser atau berubah jumlahnya');
@@ -1409,6 +1410,8 @@ export function diffGuard(orig, next, file = 'data/X.json', allow = null, src = 
       const shape = (x, y) => !!y && x.code === y.code && x.indent === y.indent && (x.parameters?.length ?? -1) === (y.parameters?.length ?? -1);
       const okAt = (r, j, k) => {
         if (!shape(A.rest[r], B.rest[j])) return false;
+        dry = { n: 0 }; cmp(A.rest[r], B.rest[j], [...p, A.idx[r]]); const same = dry.n === 0; dry = null;
+        if (!same) return false;
         const ra = A.runs.get(r) || [], rb = [];
         for (let t = 0; t <= k; t++) rb.push(...(B.runs.get(j + t) || []));
         return sameDeep(ra, rb) || allowB.has(JSON.stringify([...p, A.idx[r]]));
@@ -1453,7 +1456,7 @@ export function diffGuard(orig, next, file = 'data/X.json', allow = null, src = 
     walk(A, B, [...p, '@json']);
   };
   const cmp = (a, b, p, key) => {
-    if (probs.length >= 20) return;
+    if (!dry && probs.length >= 20) return;
     const t = kindOf(a);
     if (t !== kindOf(b)) return bad(p, 'tipe berubah');
     if (t === 'string') {
