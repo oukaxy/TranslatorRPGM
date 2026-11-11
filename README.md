@@ -16,6 +16,7 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 - [Penanda dan Kategori di Review](#penanda-dan-kategori-di-review)
 - [Aksi Massal di Review](#aksi-massal-di-review)
 - [Cadangan dan Pemulihan](#cadangan-dan-pemulihan)
+- [Penjelajah Penyimpanan](#penjelajah-penyimpanan)
 - [Terjemah Lewat Chat AI (Tanpa API)](#terjemah-lewat-chat-ai-tanpa-api)
 - [Keamanan Hasil Terjemahan](#keamanan-hasil-terjemahan)
 - [Privasi dan Penyimpanan Data](#privasi-dan-penyimpanan-data)
@@ -52,6 +53,7 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 - **Pemecahan baris otomatis** agar teks muat di kotak pesan (otomatis mati bila terdeteksi plugin message). Lebar bisa diukur dalam jumlah karakter (bawaan) atau dalam **piksel** dengan font dan lebar area teks game, cocok untuk font proporsional. Dialog yang masih lebih dari batas baris per kotak (bawaan 4) **dipecah jadi beberapa kotak pesan** saat ekspor: header Show Text disalin, jadi face dan pembicara sama, dan batas halaman dipilih di akhir kalimat bila ada. Untuk game yang memakai **YEP_MessageCore** atau **VisuMZ_1_MessageCore**, dialog digabung jadi satu baris dan diberi `<WordWrap>` agar plugin yang memecah baris (lihat [Pengaturan](#pengaturan)).
 - **Batas panjang label ke model**: nama item/skill/senjata, istilah sistem, nama aktor, pembicara, pilihan, dan nama peta dikirim bersama batas `max_chars` (sama dengan batas aman di penanda *mungkin terpotong*), sehingga model memilih kata yang lebih pendek atau singkatan.
 - **Cadangan dan pemulihan** proyek (terjemahan, file data asli, glosarium, gaya) dalam satu file zip, plus permintaan penyimpanan permanen ke browser.
+- **Penjelajah penyimpanan** ala file manager di Pengaturan: lihat isi IndexedDB dan localStorage per folder, ukuran tiap bagian, pratinjau item, dan hapus cache, kunci localStorage, atau satu proyek (lihat [Penjelajah Penyimpanan](#penjelajah-penyimpanan)).
 - **Bisa offline** setelah dibuka sekali (service worker) dan **bisa dipasang** ke layar utama.
 
 ## Engine dan Format yang Didukung
@@ -203,6 +205,24 @@ Di tab **Proyek**, buka bagian **Cadangan dan pemulihan**:
 
 File cadangan divalidasi sebelum dipakai: struktur, jumlah entri, id proyek, dan path file. Bila ada yang tidak cocok, tidak ada data yang diubah.
 
+## Penjelajah Penyimpanan
+
+Untuk melihat apa saja yang tersimpan di browser, buka **Pengaturan**, kartu **Penyimpanan data**, lalu **Buka penjelajah penyimpanan** (`#/penyimpanan`). Tampilannya seperti file manager:
+
+- **Ringkasan kuota**: pemakaian dan kuota seluruh situs dari `navigator.storage.estimate()` (termasuk cache service worker), plus status penyimpanan permanen.
+- **Folder bertingkat** dengan breadcrumb, mengikuti struktur aslinya:
+  - **IndexedDB** (`rpgtl-db`): Proyek, Teks (`entries`), File asli (`origFiles`), Cache terjemahan, dan Pengaturan. Teks dan File asli bisa dibuka per proyek lalu per file, sampai ke tiap entri. Di folder Proyek, tiap proyek menampilkan total ukurannya (teks + file asli) beserta rinciannya.
+  - **localStorage**: kunci milik aplikasi (`rpgtl:*`).
+- **Bar ukuran** di tiap baris menunjukkan porsinya terhadap folder induk. Daftar panjang ditampilkan 50 item per halaman.
+- **Pratinjau**: ketuk file untuk melihat isinya. API key tidak pernah ditampilkan (diganti `(disembunyikan)`).
+- **Hapus** (konfirmasi dua ketukan), hanya untuk data yang aman dibuang:
+  - satu item cache, atau **Kosongkan cache**. Terjemahan proyek tidak berubah, tetapi teks yang sama persis harus dikirim ke model lagi (memakai token);
+  - satu kunci localStorage;
+  - satu proyek utuh (teks, file asli, dan datanya), sama dengan hapus proyek di tab Proyek.
+- Teks, file asli, dan pengaturan hanya bisa dilihat, supaya proyek tidak rusak.
+
+Ukuran per item adalah **perkiraan** dari hasil serialisasi JSON, karena IndexedDB tidak menyediakan ukuran per item. Angka total dari browser lebih akurat. Pemindaian berjalan sekali saat halaman dibuka (tombol **Hitung ulang** untuk memperbarui) dan bisa butuh beberapa detik pada proyek dengan puluhan ribu teks.
+
 ## Terjemah Lewat Chat AI (Tanpa API)
 
 Tidak punya API key? Buka tab **Ekspor** lalu bagian **Terjemah lewat chat AI**:
@@ -231,7 +251,7 @@ Menerjemahkan teks game berarti harus menjaga kode di dalamnya agar game tidak r
 - Semua pemrosesan terjadi **di browser**. Tidak ada server milik aplikasi ini yang menerima data game.
 - Teks yang diterjemahkan dikirim **hanya ke base URL** yang kamu atur.
 - API key **tidak disimpan** secara bawaan dan hanya hidup di memori tab. Key baru tersimpan bila kamu mencentang *Ingat key di perangkat ini*. Jangan aktifkan di perangkat bersama.
-- Proyek, terjemahan, cache, dan pengaturan disimpan di **IndexedDB** (`rpgtl-db`). Tombol **Hapus semua data** di Pengaturan menghapus semuanya tanpa menyentuh data lain di situs yang sama.
+- Proyek, terjemahan, cache, dan pengaturan disimpan di **IndexedDB** (`rpgtl-db`). Tombol **Hapus semua data** di Pengaturan menghapus semuanya tanpa menyentuh data lain di situs yang sama. Isinya bisa dilihat lewat [Penjelajah Penyimpanan](#penjelajah-penyimpanan).
 - Preferensi tampilan dan catatan waktu cadangan disimpan di `localStorage` (kunci berawalan `rpgtl:ui:`), terpisah dari IndexedDB.
 - Karena berjalan di browser, provider harus mengizinkan request lintas-origin (CORS). Sebagian besar API LLM publik sudah mengizinkannya. Bila provider tidak mengizinkan, pakai [proxy CORS](#proxy-cors-opsional-cloudflare-worker).
 
@@ -297,11 +317,12 @@ Bagian utama `app.js`:
 | 4. Impor dan ekspor | Impor proyek, `buildPatch`, diff guard, penulisan zip |
 | 5. Translate | Klien LLM, batch, cache, retry, putaran perbaikan, resume, estimasi biaya, mode chat AI |
 | 6. Tampilan | Proyek, Translate, Pengaturan, Review, Ekspor |
+| 6b. Penjelajah penyimpanan | Pemindaian IndexedDB/localStorage dan tampilan file manager (`viewStorage`) |
 | 7. Bootstrap | Router berbasis hash dan pendaftaran service worker |
 
 ## Catatan Teknis
 
-- Routing memakai hash: `#/proyek`, `#/translate`, `#/review`, `#/ekspor`, `#/pengaturan`.
+- Routing memakai hash: `#/proyek`, `#/translate`, `#/review`, `#/ekspor`, `#/pengaturan`, `#/penyimpanan` (dibuka dari Pengaturan, tidak ada di navigasi bawah).
 - Service worker memakai strategi *network first*: halaman dan aset selalu diambil dari jaringan, dan cache dipakai hanya saat offline. Panggilan ke provider LLM tidak pernah dicegat. Naikkan `VERSION` di `sw.js` bila kamu ingin memaksa pembersihan cache lama.
 - Mode tes: bila `globalThis.__RPGTL_TEST__` diset sebelum modul dimuat, aplikasi memakai database terpisah (`rpgtl-db-test`) dan tidak menjalankan bootstrap, sehingga fungsi yang diekspor bisa diuji langsung.
 - Menambah kosakata deteksi bahasa cukup dengan mengedit `lang-vocab.js`. Semua huruf kecil, dipisah spasi atau baris baru.

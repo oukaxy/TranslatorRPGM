@@ -192,3 +192,29 @@ dialog.sheet.focus{max-width:720px;height:100vh;height:100dvh;max-height:none;ma
 .catrow.on{border-color:var(--acc);background:var(--acc-soft)}
 .badge.tag{background:var(--acc-soft);color:var(--acc)}
 .focus .sheet-body>button{margin-top:6px}
+
+/* Penjelajah penyimpanan (tampilan file manager) */
+.fm-back{display:inline-flex;align-items:center;min-height:44px;color:var(--acc);text-decoration:none;font-weight:600}
+.fm-crumb{display:flex;align-items:center;gap:2px;overflow-x:auto;white-space:nowrap;margin:0 0 8px;scrollbar-width:none}
+.fm-crumb::-webkit-scrollbar{display:none}
+.fm-crumb i{flex:0 0 auto;color:var(--mut);font-style:normal}
+.fm-crumb button{flex:0 0 auto;width:auto;max-width:60vw;min-height:36px;padding:0 10px;background:transparent;border:0;color:var(--acc);font-size:14px;overflow:hidden;text-overflow:ellipsis}
+.fm-crumb button[aria-current]{color:var(--fg);font-weight:650}
+.fm-pvbox{scroll-margin-top:70px}
+.fm-pt{word-break:break-word}
+.fm-pre{max-height:40vh;overflow:auto;margin:8px 0;padding:10px;border-radius:var(--r-sm);background:var(--raise);font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-all}
+.fm-list{padding:6px}
+.fm-info{margin:6px 10px 4px}
+button.fm-row{display:grid;grid-template-columns:28px minmax(0,1fr) auto;column-gap:10px;align-items:center;width:100%;min-height:58px;margin:0;padding:8px 10px;text-align:left;background:transparent;border:0;border-radius:var(--r-sm);font-weight:500}
+button.fm-row:active{background:var(--raise);filter:none}
+.fm-ic{grid-row:1/3;color:var(--mut);display:grid;place-items:center}
+.fm-row.dir .fm-ic{color:var(--acc)}
+.fm-nm,.fm-sub{grid-column:2;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fm-nm{font-size:15px}
+.fm-sub{font-size:12.5px;color:var(--mut);font-weight:400}
+.fm-sub:empty{display:none}
+.fm-sz{grid-column:3;grid-row:1/3;font-size:13px;color:var(--mut);white-space:nowrap}
+.fm-bar{grid-column:1/-1;height:4px;margin-top:6px;border-radius:2px;background:var(--raise);overflow:hidden}
+.fm-bar b{display:block;height:100%;border-radius:2px;background:var(--mut)}
+.fm-row.dir .fm-bar b{background:var(--acc)}
+.fm-list>button:not(.fm-row){margin-top:8px}

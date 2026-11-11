@@ -2930,6 +2930,7 @@ async function viewSettings() {
       h('label', { class: 'chk' }, fast, 'Matikan mode berpikir model (khusus OpenRouter, lebih cepat)'),
       h('label', {}, 'Daftar aman plugin (opsional)'),
       h('p', { class: 'mut' }, 'Kosong = perintah dan parameter plugin tidak disentuh. Tulis "param auto" agar parameter plugin berupa label/pesan terdeteksi otomatis, termasuk teks berkunci label (name, text, title, help, dst.) di dalam parameter JSON bersarang (nama file, switch, script, symbol, dan kunci pengenal dilewati); kecualikan satu parameter dengan "param !Plugin.kunci". Isi entri manual hanya yang kamu yakin berisi teks tampil. Berlaku saat impor, jadi impor ulang proyek setelah mengubahnya.'), allowTa),
+    card(h('h2', {}, 'Penyimpanan data'), h('p', { class: 'mut' }, 'Lihat isi IndexedDB dan localStorage seperti file manager: ukuran tiap bagian, isi item, dan hapus cache atau proyek.'), h('a', { class: 'file', href: '#/penyimpanan' }, 'Buka penjelajah penyimpanan')),
     h('div', { class: 'card danger-card' }, h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn),
     actionBar(msg, h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')))];
 }
@@ -3454,11 +3455,186 @@ async function viewEkspor() {
         h('label', { class: 'file' }, 'Impor file (.txt)', h('input', { type: 'file', accept: '.txt,text/plain', multiple: '', onchange: async (ev) => { const fs = [...ev.target.files]; ev.target.value = ''; if (fs.length) await doImport((await Promise.all(fs.map((f) => f.text()))).join('\n')); } }))), chatMsg)];
 }
 
+// ===== 6b. PENJELAJAH PENYIMPANAN (tampilan ala file manager untuk IndexedDB dan localStorage) =====
+const ST_INFO = {
+  projects: ['Proyek', 'Data tiap proyek yang diimpor'],
+  entries: ['Teks', 'Teks asli dan terjemahannya'],
+  origFiles: ['File asli', 'Salinan file data game untuk ekspor'],
+  cache: ['Cache terjemahan', 'Hasil untuk teks yang sama persis'],
+  settings: ['Pengaturan', 'Konfigurasi dan penanda internal'],
+};
+const ST_FOLDER = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+const ST_FILE = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>';
+/** Ukuran perkiraan (byte UTF-8 dari hasil JSON). IndexedDB tidak punya API ukuran per item. */
+const stBytes = (v) => { try { return new Blob([typeof v === 'string' ? v : JSON.stringify(v)]).size; } catch { return 0; } };
+const stFmt = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1073741824).toFixed(2)} GB`;
+const stN = (n) => Number(n || 0).toLocaleString('id-ID');
+const stLine = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n) + '…' : s; };
+/** JSON untuk pratinjau; API key tidak pernah ditampilkan. */
+const stJson = (v) => JSON.stringify(v, (k, x) => (k === 'apiKey' && x ? '(disembunyikan)' : x), 2) ?? '';
+const stCut = (t) => (t.length > 6000 ? t.slice(0, 6000) + `\n… (dipotong, total ${stN(t.length)} karakter)` : t);
+const stGrp = (m, k, mk) => m.get(k) || (m.set(k, mk()), m.get(k));
+
+/** Satu kali pindai: ukuran dan jumlah item per store, dikelompokkan per proyek dan file. */
+async function stScan() {
+  const db = await openDb(), names = Object.keys(ST_INFO), S = {};
+  names.forEach((n) => { S[n] = { n: 0, bytes: 0, items: [], groups: new Map() }; });
+  await new Promise((res, rej) => {
+    const t = db.transaction(names);
+    names.forEach((name) => {
+      const s = S[name], req = t.objectStore(name).openCursor();
+      req.onsuccess = () => {
+        const cur = req.result; if (!cur) return;
+        const v = cur.value, b = stBytes(v); s.n++; s.bytes += b;
+        if (name === 'entries') {
+          const g = stGrp(s.groups, String(v.projectId), () => ({ n: 0, bytes: 0, files: new Map() }));
+          const f = stGrp(g.files, String(v.file), () => ({ n: 0, bytes: 0 }));
+          g.n++; g.bytes += b; f.n++; f.bytes += b;
+        } else if (name === 'origFiles') {
+          const k = String(cur.key), i = k.indexOf(':'), g = stGrp(s.groups, k.slice(0, i), () => ({ n: 0, bytes: 0, files: [] }));
+          g.n++; g.bytes += b; g.files.push({ key: k, path: k.slice(i + 1), bytes: b });
+        } else {
+          s.items.push({ key: String(cur.key), bytes: b, v: name === 'projects' ? { engine: v.engine, total: v.total } : name === 'cache' ? { t: stLine(v.text, 60), at: v.at } : null });
+        }
+        cur.continue();
+      };
+    });
+    t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error || new Error('Pembacaan dibatalkan'));
+  });
+  const ls = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('rpgtl:')) ls.push({ key: k, bytes: (k.length + (localStorage.getItem(k) || '').length) * 2 });
+    }
+  } catch { /* localStorage tidak tersedia */ }
+  return { S, ls };
+}
+
+/** Isi satu "folder": baris (dir = folder, selain itu file), plus aksi opsional. */
+async function stLevel({ S, ls }, p) {
+  const [a, b, c, d] = p, bySize = (x) => x.sort((m, n) => n.bytes - m.bytes);
+  const foot = (pid) => (S.projects.items.find((i) => i.key === pid)?.bytes || 0) + (S.entries.groups.get(pid)?.bytes || 0) + (S.origFiles.groups.get(pid)?.bytes || 0);
+  if (!a) {
+    const idb = Object.values(S).reduce((t, s) => t + s.bytes, 0), lsb = ls.reduce((t, i) => t + i.bytes, 0);
+    return { rows: [
+      { dir: 1, name: 'IndexedDB', sub: `${DB_NAME}, ${Object.keys(S).length} store`, bytes: idb, go: ['idb'] },
+      { dir: 1, name: 'localStorage', sub: `${stN(ls.length)} kunci rpgtl:*`, bytes: lsb, go: ['ls'] }] };
+  }
+  if (a === 'ls') {
+    return { rows: bySize(ls.map((i) => ({ name: i.key, sub: i.key.startsWith('rpgtl:ui:') ? 'Preferensi tampilan atau catatan cadangan' : '', bytes: i.bytes,
+      show: async () => localStorage.getItem(i.key) ?? '', del: async () => localStorage.removeItem(i.key) }))) };
+  }
+  if (a !== 'idb' || (b && !ST_INFO[b])) return { rows: [] };
+  if (!b) return { rows: Object.keys(ST_INFO).map((n) => ({ dir: 1, name: ST_INFO[n][0], sub: `${n}, ${stN(S[n].n)} item. ${ST_INFO[n][1]}`, bytes: S[n].bytes, go: ['idb', n] })) };
+  const s = S[b];
+  if (b === 'projects') {
+    if (!c) return { rows: bySize(s.items.map((i) => ({ dir: 1, name: i.key, sub: `${i.v?.engine || '?'}, ${stN(i.v?.total)} teks`, bytes: foot(i.key), go: ['idb', 'projects', i.key] }))) };
+    const it = s.items.find((i) => i.key === c); if (!it) return { rows: [] };
+    const eg = S.entries.groups.get(c), og = S.origFiles.groups.get(c);
+    return { rows: [
+      { dir: 1, name: 'Teks', sub: `entries, ${stN(eg?.n)} item`, bytes: eg?.bytes || 0, go: ['idb', 'entries', c] },
+      { dir: 1, name: 'File asli', sub: `origFiles, ${stN(og?.n)} file`, bytes: og?.bytes || 0, go: ['idb', 'origFiles', c] },
+      { name: 'Data proyek', sub: 'Ringkasan impor dan pengaturan proyek', bytes: it.bytes, show: async () => stJson(await dbGet('projects', c)) }],
+    tools: [{ label: 'Hapus proyek ini', armed: 'Yakin? Ketuk lagi: proyek, teks, dan file aslinya dihapus', run: () => deleteProject(c), then: ['idb', 'projects'] }] };
+  }
+  if (b === 'entries') {
+    if (!c) return { rows: bySize([...s.groups].map(([pid, g]) => ({ dir: 1, name: pid, sub: `${stN(g.n)} teks, ${g.files.size} file`, bytes: g.bytes, go: ['idb', 'entries', pid] }))) };
+    const g = s.groups.get(c); if (!g) return { rows: [] };
+    if (d === undefined) return { rows: bySize([...g.files].map(([f, x]) => ({ dir: 1, name: f, sub: `${stN(x.n)} teks`, bytes: x.bytes, go: ['idb', 'entries', c, f] }))) };
+    const list = await dbQuery('entries', 'projectFile', [c, d]);
+    return { rows: list.map((e) => ({ name: stLine(e.original, 70) || '(kosong)', sub: `${e.status || '?'}${e.translation ? ' · ' + stLine(e.translation, 50) : ''}`, bytes: stBytes(e), show: async () => stJson(e) })) };
+  }
+  if (b === 'origFiles') {
+    if (!c) return { rows: bySize([...s.groups].map(([pid, g]) => ({ dir: 1, name: pid, sub: `${stN(g.n)} file`, bytes: g.bytes, go: ['idb', 'origFiles', pid] }))) };
+    const g = s.groups.get(c); if (!g) return { rows: [] };
+    return { rows: bySize(g.files.map((f) => ({ name: f.path, sub: '', bytes: f.bytes, show: async () => { const v = await dbGet('origFiles', f.key); return typeof v?.text === 'string' ? v.text : stJson(v); } }))) };
+  }
+  if (b === 'cache') {
+    return { rows: bySize(s.items.map((i) => ({ name: i.v?.t || i.key, sub: `${i.key.slice(0, 10)}…${i.v?.at ? ' · ' + new Date(i.v.at).toLocaleDateString('id-ID') : ''}`, bytes: i.bytes,
+      show: async () => stJson(await dbGet('cache', i.key)), del: async () => dbDeleteMany('cache', [i.key]) }))),
+    note: 'Cache hanya mempercepat teks yang sama persis. Menghapusnya tidak mengubah terjemahan proyek, tetapi teks yang sama harus dikirim ke model lagi (memakai token).',
+    tools: s.n ? [{ label: `Kosongkan cache (${stN(s.n)} item)`, armed: 'Yakin? Ketuk lagi untuk mengosongkan cache', run: () => dbDeleteMany('cache', s.items.map((i) => i.key)) }] : [] };
+  }
+  // settings
+  return { rows: bySize(s.items.map((i) => ({ name: i.key, sub: i.key === 'config' ? 'Pengaturan LLM (API key disembunyikan)' : '', bytes: i.bytes, show: async () => stJson(await dbGet('settings', i.key)) }))) };
+}
+
+async function viewStorage() {
+  let data = null, path = [], shown = PAGE_SIZE, pv = null, tick = 0;
+  const msg = h('p', { class: 'err' }), crumb = h('div', { class: 'fm-crumb', role: 'navigation', 'aria-label': 'Lokasi' }), pvBox = h('div', { class: 'fm-pvbox' }), listBox = h('div');
+  const usage = h('p', { class: 'mut' }, 'Menghitung…'), bar = h('progress', { max: '1', value: '0' });
+  const danger = (label, armedLabel, run) => {
+    let armed = false, tm;
+    const b = h('button', { class: 'danger', onclick: async () => {
+      if (!armed) { armed = true; b.textContent = armedLabel; tm = setTimeout(() => { armed = false; b.textContent = label; }, 5000); return; }
+      clearTimeout(tm); b.disabled = true;
+      try { await run(); } catch (e) { b.disabled = false; armed = false; b.textContent = label; msg.textContent = e.message; }
+    } }, label);
+    return b;
+  };
+  const nav = (to) => { path = to; shown = PAGE_SIZE; pv = null; paintPv(); paint(); scrollTo?.({ top: 0 }); };
+  const paintUsage = async () => {
+    try {
+      const e = await navigator.storage.estimate(), per = navigator.storage.persisted ? await navigator.storage.persisted() : null;
+      bar.value = e.quota ? Math.min(1, e.usage / e.quota) : 0;
+      usage.textContent = `Terpakai ${stFmt(e.usage || 0)} dari kuota sekitar ${stFmt(e.quota || 0)} (seluruh situs ini, termasuk cache aplikasi). ` + (per === true ? 'Penyimpanan permanen aktif.' : per === false ? 'Belum permanen: browser boleh menghapus data bila memori penuh, jadi buat cadangan berkala.' : '');
+    } catch { bar.hidden = true; usage.textContent = 'Browser ini tidak melaporkan kuota penyimpanan.'; }
+  };
+  const refresh = async () => {
+    msg.textContent = '';
+    try { data = await stScan(); await paint(); } catch (e) { listBox.replaceChildren(card(h('p', { class: 'err' }, e.message))); }
+    paintUsage();
+  };
+  const row = (r, total) => {
+    const ic = h('span', { class: 'fm-ic', 'aria-hidden': 'true' }); ic.innerHTML = r.dir ? ST_FOLDER : ST_FILE;
+    const pct = total ? Math.max(2, Math.round((r.bytes / total) * 100)) : 0;
+    const fill = h('b'); fill.style.width = pct + '%';
+    return h('button', { class: 'fm-row' + (r.dir ? ' dir' : ''), onclick: () => (r.go ? nav(r.go) : openPv(r)) },
+      ic, h('span', { class: 'fm-nm' }, r.name), h('span', { class: 'fm-sub' }, r.sub || ''), h('span', { class: 'fm-sz' }, stFmt(r.bytes)), h('span', { class: 'fm-bar' }, fill));
+  };
+  const paint = async () => {
+    const my = ++tick, labels = path.map((s, i) => (s === 'idb' ? 'IndexedDB' : s === 'ls' ? 'localStorage' : i === 1 && ST_INFO[s] ? ST_INFO[s][0] : s));
+    crumb.replaceChildren(...[['Penyimpanan', []], ...labels.map((t, i) => [t, path.slice(0, i + 1)])].flatMap(([t, to], i, all) => [
+      i ? h('i', { 'aria-hidden': 'true' }, '›') : '', h('button', { ...(i === all.length - 1 ? { 'aria-current': 'page' } : {}), onclick: () => nav(to) }, t)]));
+    let lv; try { lv = await stLevel(data, path); } catch (e) { lv = { rows: [], err: e.message }; }
+    if (my !== tick) return;
+    const rows = lv.rows, total = rows.reduce((t, r) => t + r.bytes, 0), vis = rows.slice(0, shown);
+    listBox.replaceChildren(h('div', { class: 'card fm-list' },
+      h('p', { class: 'mut fm-info' }, rows.length ? `${stN(rows.length)} item · ${stFmt(total)} (perkiraan)` : 'Kosong'),
+      lv.err ? h('p', { class: 'err' }, lv.err) : '',
+      ...vis.map((r) => row(r, total)),
+      rows.length > shown ? h('button', { onclick: () => { shown += PAGE_SIZE; paint(); } }, `Tampilkan lebih banyak (${stN(rows.length - shown)} lagi)`) : '',
+      lv.note ? h('p', { class: 'mut' }, lv.note) : '',
+      ...(lv.tools || []).map((t) => danger(t.label, t.armed, async () => { await t.run(); if (t.then) path = t.then; pv = null; paintPv(); await refresh(); }))));
+  };
+  const paintPv = () => {
+    if (!pv) return pvBox.replaceChildren();
+    const r = pv.r;
+    pvBox.replaceChildren(h('div', { class: 'card' }, h('h2', { class: 'fm-pt' }, stLine(r.name, 80)), h('p', { class: 'mut' }, `${stFmt(r.bytes)} (perkiraan)`),
+      h('pre', { class: 'fm-pre' }, pv.text ?? 'Memuat…'),
+      h('div', { class: 'row' }, r.del ? danger('Hapus item ini', 'Yakin? Ketuk lagi untuk menghapus', async () => { await r.del(); pv = null; paintPv(); await refresh(); }) : '', h('button', { onclick: () => { pv = null; paintPv(); } }, 'Tutup'))));
+    pvBox.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+  };
+  const openPv = async (r) => {
+    const mine = pv = { r, text: null }; paintPv();
+    try { mine.text = stCut(await r.show()); } catch (e) { mine.text = 'Tidak bisa dibaca: ' + e.message; }
+    if (pv === mine) paintPv();
+  };
+  listBox.append(card(h('p', { class: 'mut' }, 'Menghitung ukuran data…')));
+  refresh();
+  return [
+    h('a', { href: '#/pengaturan', class: 'fm-back' }, '‹ Pengaturan'),
+    card(h('h2', {}, 'Penyimpanan'), usage, bar, h('button', { onclick: refresh }, 'Hitung ulang')),
+    crumb, pvBox, listBox, msg,
+    h('p', { class: 'mut' }, 'Ukuran per item adalah perkiraan dari hasil serialisasi JSON, jadi bisa berbeda dari angka browser di atas. localStorage hanya menampilkan kunci milik aplikasi (rpgtl:*). Teks, file asli, dan pengaturan hanya bisa dilihat agar proyek tidak rusak; yang bisa dihapus: cache, kunci localStorage, dan proyek utuh.')];
+}
+
 // ===== 7. BOOTSTRAP (router hash, state, mulai aplikasi) =====
 const app = () => document.getElementById('app');
 const routes = {
   proyek: viewProyek, review: viewReview, ekspor: viewEkspor,
-  translate: viewTranslate, pengaturan: viewSettings,
+  translate: viewTranslate, pengaturan: viewSettings, penyimpanan: viewStorage,
 };
 async function render() {
   const name = (location.hash.match(/^#\/(\w+)/) || [, 'proyek'])[1];
