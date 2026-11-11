@@ -1809,6 +1809,36 @@ export function parseNotes(text = '') {
 export const notesFor = (notes, speaker) => (speaker ? notes.filter(([n]) => speaker.includes(n)) : []);
 /** Ada huruf Jepang (kana, kanji, kana setengah lebar). */
 const NAME_CJK = /[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]/;
+/** Nama yang ditulis di baris pertama dialog (game tanpa kolom nama): [Nama], 【Nama】, <Nama>, \n<Nama>, atau baris nama sendiri sebelum kalimat berkutip. Dipakai hanya bila muncul minimal 2 kali. */
+export function dialogHeadNames(entries, gl, skip = []) {
+  const have = new Set([...gl.map(([a]) => a.toLowerCase()), ...skip.map((s) => s.toLowerCase())]), cnt = new Map();
+  const wrap = /^(?:\\[A-Za-z]+(?:\[\d+\])?)*\s*[\[【<＜]\s*([^\[\]【】<>＜＞\n\\]{1,24}?)\s*[\]】>＞]\s*$/, yep = /^\\[nN]<([^<>\n]{1,24})>/;
+  const plain = /^[^。、．，！？!?,.…:：「」『』"“”()（）\[\]【】<>]{1,16}$/, quoted = /^\s*[「『"“（(]/;
+  for (const e of entries) {
+    if (e.category !== 'dialog') continue;
+    const lines = String(e.original || '').split('\n'), first = lines[0].trim(); let n = '';
+    const y = first.match(yep);
+    if (y) n = y[1]; else if (lines.length > 1) {
+      const w = first.match(wrap);
+      if (w) n = w[1]; else { const s = stripEscapes(first).trim(); if (plain.test(s) && quoted.test(stripEscapes(lines[1]))) n = s; }
+    }
+    n = n.replace(/\s+/g, ' ').trim(); if (n) cnt.set(n, (cnt.get(n) || 0) + 1);
+  }
+  return [...cnt].filter(([n, c]) => c >= 2 && !n.includes('=') && /\p{L}/u.test(n) && !have.has(n.toLowerCase())).sort((a, b) => b[1] - a[1]).map(([n]) => n);
+}
+/** Nama dari database Actors (field name) dan perintah Change Name di event, yang belum ada di glosarium atau daftar lain. */
+export function actorNames(entries, gl, skip = []) {
+  const have = new Set([...gl.map(([a]) => a.toLowerCase()), ...skip.map((s) => s.toLowerCase())]), out = [];
+  for (const e of entries) {
+    let ok = e.category === 'actorname';
+    if (!ok && e.category === 'actors') { try { ok = JSON.parse(e.path).at(-1) === 'name'; } catch { /* path rusak */ } }
+    if (!ok) continue;
+    const n = stripEscapes(String(e.original || '')).replace(/\s+/g, ' ').trim(), k = n.toLowerCase();
+    if (!n || n.includes('=') || !/\p{L}/u.test(n) || have.has(k)) continue;
+    have.add(k); out.push(n);
+  }
+  return out;
+}
 /** Nama pembicara unik (kode escape dibuang) dari entri kategori speaker yang belum ada di glosarium. */
 export function speakerNames(entries, gl) {
   const have = new Set(gl.map(([a]) => a.toLowerCase())), seen = new Set(), out = [];
@@ -2926,8 +2956,8 @@ async function viewSettings() {
     const btn = ev.currentTarget; btn.disabled = true;
     try {
       const p = await currentProject(); if (!p) return say('Belum ada proyek. Impor game di tab Proyek', true);
-      const names = speakerNames(await dbQuery('entries', 'projectId', p.id), parseGlossary(glossTa.value));
-      if (!names.length) return say('Tidak ada nama pembicara baru. Semua sudah ada di glosarium, atau game ini tidak memakai kolom nama di Show Text');
+      const rows = await dbQuery('entries', 'projectId', p.id), gl0 = parseGlossary(glossTa.value), fromBox = speakerNames(rows, gl0), fromText = dialogHeadNames(rows, gl0, fromBox), fromActor = actorNames(rows, gl0, [...fromBox, ...fromText]), names = [...fromBox, ...fromText, ...fromActor];
+      if (!names.length) return say(`Tidak ada nama baru. ${rows.filter((e) => e.category === 'speaker').length ? 'Nama di kolom nama Show Text sudah ada di glosarium.' : 'Kolom nama Show Text kosong.'} Dari ${stN(rows.filter((e) => e.category === 'dialog').length)} dialog, tidak ada pola nama di baris pertama yang muncul 2 kali atau lebih ([Nama], 【Nama】, \\n<Nama>, atau baris nama sendiri). Salin satu contoh teks asli dialog dari Review, lalu polanya bisa ditambahkan`);
       const map = new Map(names.filter((n) => !NAME_CJK.test(n)).map((n) => [n, n])), jp = names.filter((n) => NAME_CJK.test(n));
       let note = '';
       if (jp.length) {
@@ -2948,7 +2978,7 @@ async function viewSettings() {
       const cur = glossTa.value.replace(/\s+$/, '');
       glossTa.value = (cur ? cur + '\n\n' : '') + '# Nama pembicara (otomatis, periksa dulu)\n' + names.map((n) => `${n} = ${map.get(n) || ''}`).join('\n') + '\n';
       const blank = names.filter((n) => !map.get(n)).length;
-      say(`${names.length} nama ditambahkan di akhir kolom glosarium. Nama berhuruf latin dibiarkan sama; ubah bila mau (mis. Rose = Mawar). ${blank ? `${blank} baris masih kosong dan belum dipakai sampai kamu isi. ` : ''}Periksa, lalu tekan Simpan.${note}`, !!note);
+      say(`${names.length} nama ditambahkan di akhir kolom glosarium (${fromBox.length} dari kolom nama, ${fromText.length} dari baris pertama dialog, ${fromActor.length} dari database aktor). Nama berhuruf latin dibiarkan sama; ubah bila mau (mis. Rose = Mawar). ${blank ? `${blank} baris masih kosong dan belum dipakai sampai kamu isi. ` : ''}Periksa, lalu tekan Simpan.${note}`, !!note);
     } catch (e) { say(e.message, true); } finally { btn.disabled = false; }
   } }, 'Ambil nama pembicara dari proyek');
   const pair = {}; FIELDS.forEach(([k], i) => { pair[k] = [form[i * 2], form[i * 2 + 1]]; });
@@ -2961,7 +2991,7 @@ async function viewSettings() {
       h('label', {}, 'Catatan per karakter (nama pembicara: gaya bicara)'), notesTa,
       h('button', { onclick: () => { styleTa.value = DEFAULT_STYLE; } }, 'Pulihkan gaya bawaan')),
     card(h('h2', {}, 'Glosarium (opsional)'), h('p', { class: 'mut' }, 'Satu baris per istilah: sumber = terjemahan. Istilah dicocokkan tanpa membedakan huruf besar/kecil dan dikirim ke model bersama teks yang memuatnya. Bila hasilnya tidak memakai padanan istilah, teks itu diterjemah ulang sekali. Teks yang isinya persis satu istilah diterjemahkan langsung tanpa model. Teks mirip yang sudah diterjemahkan dipakai sebagai acuan agar pilihan katanya sama. Berlaku untuk terjemahan berikutnya; teks yang sudah selesai tidak diubah. Untuk yang sudah selesai, pakai filter Review "Glosarium tidak dipakai" dan "Terjemahan tidak konsisten".'), glossTa,
-      nameBtn, h('p', { class: 'mut' }, 'Mengisi nama dari kotak nama dialog proyek aktif. Nama Jepang diubah ke huruf latin lewat model (butuh API key). Hasilnya hanya ditambahkan ke kolom di atas dan baru tersimpan setelah kamu tekan Simpan.')),
+      nameBtn, h('p', { class: 'mut' }, 'Mengisi nama dari kolom nama Show Text, database aktor, dan baris pertama dialog ([Nama], 【Nama】, \\n<Nama>) di proyek aktif. Nama Jepang diubah ke huruf latin lewat model (butuh API key). Hasilnya hanya ditambahkan ke kolom di atas dan baru tersimpan setelah kamu tekan Simpan.')),
     fold('Lanjutan',
       h('label', { class: 'chk' }, autoCb, 'Atur kecepatan otomatis (disarankan)'),
       h('p', { class: 'mut' }, 'Ukuran batch dan konkurensi diatur sendiri mengikuti panjang teks dan respons provider. Isian ukuran batch, batas karakter, konkurensi, dan jeda di bawah baru dipakai kalau ini dimatikan.'),
