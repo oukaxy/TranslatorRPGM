@@ -13,7 +13,7 @@ public class MainActivity extends BridgeActivity {
             @Override
             public void handleOnBackPressed() {
                 bridge.eval("globalThis.__rpgBack ? globalThis.__rpgBack() : false", value -> {
-                    if (!"true".equals(value)) finish();
+                    if (!"true".equals(value)) moveTaskToBack(true);
                 });
             }
         });

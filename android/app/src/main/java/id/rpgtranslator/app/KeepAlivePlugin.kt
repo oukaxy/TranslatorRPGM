@@ -99,13 +99,20 @@ class KeepAlivePlugin : Plugin() {
 
     @PluginMethod
     fun requestNotifications(call: PluginCall) {
-        if (Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED) return call.resolve()
+        if (Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED) return resolveNotifications(call)
         requestPermissionForAlias("notifications", call, "notificationsCallback")
     }
 
     @PermissionCallback
     private fun notificationsCallback(call: PluginCall) {
-        call.resolve()
+        resolveNotifications(call)
+    }
+
+    private fun resolveNotifications(call: PluginCall) {
+        val granted = Build.VERSION.SDK_INT < 33 || getPermissionState("notifications") == PermissionState.GRANTED
+        val o = JSObject()
+        o.put("granted", granted)
+        call.resolve(o)
     }
 
     @PluginMethod

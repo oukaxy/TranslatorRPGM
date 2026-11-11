@@ -3,8 +3,21 @@ const Cap = globalThis.Capacitor;
 const plugin = Cap && typeof Cap.isNativePlatform === 'function' && Cap.isNativePlatform() && Cap.registerPlugin ? Cap.registerPlugin('KeepAlive') : null;
 export const native = !!plugin;
 
-let stopCb = null;
+let stopCb = null, lastError = '';
+const fail = (e) => { lastError = String(e?.message || e); throw e; };
 if (plugin) plugin.addListener('stopClicked', () => stopCb?.()).catch(() => {});
+
+/** Status jembatan native untuk ditampilkan di Pengaturan (diagnosa). */
+export function nativeDiag() {
+  return {
+    capacitor: !!Cap,
+    native,
+    plugin: !!plugin,
+    platform: (Cap && Cap.getPlatform && Cap.getPlatform()) || 'web',
+    available: !!(Cap && Cap.isPluginAvailable && Cap.isPluginAvailable('KeepAlive')),
+    error: lastError,
+  };
+}
 
 const b64 = (u8) => {
   let s = '';
@@ -29,9 +42,9 @@ export async function saveBlob(blob, name) {
 }
 
 export const KeepAlive = {
-  start: (o) => plugin?.start(o).catch(() => {}),
-  update: (o) => plugin?.update(o).catch(() => {}),
-  stop: () => plugin?.stop().catch(() => {}),
+  start: (o) => (plugin ? plugin.start(o).catch(fail) : Promise.reject(new Error('Plugin KeepAlive tidak tersedia'))),
+  update: (o) => (plugin ? plugin.update(o).catch((e) => { lastError = String(e?.message || e); }) : Promise.resolve()),
+  stop: () => (plugin ? plugin.stop().catch(() => {}) : Promise.resolve()),
   onStop: (cb) => { stopCb = cb; },
   requestNotifications: () => plugin?.requestNotifications().catch(() => {}),
   requestBattery: () => plugin?.requestIgnoreBatteryOptimizations().catch(() => {}),

@@ -1,5 +1,5 @@
 import { ID_W, ID_X, EN_W, EN_SKIP, ID_AMBIG, FOREIGN_W } from './lang-vocab.js';
-import { native, KeepAlive } from './native.js';
+import { native, KeepAlive, nativeDiag } from './native.js';
 // ===== 1. CONFIG & STRING UI =====
 // Mode tes memakai DB terpisah agar data asli di origin yang sama tidak ikut terhapus.
 export const DB_NAME = globalThis.__RPGTL_TEST__ ? 'rpgtl-db-test' : 'rpgtl-db';
@@ -2832,7 +2832,10 @@ async function startJob(opts = {}) {
   job.warn = native ? '' : (navigator.wakeLock ? '' : 'Browser ini tidak punya penjaga layar. Matikan kunci layar otomatis di HP dan biarkan app tetap di depan.');
   const getLock = async () => { if (native) return; try { lock = await navigator.wakeLock?.request('screen'); } catch { /* layar tetap boleh mati */ } };
   await getLock();
-  if (native) { KeepAlive.requestNotifications(); KeepAlive.start({ title: 'Menerjemahkan', body: 'Memulai…', progress: 0 }); }
+  if (native) {
+    KeepAlive.requestNotifications();
+    KeepAlive.start({ title: 'Menerjemahkan', body: 'Memulai…', progress: 0 }).catch((e) => { job.warn = 'Latar belakang gagal: ' + (e?.message || e); paintJob(); });
+  }
   const onVis = async () => {
     if (document.hidden) { hiddenAt = Date.now(); return; }
     if (hiddenAt && !native) { const sec = Math.round((Date.now() - hiddenAt) / 1000); hiddenAt = 0; if (sec >= 5) job.warn = `App sempat di latar belakang ${sec} detik. Request yang tertunda bisa gagal dan diulang otomatis. Biarkan layar menyala dan app tetap di depan.`; }
@@ -3020,6 +3023,8 @@ async function viewSettings() {
   } }, 'Ambil nama pembicara dari proyek');
   const pair = {}; FIELDS.forEach(([k], i) => { pair[k] = [form[i * 2], form[i * 2 + 1]]; });
   const advKeys = FIELDS.map(([k]) => k).filter((k) => !['baseUrl', 'apiKey', 'model'].includes(k));
+  const adiag = native ? nativeDiag() : null;
+  const atxt = h('p', { class: 'mut' }, '');
   return [
     card(h('h2', {}, 'Koneksi LLM'), ...pair.baseUrl, ...pair.apiKey, ...pair.model,
       h('label', { class: 'chk' }, remember, 'Ingat key di perangkat ini'),
@@ -3040,7 +3045,7 @@ async function viewSettings() {
       h('label', { class: 'chk' }, fast, 'Matikan mode berpikir model (khusus OpenRouter, lebih cepat)'),
       h('label', {}, 'Daftar aman plugin (opsional)'),
       h('p', { class: 'mut' }, 'Kosong = perintah dan parameter plugin tidak disentuh. Tulis "param auto" agar parameter plugin berupa label/pesan terdeteksi otomatis, termasuk teks berkunci label (name, text, title, help, dst.) di dalam parameter JSON bersarang (nama file, switch, script, symbol, dan kunci pengenal dilewati); kecualikan satu parameter dengan "param !Plugin.kunci". Isi entri manual hanya yang kamu yakin berisi teks tampil. Berlaku saat impor, jadi impor ulang proyek setelah mengubahnya.'), allowTa),
-    native ? card(h('h2', {}, 'Android'), h('p', { class: 'mut' }, 'Terjemahan tetap berjalan saat app di latar belakang dan layar mati. Izinkan pengecualian optimasi baterai supaya sistem tidak menghentikannya; di merek tertentu (Xiaomi/Oppo/Samsung) aktifkan juga autostart.'), h('button', { onclick: async (e) => { const b = e.currentTarget; b.disabled = true; await KeepAlive.requestBattery(); b.disabled = false; b.textContent = 'Pengaturan baterai dibuka'; } }, 'Izinkan jalan di latar belakang')) : '',
+    native ? card(h('h2', {}, 'Android'), h('p', { class: 'mut' }, 'Terjemahan tetap berjalan saat app di latar belakang dan layar mati. Izinkan pengecualian optimasi baterai supaya sistem tidak menghentikannya; di merek tertentu (Xiaomi/Oppo/Samsung) aktifkan juga autostart.'), h('p', { class: 'mut' }, adiag.capacitor ? `Capacitor ${adiag.platform}; plugin ${adiag.plugin ? 'siap' : 'tidak ditemukan'}${adiag.available ? '' : ' (belum terdaftar)'}${adiag.error ? `; error terakhir: ${adiag.error}` : ''}` : 'Capacitor tidak terdeteksi di WebView ini.'), h('div', { class: 'row' }, h('button', { onclick: async (e) => { const b = e.currentTarget; b.disabled = true; await KeepAlive.requestBattery(); b.disabled = false; b.textContent = 'Pengaturan baterai dibuka'; } }, 'Izinkan jalan di latar belakang'), h('button', { onclick: async (e) => { const b = e.currentTarget; b.disabled = true; atxt.className = 'mut'; atxt.textContent = 'Mengirim perintah…'; try { await KeepAlive.start({ title: 'Tes latar belakang', body: 'Notifikasi ini harus muncul', progress: 50 }); atxt.textContent = 'Perintah terkirim. Bila notifikasi tetap tidak muncul, izinkan notifikasi app ini di pengaturan Android lalu tes lagi.'; } catch (err) { atxt.className = 'err'; atxt.textContent = 'Gagal: ' + (err?.message || err); } b.disabled = false; } }, 'Tes notifikasi')), atxt) : '',
     card(h('h2', {}, 'Penyimpanan data'), h('p', { class: 'mut' }, 'Lihat isi IndexedDB dan localStorage seperti file manager: ukuran tiap bagian, isi item, dan hapus cache atau proyek.'), h('a', { class: 'file', href: '#/penyimpanan' }, 'Buka penjelajah penyimpanan')),
     h('div', { class: 'card danger-card' }, h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn),
     actionBar(msg, h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')))];
