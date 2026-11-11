@@ -1405,12 +1405,24 @@ export function diffGuard(orig, next, file = 'data/X.json', allow = null, src = 
       const hdrOk = (r) => A.rest[r].code === 101 && allowB.has(JSON.stringify([...p, A.idx[r]]));
       const dup = (j, t) => B.rest[j + t]?.code === 101 && (B.runs.get(j + t) || []).length > 0 && sameDeep(B.rest[j + t], B.rest[j]);
       const dead = new Set();
+      // Penyejajaran harus cocok bentuknya (kode, indent, jumlah parameter) dan isi dialognya hanya boleh beda bila memang entri terjemahan.
+      const shape = (x, y) => !!y && x.code === y.code && x.indent === y.indent && (x.parameters?.length ?? -1) === (y.parameters?.length ?? -1);
+      const okAt = (r, j, k) => {
+        if (!shape(A.rest[r], B.rest[j])) return false;
+        const ra = A.runs.get(r) || [], rb = [];
+        for (let t = 0; t <= k; t++) rb.push(...(B.runs.get(j + t) || []));
+        return sameDeep(ra, rb) || allowB.has(JSON.stringify([...p, A.idx[r]]));
+      };
       const go = (r, j, left) => {
-        while (r < n && !(left > 0 && hdrOk(r) && dup(j, 1))) { r++; j++; }
-        if (r === n) return left === 0;
+        for (;;) {
+          if (r === n) return left === 0;
+          if (left > 0 && hdrOk(r) && dup(j, 1)) break;
+          if (!okAt(r, j, 0)) return false;
+          ks[r] = 0; r++; j++;
+        }
         const key = r + ':' + left; if (dead.has(key)) return false;
         let maxK = 0; while (maxK < left && dup(j, maxK + 1)) maxK++;
-        for (let k = 0; k <= maxK; k++) { ks[r] = k; if (go(r + 1, j + k + 1, left - k)) return true; }
+        for (let k = 0; k <= maxK; k++) { if (!okAt(r, j, k)) continue; ks[r] = k; if (go(r + 1, j + k + 1, left - k)) return true; }
         ks[r] = 0; dead.add(key); return false;
       };
       if (!go(0, 0, extra)) return bad(p, 'perintah lain bergeser atau berubah jumlahnya');
