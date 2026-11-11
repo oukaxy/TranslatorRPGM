@@ -140,6 +140,8 @@ const ESC = /\\[A-Za-z]{1,12}<[^>\n\u3000-\u9fff\uff00-\uffef]*>|\\[Ff][RrIiBb](
 const MASK = new RegExp(['\\\\[A-Za-z]+\\[\\\\[A-Za-z]+\\[\\d+\\]\\]', '%\\d+\\$[sd]', '\\\\[A-Za-z]+\\[[A-Za-z0-9_]{1,12}\\]', ESC.source, '\\{[A-Za-z_]\\w{0,24}\\}', '%[sd]\\b', '&(?:nbsp|amp|lt|gt|quot|#\\d+);'].join('|'), 'g');
 // Plugin message yang punya word-wrap sendiri. Bila aktif, pemecahan baris manual dimatikan.
 const MSG_PLUGIN = /^(YEP_MessageCore|VisuMZ_1_MessageCore)$|word.?wrap|line.?wrap|auto.?wrap|text.?wrap|message.?wrap/i;
+// Plugin message yang mengenali tag <WordWrap> di awal teks (word wrap aktif untuk pesan itu) dan <br> untuk baris baru.
+const WW_PLUGIN = /^(YEP_MessageCore|VisuMZ_1_MessageCore)$/;
 /** Daftar nama plugin message aktif dari isi js/plugins.js. */
 export function detectMessagePlugins(text) {
   const out = [];
@@ -147,7 +149,7 @@ export function detectMessagePlugins(text) {
   return out;
 }
 /** Config efektif: bila proyek memakai plugin message, batas baris manual dimatikan. */
-export const effCfg = (project, cfg) => (project?.msgPlugins?.length ? { ...cfg, wrapWidth: 0, wrapFace: 0 } : cfg);
+export const effCfg = (project, cfg) => (project?.msgPlugins?.length ? { ...cfg, wrapWidth: 0, wrapFace: 0, wrapBox: 0, wrapBoxFace: 0 } : cfg);
 const JA = /[\u3040-\u30ff\u3400-\u9fff]/;
 const srcLabel = (s) => ({ auto: 'Otomatis (Jepang/Inggris)', all: 'Semua teks (bahasa apa pun)', ja: 'Jepang', en: 'Inggris' }[s] || s);
 /**
@@ -238,27 +240,86 @@ export function visWidth(line) {
   for (const ch of line.replace(ESC, (m) => (/^\\[NnVvPp]\[/.test(m) ? '0000' : /^\\[Ii]\[/.test(m) ? '00' : ''))) w += ch.charCodeAt(0) >= 0x2e80 ? 2 : 1;
   return w;
 }
-/** Pecah teks dialog agar tiap baris <= width. Bila semua baris sudah muat, teks tidak diubah (null). */
-export function wrapLines(text, width) {
+/**
+ * Pengukur lebar teks dalam piksel lewat canvas (font dan ukuran dari pengaturan). \N/\V/\P dihitung 4 angka "0", \I[n] 36 px, kode lain 0.
+ * Mengembalikan null bila canvas tidak tersedia (mis. di Node); pemanggil lalu memakai visWidth (hitungan karakter).
+ */
+const pxCache = new Map();
+export function pxMeasurer(font = 'Arial', size = 28) {
+  const f = String(font || 'Arial').trim() || 'Arial', px = Math.max(8, Number(size) || 28), key = `${f}|${px}`;
+  if (pxCache.has(key)) return pxCache.get(key);
+  let ctx = null;
+  try { const cv = globalThis.OffscreenCanvas ? new OffscreenCanvas(1, 1) : globalThis.document?.createElement('canvas'); ctx = cv?.getContext('2d') || null; } catch { ctx = null; }
+  let fn = null;
+  if (ctx) {
+    const fam = /[,'"]/.test(f) ? f : /\s/.test(f) ? `"${f}"` : f;
+    ctx.font = `${px}px ${fam}, sans-serif`;
+    const memo = new Map();
+    const seg = (t) => { let v = memo.get(t); if (v === undefined) { v = ctx.measureText(t).width; if (memo.size > 4000) memo.clear(); memo.set(t, v); } return v; };
+    fn = (line) => {
+      let icons = 0;
+      const t = String(line).replace(ESC, (m) => (/^\\[Ii]\[/.test(m) ? (icons++, '') : /^\\[NnVvPp]\[/.test(m) ? '0000' : ''));
+      return seg(t) + icons * 36;
+    };
+  }
+  if (fn) pxCache.set(key, fn); // jangan simpan null: canvas mungkin baru tersedia nanti
+  return fn;
+}
+/**
+ * Spesifikasi pemecahan baris dari pengaturan.
+ * Mode karakter: width/face = jumlah karakter (visWidth). Mode piksel (wrapPx): width/face = lebar area teks dalam piksel, diukur dengan pxMeasurer.
+ * rows = baris maksimum per kotak pesan. Bila canvas tidak ada, mode piksel jatuh kembali ke mode karakter.
+ */
+export function wrapSpec(cfg) {
+  cfg ||= {};
+  const rows = Math.max(1, Math.round(Number(cfg.wrapRows)) || 4);
+  if (cfg.wrapPx) {
+    const measure = pxMeasurer(cfg.wrapFont, cfg.wrapFontSize), box = Number(cfg.wrapBox) || 0, face = Number(cfg.wrapBoxFace) || 0;
+    if (measure && (box || face)) return { px: true, width: box, face, rows, measure };
+  }
+  return { px: false, width: Number(cfg.wrapWidth) || 0, face: Number(cfg.wrapFace) || 0, rows, measure: visWidth };
+}
+const SAMPLE_ID = 'Saya tidak tahu apa yang harus dilakukan terhadap hal itu, kata dia.';
+/** Perkiraan jumlah karakter yang muat di box (untuk batas yang dikirim ke model). Mode karakter: box itu sendiri. */
+const approxChars = (box, sp) => (sp.px ? Math.max(8, Math.floor((box / (sp.measure(SAMPLE_ID) / SAMPLE_ID.length)) * 0.95)) : box);
+/** Pecah teks dialog agar tiap baris <= width (satuan sesuai measure). Bila semua baris sudah muat, teks tidak diubah (null). */
+export function wrapLines(text, width, measure = visWidth) {
   const lines = text.replace(/^\n+|\n+$/g, '').split('\n');
-  if (!width || lines.every((l) => visWidth(l) <= width)) return null;
+  if (!width || lines.every((l) => measure(l) <= width)) return null;
   const out = []; let cur = '';
   for (const w of lines.join(' ').split(/\s+(?![^<>]*>)/).filter(Boolean)) {
-    if (cur && visWidth(cur) + 1 + visWidth(w) > width) { out.push(cur); cur = w; } else cur = cur ? cur + ' ' + w : w;
+    const cand = cur ? cur + ' ' + w : w;
+    if (cur && measure(cand) > width) { out.push(cur); cur = w; } else cur = cand;
   }
   if (cur) out.push(cur);
+  return out;
+}
+/** Bagi baris dialog menjadi halaman (kotak pesan) berisi paling banyak rows baris: dibagi rata, batas dipilih di akhir kalimat bila ada. */
+export function splitPages(lines, rows) {
+  const n = lines.length, r = Math.max(1, Math.floor(rows) || 4);
+  if (n <= r) return [lines];
+  const k = Math.ceil(n / r), out = []; let at = 0;
+  const endsSentence = (l) => /[.!?…。！？」』”"')）]\s*$/.test(stripEscapes(l));
+  for (let pg = 0; pg < k - 1; pg++) {
+    const left = k - pg - 1, t = Math.round((n * (pg + 1)) / k), lo = Math.max(at + 1, n - r * left), hi = Math.min(at + r, n - left);
+    let cut = Math.min(Math.max(t, lo), hi);
+    for (const c of [t, t - 1, t + 1]) if (c >= lo && c <= hi && endsSentence(lines[c - 1])) { cut = c; break; }
+    out.push(lines.slice(at, cut)); at = cut;
+  }
+  out.push(lines.slice(at));
   return out;
 }
 const WRAP_KEYS = /^(description|profile)$/;
 /** Batas tampil untuk satu entry: {line: maks karakter per baris, lines: maks baris} atau null. */
 export function limitFor(e, cfg) {
   let key = ''; try { key = String(JSON.parse(e.path).at(-1)); } catch { /* path tidak ada */ }
-  cfg ||= {};
-  let line = 0, lines = 0;
-  if (e.kind === 'block' && e.category === 'dialog') { line = e.meta?.face ? cfg.wrapFace : cfg.wrapWidth; lines = 4; }
-  else if (e.kind === 'field' && e.category !== 'plugin' && WRAP_KEYS.test(key)) { line = cfg.wrapWidth; lines = 2; }
-  else if (e.kind === 'field' && e.category !== 'plugin' && /^message\d$/.test(key)) { line = cfg.wrapWidth; lines = 1; }
-  return line ? { line, lines } : null;
+  const sp = wrapSpec(cfg);
+  let box = 0, lines = 0, wrap = false, page = false;
+  if (e.kind === 'block' && e.category === 'dialog') { box = e.meta?.face ? sp.face : sp.width; lines = sp.rows; wrap = true; page = true; }
+  else if (e.kind === 'field' && e.category !== 'plugin' && WRAP_KEYS.test(key)) { box = sp.width; lines = 2; wrap = true; }
+  else if (e.kind === 'field' && e.category !== 'plugin' && /^message\d$/.test(key)) { box = sp.width; lines = 1; }
+  // line = perkiraan karakter per baris (untuk model); box/measure = batas sebenarnya (karakter atau piksel); page = kelebihan baris dipecah jadi kotak baru saat ekspor
+  return box ? { line: approxChars(box, sp), lines, box, measure: sp.measure, px: sp.px, wrap, page } : null;
 }
 /** Lebar maksimum (satuan visWidth) teks pendek di UI game sebelum berisiko terpotong. Sesuaikan dengan game bila perlu. */
 export const CUT_MAX = { label: 20, system: 20, actorname: 16, speaker: 20, choice: 36, map: 30 };
@@ -275,10 +336,11 @@ export function cutRisk(e, cfg) {
   if (!t.trim() || e.status === 'skipped' || e.status === 'pending') return '';
   const lim = limitFor(e, cfg);
   if (lim) {
-    const lines = t.replace(/^\n+|\n+$/g, '').split('\n');
-    if (lines.length > lim.lines) return `${lines.length} baris (maks ${lim.lines})`;
-    const w = Math.max(...lines.map(visWidth));
-    if (w > lim.line) return `baris ${w} (maks ${lim.line})`;
+    let lines = t.replace(/^\n+|\n+$/g, '').split('\n');
+    if (lim.wrap) lines = wrapLines(t, lim.box, lim.measure) || lines; // meniru pemecahan baris saat ekspor
+    if (!lim.page && lines.length > lim.lines) return `${lines.length} baris (maks ${lim.lines})`; // dialog: kelebihan baris dipecah jadi kotak baru, bukan terpotong
+    const w = Math.max(...lines.map(lim.measure));
+    if (w > lim.box) return lim.px ? `baris ${Math.round(w)}px (maks ${lim.box}px)` : `baris ${w} (maks ${lim.box})`;
     return '';
   }
   const c = e.category, key = /(?:^|-)label$/.test(c) ? 'label' : c;
@@ -287,6 +349,20 @@ export function cutRisk(e, cfg) {
   if (tw > max && tw > ow) return `lebar ${tw} (asli ${ow})`;
   if (tw >= 10 && ow > 0 && tw > ow * CUT_RATIO) return `lebar ${tw} (asli ${ow})`;
   return '';
+}
+/**
+ * Batas panjang (satuan visWidth) yang dikirim ke model untuk teks pendek: label, nama, istilah sistem, nama aktor, pembicara, pilihan, nama peta.
+ * Sama dengan batas aman di cutRisk: tidak lebih dari CUT_MAX (atau lebar asli bila lebih besar), dan tidak lebih dari CUT_RATIO kali lebar asli.
+ * 0 = tanpa batas (kategori lain, atau dimatikan di pengaturan).
+ */
+export function labelLimit(e, cfg) {
+  if (cfg && cfg.labelMax === false) return 0;
+  const c = String(e.category || ''), key = /(?:^|-)label$/.test(c) ? 'label' : c, max = CUT_MAX[key];
+  if (!max || e.kind === 'block') return 0;
+  const ow = visWidth(String(e.original ?? '').replace(/\n/g, ' ').trim());
+  let lim = Math.max(max, ow);
+  if (ow > 0) lim = Math.min(lim, Math.max(Math.floor(ow * CUT_RATIO), 9));
+  return lim;
 }
 /** Apakah string layak diterjemahkan (bukan kosong/hanya escape; sumber ja harus ada kana/kanji). */
 export function isTranslatable(s, src = 'ja') {
@@ -1232,7 +1308,7 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
     if (e.kind === 'choice' && nz(old) !== nz(e.original)) { fail(e, 'teks asli di posisi ini berbeda (posisi bergeser)'); continue; }
     parent[key] = e.kind === 'choice' || /^comment/.test(e.category) ? e.translation.replace(/\s*\n\s*/g, ' ') : e.category === 'plugin' ? (e.meta?.prefix || '') + e.translation.replace(/\s*\n\s*/g, ' ').trim() + (e.meta?.suffix || '') : e.translation;
     if (e.kind === 'field' && e.category !== 'plugin' && opts.wrap && WRAP_KEYS.test(String(key))) {
-      const w = wrapLines(parent[key], opts.wrap.width);
+      const w = wrapLines(parent[key], opts.wrap.width, opts.wrap.measure);
       if (w) { parent[key] = w.join('\n'); if (opts.stats) opts.stats.wrapped++; }
       if (opts.stats && parent[key].split('\n').length > 2) opts.stats.long++;
     }
@@ -1247,13 +1323,29 @@ export function applyTranslations(json, entries, problems = [], opts = {}) {
       let j = i + 1; while (list[j]?.code === body) j++;
       // Pengaman: isi blok di posisi ini harus sama dengan teks asli entri, supaya dialog tidak tertimpa ke blok lain
       if (nz(list.slice(i + 1, j).map((c) => c.parameters?.[0]).join('\n')) !== nz(e.original)) { fail(e, 'teks asli di posisi ini berbeda (posisi bergeser)'); continue; }
-      let lines = e.translation.replace(/^\n+|\n+$/g, '').split('\n');
-      if (body === 401 && opts.wrap) {
-        const face = typeof head.parameters?.[0] === 'string' && head.parameters[0] !== '';
-        const w = wrapLines(e.translation, face ? opts.wrap.face : opts.wrap.width);
+      let lines = e.translation.replace(/^\n+|\n+$/g, '').split('\n'), pages = [lines];
+      if (body === 401 && opts.wrap?.tag) {
+        // Plugin Message Core (YEP/VisuMZ): game yang memecah baris. Gabung jadi satu baris dan beri <WordWrap> di awal tiap kotak pesan.
+        // Dilewati bila teks (asli atau terjemahan) memuat </WordWrap>: word wrap sengaja dimatikan di sana, jadi baris dibiarkan.
+        if (!/<\/WordWrap>/i.test(e.translation) && !/<\/WordWrap>/i.test(e.original)) {
+          const face = typeof head.parameters?.[0] === 'string' && head.parameters[0] !== '', box = face ? opts.wrap.face : opts.wrap.width;
+          const one = lines.map((x) => x.trim()).filter(Boolean).join(' ').replace(/<WordWrap>\s*/gi, '').trim();
+          // Perkiraan jumlah baris hasil wrap game (pakai lebar dari pengaturan) untuk memecah jadi kotak baru bila lebih dari batas baris. Lewati bila ada <br> manual.
+          const est = box && !/<(?:br|line break)>/i.test(one) ? wrapLines(one, box, opts.wrap.measure) || [one] : [one];
+          pages = (opts.wrap.rows ? splitPages(est, opts.wrap.rows) : [est]).map((pg) => ['<WordWrap>' + pg.join(' ')]);
+          if (opts.stats) { opts.stats.tagged = (opts.stats.tagged || 0) + 1; if (pages.length > 1) opts.stats.paged = (opts.stats.paged || 0) + pages.length - 1; }
+        }
+      } else if (body === 401 && opts.wrap) {
+        const face = typeof head.parameters?.[0] === 'string' && head.parameters[0] !== '', box = face ? opts.wrap.face : opts.wrap.width;
+        const w = wrapLines(e.translation, box, opts.wrap.measure);
         if (w) { lines = w; if (opts.stats) opts.stats.wrapped++; }
+        // lebih dari batas baris per kotak: pecah jadi beberapa kotak pesan (header Show Text disalin, jadi face dan pembicara sama)
+        pages = box && opts.wrap.rows ? splitPages(lines, opts.wrap.rows) : [lines];
+        if (pages.length > 1 && opts.stats) opts.stats.paged = (opts.stats.paged || 0) + pages.length - 1;
       }
-      list.splice(i + 1, j - i - 1, ...lines.map((t) => ({ code: body, indent: head.indent, parameters: [t] })));
+      const repl = [];
+      pages.forEach((pg, k) => { if (k) repl.push(JSON.parse(JSON.stringify(head))); pg.forEach((t) => repl.push({ code: body, indent: head.indent, parameters: [t] })); });
+      list.splice(i + 1, j - i - 1, ...repl);
     } catch (x) { fail(e, x.message || String(x)); } }
   }
   return json;
@@ -1306,11 +1398,29 @@ export function diffGuard(orig, next, file = 'data/X.json', allow = null, src = 
   const maskNote = (x) => NOTE_TAGS.reduce((acc, tag) => acc.replace(noteTagRe(tag), (all, raw) => all.slice(0, all.length - raw.length - 1) + '>'), x);
   const bad = (p, why) => { if (probs.length < 20) probs.push(`${file} ${JSON.stringify(p)}: ${why}`); };
   const cmpList = (a, b, p) => {
-    const A = splitList(a), B = splitList(b);
-    if (A.rest.length !== B.rest.length) return bad(p, 'perintah lain bergeser atau berubah jumlahnya');
+    const A = splitList(a), B = splitList(b), n = A.rest.length, extra = B.rest.length - n, ks = new Array(n).fill(0);
+    if (extra < 0) return bad(p, 'perintah lain bergeser atau berubah jumlahnya');
+    if (extra > 0) {
+      // Dialog (101) yang diterjemahkan boleh dipecah jadi beberapa kotak pesan: header salinan persis + baris 401. Cari penyejajaran yang cocok.
+      const hdrOk = (r) => A.rest[r].code === 101 && allowB.has(JSON.stringify([...p, A.idx[r]]));
+      const dup = (j, t) => B.rest[j + t]?.code === 101 && (B.runs.get(j + t) || []).length > 0 && sameDeep(B.rest[j + t], B.rest[j]);
+      const dead = new Set();
+      const go = (r, j, left) => {
+        while (r < n && !(left > 0 && hdrOk(r) && dup(j, 1))) { r++; j++; }
+        if (r === n) return left === 0;
+        const key = r + ':' + left; if (dead.has(key)) return false;
+        let maxK = 0; while (maxK < left && dup(j, maxK + 1)) maxK++;
+        for (let k = 0; k <= maxK; k++) { ks[r] = k; if (go(r + 1, j + k + 1, left - k)) return true; }
+        ks[r] = 0; dead.add(key); return false;
+      };
+      if (!go(0, 0, extra)) return bad(p, 'perintah lain bergeser atau berubah jumlahnya');
+    }
+    let j = 0;
     A.rest.forEach((c, r) => {
-      const hp = [...p, A.idx[r]]; cmp(c, B.rest[r], hp);
-      const ra = A.runs.get(r) || [], rb = B.runs.get(r) || [];
+      const hp = [...p, A.idx[r]]; cmp(c, B.rest[j], hp);
+      const ra = A.runs.get(r) || [], rb = [];
+      for (let t = 0; t <= ks[r]; t++) rb.push(...(B.runs.get(j + t) || []));
+      j += ks[r] + 1;
       if (sameDeep(ra, rb)) return;
       if (!allowB.has(JSON.stringify(hp))) return bad(hp, 'baris dialog berubah di luar whitelist');
       if (!rb.length) return bad(hp, 'blok dialog menjadi kosong');
@@ -1387,7 +1497,7 @@ function fmtLang(work, orig) {
   return /\r\n/.test(orig) ? s.replace(/\n/g, '\r\n') : s;
 }
 export function buildPatch(files, entries, { model = '', date = new Date(), wrap = null, notes = [], allow = null, bom = null, src = 'all' } = {}) {
-  const byFile = new Map(), out = [], problems = [], warnings = [], badAll = [], stat = { files: 0, applied: 0, pending: 0, error: 0, skipped: 0, wrapped: 0, long: 0, mismatch: 0 };
+  const byFile = new Map(), out = [], problems = [], warnings = [], badAll = [], stat = { files: 0, applied: 0, pending: 0, error: 0, skipped: 0, wrapped: 0, paged: 0, tagged: 0, long: 0, mismatch: 0 };
   for (const e of entries) {
     if (!byFile.has(e.file)) byFile.set(e.file, []); byFile.get(e.file).push(e);
     if (e.status === 'pending' || e.status === 'translating') stat.pending++; else if (e.status === 'error') stat.error++; else if (e.status === 'skipped') stat.skipped++;
@@ -1401,14 +1511,14 @@ export function buildPatch(files, entries, { model = '', date = new Date(), wrap
       else { orig = JSON.parse(f.text); work = JSON.parse(f.text); }
     } catch { problems.push(`${f.path}: file asli tidak bisa dibaca`); continue; }
     const fresh = () => (isPl ? JSON.parse(JSON.stringify(pj.arr)) : JSON.parse(f.text));
-    let pr = [], bad = new Set(), st = { wrapped: 0, long: 0 }, use = es;
+    let pr = [], bad = new Set(), st = { wrapped: 0, paged: 0, tagged: 0, long: 0 }, use = es;
     applyTranslations(work, use, pr, { wrap, stats: st, bad });
     if (bad.size) { // buang entri yang posisinya tak cocok, terapkan sisanya ke salinan bersih
       warnings.push(...pr); badAll.push(...bad); stat.mismatch += bad.size;
-      use = es.filter((x) => !bad.has(x)); work = fresh(); pr = []; st = { wrapped: 0, long: 0 };
+      use = es.filter((x) => !bad.has(x)); work = fresh(); pr = []; st = { wrapped: 0, paged: 0, tagged: 0, long: 0 };
       applyTranslations(work, use, pr, { wrap, stats: st, bad: new Set() });
     }
-    stat.wrapped += st.wrapped; stat.long += st.long;
+    stat.wrapped += st.wrapped; stat.paged += st.paged; stat.tagged += st.tagged; stat.long += st.long;
     if (!use.length) continue;
     const lang = LANG_PATH.test(f.path), text = isPl ? buildPluginsJs(pj, work) : lang ? fmtLang(work, f.text) : JSON.stringify(work); let re = null;
     try { re = isPl ? parsePluginsJs(text)?.arr : JSON.parse(text); if (!re) throw new Error('x'); } catch { pr.push(`${f.path}: hasil tidak bisa dibaca ulang`); }
@@ -1423,16 +1533,18 @@ export function buildPatch(files, entries, { model = '', date = new Date(), wrap
     if (pr.length) { problems.push(...pr); continue; }
     out.push({ name: f.path, data: data || new TextEncoder().encode((lang && bom?.[f.path] ? '\uFEFF' : '') + text) }); stat.files++; stat.applied += use.length;
   }
-  const report = ['RPG Maker Translator - patch-report', `Tanggal: ${date.toISOString()}`, `Model: ${model}`, ...notes, `File diubah: ${stat.files}`, `Teks diterapkan: ${stat.applied}`, `Teks dipecah ulang agar muat: ${stat.wrapped}`, `Deskripsi/profil lebih dari 2 baris (mungkin terpotong di game): ${stat.long}`,
+  const report = ['RPG Maker Translator - patch-report', `Tanggal: ${date.toISOString()}`, `Model: ${model}`, ...notes, `File diubah: ${stat.files}`, `Teks diterapkan: ${stat.applied}`, `Teks dipecah ulang agar muat: ${stat.wrapped}`, `Kotak pesan tambahan dari dialog yang lebih dari batas baris: ${stat.paged}`, `Dialog diberi <WordWrap> (plugin Message Core): ${stat.tagged}`, `Deskripsi/profil lebih dari 2 baris (mungkin terpotong di game): ${stat.long}`,
     `Belum diterjemahkan (tetap asli): ${stat.pending}`, `Error (tetap asli): ${stat.error}`, `Dilewati: ${stat.skipped}`, `Posisi tidak cocok dengan file asli (tetap asli): ${stat.mismatch}`, ...(warnings.length ? ['', ...warnings.slice(0, 50), ...(warnings.length > 50 ? [`...dan ${warnings.length - 50} lainnya`] : [])] : []), '', ...out.map((x) => x.name)].join('\n');
   return { ok: !problems.length && out.length > 0, empty: !problems.length && !out.length, problems, warnings, bad: badAll, files: out, report, stat };
 }
 /** Ekspor proyek: JSON asli + terjemahan, lolos diff guard, lalu zip. Bila gagal, tidak ada zip. */
-export async function exportProject(project, model = '', wrap = null) {
+export async function exportProject(project, model = '', wrap = null, msgWrap = 'tag') {
   const plug = project.msgPlugins?.length ? project.msgPlugins : null;
-  if (plug || project.langFile) wrap = null;
+  const tagOk = !!plug && msgWrap !== 'off' && plug.some((n) => WW_PLUGIN.test(n));
+  if (project.langFile) wrap = null;
+  else if (plug) wrap = tagOk ? { ...(wrap || { width: 0, face: 0, rows: 4, measure: visWidth }), tag: true } : null;
   const files = await dbPrefix('origFiles', project.id + ':'), entries = await dbQuery('entries', 'projectId', project.id);
-  const r = buildPatch(files, entries, { model, wrap, allow: project.allow, src: project.src || 'all', bom: project.bom, notes: plug ? [`Plugin message terdeteksi (${plug.join(', ')}): pemecahan baris otomatis dimatikan. Cek hasil di game.`] : project.langFile ? ['File bahasa: salin hasilnya ke folder languages game. Nama file boleh diganti sesuai bahasa yang dipilih di menu game (backup dulu).'] : [] });
+  const r = buildPatch(files, entries, { model, wrap, allow: project.allow, src: project.src || 'all', bom: project.bom, notes: plug ? [tagOk ? `Plugin message terdeteksi (${plug.join(', ')}): dialog digabung jadi satu baris dan diberi <WordWrap> agar plugin yang memecah baris. Cek hasil di game.` : `Plugin message terdeteksi (${plug.join(', ')}): pemecahan baris otomatis dimatikan. Cek hasil di game.`] : project.langFile ? ['File bahasa: salin hasilnya ke folder languages game. Nama file boleh diganti sesuai bahasa yang dipilih di menu game (backup dulu).'] : [] });
   if (!r.ok) return r;
   return { ...r, blob: await writeZip([...r.files, { name: 'patch-report.txt', data: new TextEncoder().encode(r.report) }]) };
 }
@@ -1764,7 +1876,7 @@ export function applyChatRows(entries, rows) {
 export const DEFAULT_CONFIG = {
   baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', remember: false, model: 'google/gemini-2.5-flash',
   temperature: 0.3, maxTokens: 0, batchSize: 30, maxChars: 4000, concurrency: 4, delay: 100, priceIn: 0, priceOut: 0,
-  fast: false, wrapWidth: 48, wrapFace: 38, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '', timeout: 120, extraBody: '', auto: true, fixRounds: 1,
+  fast: false, wrapWidth: 48, wrapFace: 38, wrapRows: 4, wrapPx: false, wrapFont: 'Arial', wrapFontSize: 28, wrapBox: 780, wrapBoxFace: 612, msgWrap: 'tag', labelMax: true, pluginAllow: '', glossary: '', style: DEFAULT_STYLE, charNotes: '', timeout: 120, extraBody: '', auto: true, fixRounds: 1,
 };
 const LANG = { ja: 'Japanese', en: 'English', id: 'Indonesian', all: 'any language (each item may be Japanese, English, Indonesian, Korean, etc.; if an item is already entirely clean Indonesian, return it unchanged; if it mixes Indonesian with other languages or has typos, rewrite it as clean Indonesian)', auto: 'Japanese or English (each item may be in either language; if an item is already entirely clean Indonesian, return it unchanged; if it mixes Indonesian with other languages or has typos, rewrite it as clean Indonesian)' };
 /** Hasil terjemahan yang masih memuat huruf Jepang/Mandarin, Cyrillic, Arab, atau Hangul: tanda terjemahan setengah jalan atau ngaco. */
@@ -1969,10 +2081,11 @@ Rules:
 - If an item has "note", follow it.${style.trim() ? `\n- Style guide for all text: ${style.trim().replace(/\s+/g, ' ')}` : ''}
 - If "character_notes" is given, follow each note for lines spoken by that speaker; it overrides the general style guide.
 - If an item has max_chars_per_line and max_lines, the translation must fit: break lines with \\n, never exceed max_chars_per_line characters per line (not counting ⟦n⟧ tokens) or max_lines lines. Indonesian and English run longer than Japanese, so shorten the wording when needed and keep the meaning.
+- If an item has max_chars, it is a short label (menu entry, name, term, or choice): the translation must be one line of at most max_chars characters (not counting ⟦n⟧ tokens), with no line breaks. Prefer a shorter synonym or a common abbreviation over a long phrase, and keep the meaning.
 - "context" holds earlier lines for reference only. Do not translate or return them.
 - Reply with one JSON object only, no code fence, no commentary: {"0":"translation","1":"translation"}. One key per item, using the item's id.`;
   const cns = new Map(); units.forEach((u) => (u.notes || []).forEach(([a, b]) => cns.set(a, b)));
-  const user = JSON.stringify({ context, ...(cns.size ? { character_notes: [...cns].map(([name, note]) => ({ name, note })) } : {}), items: units.map((u) => ({ id: u.id, ...(u.speaker ? { speaker: u.speaker } : {}), ...(u.terms?.length ? { glossary: u.terms.map(([from, to]) => ({ from, to })) } : {}), ...(u.ref ? { similar: u.ref } : {}), ...(u.hint ? { note: u.hint } : {}), ...(u.limit ? { max_chars_per_line: u.limit.line, max_lines: u.limit.lines } : {}), text: u.text })) });
+  const user = JSON.stringify({ context, ...(cns.size ? { character_notes: [...cns].map(([name, note]) => ({ name, note })) } : {}), items: units.map((u) => ({ id: u.id, ...(u.speaker ? { speaker: u.speaker } : {}), ...(u.terms?.length ? { glossary: u.terms.map(([from, to]) => ({ from, to })) } : {}), ...(u.ref ? { similar: u.ref } : {}), ...(u.hint ? { note: u.hint } : {}), ...(u.limit ? { max_chars_per_line: u.limit.line, max_lines: u.limit.lines } : {}), ...(u.maxChars ? { max_chars: u.maxChars } : {}), text: u.text })) });
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
 /**
@@ -2183,6 +2296,7 @@ export async function runTranslation(project, cfg, o = {}) {
       id: uid++, key, text: m.text, tokens: m.tokens, speaker: e0.meta?.speaker || '', entries, terms, notes, must: termsFor(gl, original),
       ref: (() => { const r0 = original.length <= 120 ? tm.get(simNorm(original)) : null; return r0 && r0.original !== original && plain(r0.original) && plain(r0.translation) ? { from: r0.original.slice(0, 160), to: r0.translation.slice(0, 160) } : null; })(),
       limit: entries.map((x) => limitFor(x, effCfg(project, cfg))).filter(Boolean).reduce((a, b) => (a ? { line: Math.min(a.line, b.line), lines: Math.min(a.lines, b.lines) } : b), null),
+      maxChars: (() => { const v = entries.map((x) => labelLimit(x, cfg)).filter(Boolean); return v.length ? Math.min(...v) : 0; })(),
       ctx: all.slice(Math.max(0, p - 3), p).filter((x) => x.file === e0.file).map((x) => maskText(x.original).text.slice(0, 200)),
     });
   }
@@ -2261,7 +2375,7 @@ export async function runTranslation(project, cfg, o = {}) {
 export async function retranslateEntry(project, cfg, e, chat) {
   const m = maskText(e.original), call = chat || ((msgs) => llmChat(cfg, msgs));
   const terms = termsFor(parseGlossary(cfg.glossary), `${e.original}\n${e.meta?.speaker || ''}`), notes = notesFor(parseNotes(cfg.charNotes), e.meta?.speaker || '');
-  const u0 = { id: 0, text: m.text, speaker: e.meta?.speaker || '', limit: limitFor(e, effCfg(project, cfg)), terms, notes, must: termsFor(parseGlossary(cfg.glossary), e.original) };
+  const u0 = { id: 0, text: m.text, speaker: e.meta?.speaker || '', limit: limitFor(e, effCfg(project, cfg)), maxChars: labelLimit(e, cfg), terms, notes, must: termsFor(parseGlossary(cfg.glossary), e.original) };
   const o1 = {
     chat: call, src: project.src, tgt: project.tgt, context: [], style: cfg.style,
     check: (id, t) => (t.trim() ? (unmaskText(t, m.tokens).ok ? (stray(t) ? STRAY_MSG : foreignWords(t, m.text).length ? foreignMsg(t, m.text) : codeProblem(m.text, t) || (lenOff(t, m.text) ? LEN_MSG : '') || (numDiff(m.text, t) ? NUM_MSG : '')) : UI.tokenBad) : UI.emptyTr),
@@ -2510,7 +2624,7 @@ async function viewProyek() {
   const out = [box, langCard];
   const p = await currentProject();
   if (p) out.push(card(h('h2', {}, 'Ringkasan'),
-    kv(`Engine: ${p.engine}\nSumber: ${srcLabel(p.src)}\nFile data: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\n${p.langFile ? `Jenis: file bahasa (kunci dan struktur tetap)\nDilewati (hanya kunci/kode): ${p.keySkipped || 0}` : `Plugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan)` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`}`),
+    kv(`Engine: ${p.engine}\nSumber: ${srcLabel(p.src)}\nFile data: ${p.files}${p.broken.length ? ` (rusak: ${p.broken.length})` : ''}\nTotal teks: ${p.total}\n${p.langFile ? `Jenis: file bahasa (kunci dan struktur tetap)\nDilewati (hanya kunci/kode): ${p.keySkipped || 0}` : `Plugin message: ${p.msgPlugins?.length ? `${p.msgPlugins.join(', ')} (pemecahan baris manual dimatikan${p.msgPlugins.some((n) => WW_PLUGIN.test(n)) ? '; dialog diberi <WordWrap> saat ekspor' : ''})` : p.pluginsSeen ? 'tidak ada (pemecahan baris manual aktif)' : 'tidak diketahui (js/plugins.js tidak ikut dipilih)'}`}`),
     p.paramNote ? h('p', { class: 'err' }, p.paramNote) : '',
     h('details', { class: 'fold-in', ...((uiGet('diag', (p.scriptsDiag?.hits || p.scriptsDiag?.error || p.gaps?.length) ? '1' : '0') === '1') ? { open: '' } : {}), ontoggle: (e) => uiSet('diag', e.currentTarget.open ? '1' : '0') },
       h('summary', {}, (p.scriptsDiag?.hits || p.scriptsDiag?.error || p.gaps?.length) ? 'Diagnostik impor (ada temuan)' : 'Diagnostik impor'),
@@ -2740,7 +2854,7 @@ async function viewTranslate() {
 const FIELDS = [
   ['baseUrl', 'Base URL', 'url'], ['apiKey', 'API key', 'password'], ['model', 'Model', 'text'], ['extraBody', 'Body tambahan JSON (opsional)', 'text'], ['temperature', 'Temperature (0 sampai 2)', 'number'],
   ['batchSize', 'Ukuran batch (teks)', 'number'], ['maxChars', 'Batas karakter per batch', 'number'], ['concurrency', 'Konkurensi maks (1 sampai 12)', 'number'],
-  ['delay', 'Jeda antar request (ms)', 'number'], ['timeout', 'Batas waktu per request (detik)', 'number'], ['maxTokens', 'Batas token keluar per request (0 = otomatis)', 'number'], ['fixRounds', 'Putaran perbaikan otomatis (0 = mati, 1 = hemat, 2 = penuh)', 'number'], ['wrapWidth', 'Lebar baris maks tanpa face (0 = mati)', 'number'], ['wrapFace', 'Lebar baris maks dengan face', 'number'], ['priceIn', 'Harga token masuk per 1 juta', 'number'], ['priceOut', 'Harga token keluar per 1 juta', 'number'],
+  ['delay', 'Jeda antar request (ms)', 'number'], ['timeout', 'Batas waktu per request (detik)', 'number'], ['maxTokens', 'Batas token keluar per request (0 = otomatis)', 'number'], ['fixRounds', 'Putaran perbaikan otomatis (0 = mati, 1 = hemat, 2 = penuh)', 'number'], ['wrapWidth', 'Lebar baris maks tanpa face (0 = mati)', 'number'], ['wrapFace', 'Lebar baris maks dengan face', 'number'], ['wrapRows', 'Baris maks per kotak pesan (lebihnya dipecah jadi kotak baru)', 'number'], ['wrapFont', 'Font untuk ukur piksel (mis. Arial, Verdana)', 'text'], ['wrapFontSize', 'Ukuran font game (px, bawaan MV/MZ 28)', 'number'], ['wrapBox', 'Lebar area teks tanpa face (px)', 'number'], ['wrapBoxFace', 'Lebar area teks dengan face (px)', 'number'], ['priceIn', 'Harga token masuk per 1 juta', 'number'], ['priceOut', 'Harga token keluar per 1 juta', 'number'],
 ];
 async function viewSettings() {
   const c = await loadConfig(), msg = h('p', { class: 'mut' }), inp = {};
@@ -2753,12 +2867,15 @@ async function viewSettings() {
   const glossTa = h('textarea', { rows: '6', spellcheck: 'false', autocomplete: 'off', placeholder: 'アリス = Alice\nポーション = Ramuan' }, c.glossary || '');
   const remember = h('input', { type: 'checkbox', ...(c.remember ? { checked: '' } : {}) });
   const autoCb = h('input', { type: 'checkbox', ...(c.auto !== false ? { checked: '' } : {}) });
+  const pxCb = h('input', { type: 'checkbox', ...(c.wrapPx ? { checked: '' } : {}) });
+  const tagCb = h('input', { type: 'checkbox', ...(c.msgWrap !== 'off' ? { checked: '' } : {}) });
+  const labelCb = h('input', { type: 'checkbox', ...(c.labelMax !== false ? { checked: '' } : {}) });
   const fast = h('input', { type: 'checkbox', ...(c.fast ? { checked: '' } : {}) });
   const num = (k, lo, hi) => Math.min(hi, Math.max(lo, Number(inp[k].value) || lo));
   const gather = () => ({
     baseUrl: inp.baseUrl.value.trim(), apiKey: inp.apiKey.value.trim(), remember: remember.checked, model: inp.model.value.trim() || DEFAULT_CONFIG.model, extraBody: inp.extraBody.value.trim(),
     temperature: num('temperature', 0, 2), batchSize: Math.round(num('batchSize', 1, 100)), maxChars: Math.round(num('maxChars', 500, 12000)),
-    concurrency: Math.round(num('concurrency', 1, 12)), delay: Math.round(num('delay', 0, 10000)), timeout: Math.round(num('timeout', 10, 600)), maxTokens: Math.round(num('maxTokens', 0, 200000)), fixRounds: Math.round(num('fixRounds', 0, 2)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), fast: fast.checked, auto: autoCb.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
+    concurrency: Math.round(num('concurrency', 1, 12)), delay: Math.round(num('delay', 0, 10000)), timeout: Math.round(num('timeout', 10, 600)), maxTokens: Math.round(num('maxTokens', 0, 200000)), fixRounds: Math.round(num('fixRounds', 0, 2)), wrapWidth: Math.round(num('wrapWidth', 0, 200)), wrapFace: Math.round(num('wrapFace', 0, 200)), wrapRows: Math.round(num('wrapRows', 1, 12)), wrapPx: pxCb.checked, wrapFont: inp.wrapFont.value.trim() || 'Arial', wrapFontSize: Math.round(num('wrapFontSize', 8, 96)), wrapBox: Math.round(num('wrapBox', 0, 4000)), wrapBoxFace: Math.round(num('wrapBoxFace', 0, 4000)), msgWrap: tagCb.checked ? 'tag' : 'off', labelMax: labelCb.checked, fast: fast.checked, auto: autoCb.checked, pluginAllow: allowTa.value, glossary: glossTa.value, style: styleTa.value, charNotes: notesTa.value, priceIn: num('priceIn', 0, 1e6), priceOut: num('priceOut', 0, 1e6),
   });
   const wipeBtn = h('button', { class: 'danger', disabled: '', onclick: async () => { try { await resetAll((m) => say(m, true)); location.hash = '#/proyek'; location.reload(); } catch (e) { say(e.message, true); } } }, 'Hapus semua data');
   const wipe = h('input', { type: 'text', placeholder: 'HAPUS', autocomplete: 'off', oninput: (e) => { wipeBtn.disabled = e.target.value !== 'HAPUS'; } });
@@ -2790,7 +2907,11 @@ async function viewSettings() {
     fold('Lanjutan',
       h('label', { class: 'chk' }, autoCb, 'Atur kecepatan otomatis (disarankan)'),
       h('p', { class: 'mut' }, 'Ukuran batch dan konkurensi diatur sendiri mengikuti panjang teks dan respons provider. Isian ukuran batch, batas karakter, konkurensi, dan jeda di bawah baru dipakai kalau ini dimatikan.'),
-      ...advKeys.flatMap((k) => pair[k]),
+      ...advKeys.flatMap((k) => (k === 'wrapFont' ? [h('label', { class: 'chk' }, pxCb, 'Ukur lebar baris dalam piksel (untuk font proporsional)'), h('p', { class: 'mut' }, 'Bila aktif, pemecahan baris memakai lebar piksel di bawah (bukan jumlah karakter di atas): font, ukuran font, dan lebar area teks game. Bawaan MV: font 28 px, area teks 780 px tanpa face dan 612 px dengan face. Sesuaikan untuk MZ, resolusi lain, atau font yang diganti plugin. Hasil ukur memakai font di perangkat ini, jadi sisakan sedikit ruang.'), ...pair[k]] : pair[k])),
+      h('label', { class: 'chk' }, tagCb, 'Plugin Message Core (YEP/VisuMZ): gabung baris dan beri <WordWrap>'),
+      h('p', { class: 'mut' }, 'Berlaku saat ekspor bila game memakai YEP_MessageCore atau VisuMZ_1_MessageCore. Tiap dialog dijadikan satu baris dengan <WordWrap> di awal agar plugin yang memecah baris. Dialog yang diperkirakan lebih dari batas baris dipecah jadi kotak baru memakai lebar dan baris maks di atas. Dialog yang memuat </WordWrap> dibiarkan. Matikan bila game mengatur wrap-nya sendiri.'),
+      h('label', { class: 'chk' }, labelCb, 'Kirim batas panjang untuk label, nama, istilah, dan pilihan ke model'),
+      h('p', { class: 'mut' }, 'Model diminta memakai kata lebih pendek atau singkatan agar tidak terpotong di menu. Berlaku untuk terjemahan berikutnya.'),
       h('label', { class: 'chk' }, fast, 'Matikan mode berpikir model (khusus OpenRouter, lebih cepat)'),
       h('label', {}, 'Daftar aman plugin (opsional)'),
       h('p', { class: 'mut' }, 'Kosong = perintah dan parameter plugin tidak disentuh. Tulis "param auto" agar parameter plugin berupa label/pesan terdeteksi otomatis, termasuk teks berkunci label (name, text, title, help, dst.) di dalam parameter JSON bersarang (nama file, switch, script, symbol, dan kunci pengenal dilewati); kecualikan satu parameter dengan "param !Plugin.kunci". Isi entri manual hanya yang kamu yakin berisi teks tampil. Berlaku saat impor, jadi impor ulang proyek setelah mengubahnya.'), allowTa),
@@ -3249,7 +3370,7 @@ async function viewEkspor() {
   const btn = h('button', { class: 'pri', onclick: async () => {
     btn.disabled = true; out.replaceChildren(h('p', { class: 'mut' }, 'Memeriksa dengan diff guard…'));
     try {
-      const r = await exportProject(p, cfg.model, cfg.wrapWidth || cfg.wrapFace ? { width: cfg.wrapWidth, face: cfg.wrapFace } : null);
+      const sp = wrapSpec(cfg), r = await exportProject(p, cfg.model, sp.width || sp.face || (cfg.msgWrap !== 'off' && p.msgPlugins?.length) ? sp : null, cfg.msgWrap);
       if (!r.ok) out.replaceChildren(card(h('h2', {}, 'Ekspor dibatalkan'),
         h('p', { class: 'err' }, r.empty ? UI.exportEmpty : 'Diff guard menolak hasil. Tidak ada file dibuat. Perbaiki lalu coba lagi'), r.problems.map((x) => h('p', { class: 'mut' }, x))), warnCard(r));
       else {
