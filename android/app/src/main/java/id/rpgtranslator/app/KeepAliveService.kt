@@ -77,6 +77,8 @@ class KeepAliveService : Service() {
         return START_NOT_STICKY
     }
 
+    override fun onBind(intent: Intent?) = null
+
     override fun onTimeout(startId: Int) {
         stopAndNotify()
     }
