@@ -1807,6 +1807,19 @@ export function parseNotes(text = '') {
 }
 /** Catatan untuk pembicara ini (nama pembicara memuat nama di catatan). */
 export const notesFor = (notes, speaker) => (speaker ? notes.filter(([n]) => speaker.includes(n)) : []);
+/** Ada huruf Jepang (kana, kanji, kana setengah lebar). */
+const NAME_CJK = /[\u3040-\u30ff\u3400-\u9fff\uff66-\uff9f]/;
+/** Nama pembicara unik (kode escape dibuang) dari entri kategori speaker yang belum ada di glosarium. */
+export function speakerNames(entries, gl) {
+  const have = new Set(gl.map(([a]) => a.toLowerCase())), seen = new Set(), out = [];
+  for (const e of entries) {
+    if (e.category !== 'speaker') continue;
+    const n = stripEscapes(String(e.original || '')).replace(/\s+/g, ' ').trim(), k = n.toLowerCase();
+    if (!n || n.includes('=') || !/\p{L}/u.test(n) || seen.has(k) || have.has(k)) continue;
+    seen.add(k); out.push(n);
+  }
+  return out;
+}
 export const DEFAULT_STYLE = 'Indonesia santai ala dialog game atau subtitle anime (aku/kamu, nggak). Karakter formal (bangsawan, pelayan, narator, sistem) boleh baku. Ikuti register sumber: bila kasar, vulgar, atau mesum, terjemahkan setara; jangan dihaluskan, disensor, atau dikomentari. Teks UI ringkas dan netral.';
 const cacheKey = (project, cfg, original, terms = [], notes = []) => sha256(`${project.src}|${project.tgt}|${cfg.model}|${original}${terms.length ? `|g:${terms.map((t) => t.join('=')).join(';')}` : ''}${notes.length ? `|n:${notes.map((t) => t.join('=')).join(';')}` : ''}`);
 
@@ -2909,6 +2922,35 @@ async function viewSettings() {
       say(t ? `Terhubung. Contoh hasil: ${t}\nWaktu ${((Date.now() - t0) / 1000).toFixed(1)} dtk, token keluar ${tok ?? 'tidak dilaporkan'}${tok > 120 ? ' (tinggi: model kemungkinan memakai mode berpikir)' : ''}` : 'Terhubung, tetapi format respons tidak sesuai. Coba model lain', !t);
     } catch (e) { say(e.message, true); }
   };
+  const nameBtn = h('button', { onclick: async (ev) => {
+    const btn = ev.currentTarget; btn.disabled = true;
+    try {
+      const p = await currentProject(); if (!p) return say('Belum ada proyek. Impor game di tab Proyek', true);
+      const names = speakerNames(await dbQuery('entries', 'projectId', p.id), parseGlossary(glossTa.value));
+      if (!names.length) return say('Tidak ada nama pembicara baru. Semua sudah ada di glosarium, atau game ini tidak memakai kolom nama di Show Text');
+      const map = new Map(names.filter((n) => !NAME_CJK.test(n)).map((n) => [n, n])), jp = names.filter((n) => NAME_CJK.test(n));
+      let note = '';
+      if (jp.length) {
+        const cfg = gather();
+        if (!cfg.apiKey) note = ' Nama berhuruf Jepang dibiarkan kosong karena API key belum diisi.';
+        else if (!urlOk(cfg.baseUrl)) note = ' ' + UI.urlBad + '.';
+        else {
+          try {
+            for (let i = 0; i < jp.length; i += 40) {
+              const part = jp.slice(i, i + 40); say(`Menulis romaji ${Math.min(i + 40, jp.length)} dari ${jp.length} nama…`);
+              const units = part.map((t, j) => ({ id: j, text: t, hint: 'Character name: write it in Latin letters (romaji), e.g. 田中 -> Tanaka. Do not translate the meaning. Reply with the name only.' }));
+              const r = await llmChat(cfg, buildMessages({ src: 'ja', tgt: 'id', units, context: [] }));
+              (toArray(parseJsonLoose(r.text)) || []).forEach((x) => { const s = part[Number(x?.id)], t = String(x?.text ?? '').trim(); if (s && t && !NAME_CJK.test(t) && !/[=\n]/.test(t)) map.set(s, t); });
+            }
+          } catch (e) { note = ` Pembuatan romaji berhenti: ${e.message}`; }
+        }
+      }
+      const cur = glossTa.value.replace(/\s+$/, '');
+      glossTa.value = (cur ? cur + '\n\n' : '') + '# Nama pembicara (otomatis, periksa dulu)\n' + names.map((n) => `${n} = ${map.get(n) || ''}`).join('\n') + '\n';
+      const blank = names.filter((n) => !map.get(n)).length;
+      say(`${names.length} nama ditambahkan di akhir kolom glosarium. Nama berhuruf latin dibiarkan sama; ubah bila mau (mis. Rose = Mawar). ${blank ? `${blank} baris masih kosong dan belum dipakai sampai kamu isi. ` : ''}Periksa, lalu tekan Simpan.${note}`, !!note);
+    } catch (e) { say(e.message, true); } finally { btn.disabled = false; }
+  } }, 'Ambil nama pembicara dari proyek');
   const pair = {}; FIELDS.forEach(([k], i) => { pair[k] = [form[i * 2], form[i * 2 + 1]]; });
   const advKeys = FIELDS.map(([k]) => k).filter((k) => !['baseUrl', 'apiKey', 'model'].includes(k));
   return [
@@ -2918,7 +2960,8 @@ async function viewSettings() {
     card(h('h2', {}, 'Gaya bahasa'), h('p', { class: 'mut' }, 'Dikirim ke model di setiap batch. Kosongkan untuk memakai gaya bawaan model. Berlaku untuk terjemahan berikutnya; teks yang sudah selesai tidak berubah.'), styleTa,
       h('label', {}, 'Catatan per karakter (nama pembicara: gaya bicara)'), notesTa,
       h('button', { onclick: () => { styleTa.value = DEFAULT_STYLE; } }, 'Pulihkan gaya bawaan')),
-    card(h('h2', {}, 'Glosarium (opsional)'), h('p', { class: 'mut' }, 'Satu baris per istilah: sumber = terjemahan. Istilah dicocokkan tanpa membedakan huruf besar/kecil dan dikirim ke model bersama teks yang memuatnya. Bila hasilnya tidak memakai padanan istilah, teks itu diterjemah ulang sekali. Teks yang isinya persis satu istilah diterjemahkan langsung tanpa model. Teks mirip yang sudah diterjemahkan dipakai sebagai acuan agar pilihan katanya sama. Berlaku untuk terjemahan berikutnya; teks yang sudah selesai tidak diubah. Untuk yang sudah selesai, pakai filter Review "Glosarium tidak dipakai" dan "Terjemahan tidak konsisten".'), glossTa),
+    card(h('h2', {}, 'Glosarium (opsional)'), h('p', { class: 'mut' }, 'Satu baris per istilah: sumber = terjemahan. Istilah dicocokkan tanpa membedakan huruf besar/kecil dan dikirim ke model bersama teks yang memuatnya. Bila hasilnya tidak memakai padanan istilah, teks itu diterjemah ulang sekali. Teks yang isinya persis satu istilah diterjemahkan langsung tanpa model. Teks mirip yang sudah diterjemahkan dipakai sebagai acuan agar pilihan katanya sama. Berlaku untuk terjemahan berikutnya; teks yang sudah selesai tidak diubah. Untuk yang sudah selesai, pakai filter Review "Glosarium tidak dipakai" dan "Terjemahan tidak konsisten".'), glossTa,
+      nameBtn, h('p', { class: 'mut' }, 'Mengisi nama dari kotak nama dialog proyek aktif. Nama Jepang diubah ke huruf latin lewat model (butuh API key). Hasilnya hanya ditambahkan ke kolom di atas dan baru tersimpan setelah kamu tekan Simpan.')),
     fold('Lanjutan',
       h('label', { class: 'chk' }, autoCb, 'Atur kecepatan otomatis (disarankan)'),
       h('p', { class: 'mut' }, 'Ukuran batch dan konkurensi diatur sendiri mengikuti panjang teks dan respons provider. Isian ukuran batch, batas karakter, konkurensi, dan jeda di bawah baru dipakai kalau ini dimatikan.'),
