@@ -23,6 +23,7 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 - [Proxy CORS Opsional (Cloudflare Worker)](#proxy-cors-opsional-cloudflare-worker)
 - [Menjalankan Secara Lokal](#menjalankan-secara-lokal)
 - [Deploy ke Vercel](#deploy-ke-vercel)
+- [Versi Android (APK)](#versi-android-apk)
 - [Struktur Proyek](#struktur-proyek)
 - [Catatan Teknis](#catatan-teknis)
 - [Lisensi](#lisensi)
@@ -294,18 +295,57 @@ Proyek ini siap dideploy sebagai situs statis. Tidak perlu framework preset, bui
 
 Bila kamu memakai hosting lain, terapkan header yang setara.
 
+## Versi Android (APK)
+
+Versi web tetap menjadi inti. APK hanyalah pembungkus Capacitor agar terjemahan bisa terus berjalan saat aplikasi pindah ke latar belakang atau layar mati.
+
+Build di mesin yang punya JDK 21 dan Android SDK (bukan di lingkungan tanpa SDK):
+
+```bash
+npm install
+npm run copy:web          # salin aset web ke www/
+npx cap sync android      # salin www/ ke proyek Android
+cd android && ./gradlew assembleDebug
+```
+
+APK ada di `android/app/build/outputs/apk/debug/app-debug.apk`, lalu pasang manual (sideload). Naikkan `versionCode`/`versionName` di `android/app/build.gradle` untuk rilis berikutnya.
+
+Yang berubah di APK:
+
+- **Impor di latar belakang.** Impor berjalan di Web Worker, jadi layar tidak membeku. Saat penerjemahan dimulai, notifikasi progres muncul dengan tombol **Stop**.
+- **Tetap hidup.** Foreground service `dataSync` plus `PARTIAL_WAKE_LOCK` menjaga proses saat layar mati. Buka **Pengaturan → Android → Izinkan jalan di latar belakang** untuk membuka dialog pengecualian optimasi baterai. Di Xiaomi/Oppo/Samsung, aktifkan juga autostart/izin latar belakang di pengaturan sistem.
+- **Pemilih folder.** Tombol impor folder memakai pemilih folder Android (SAF), bukan `webkitdirectory`.
+- **Simpan berkas.** Ekspor/cadangan memakai dialog "Simpan sebagai" Android, bukan folder Unduhan otomatis.
+- **Tombol back** kembali ke tab Proyek sebelum keluar aplikasi.
+
+Batasan:
+
+- Menutup aplikasi dari daftar recent apps (swipe-away) atau Force stop tetap menghentikan proses. Hasil batch terakhir sudah tersimpan; buka lagi dan tekan Lanjutkan.
+- Android 15 membatasi tipe `dataSync` sekitar 6 jam per 24 jam. Bila batas tercapai, service dihentikan sistem dan terjemahan berhenti.
+- Izin notifikasi (Android 13+) diminta saat penerjemahan pertama. Tanpa izin, service tetap berjalan tetapi notifikasi progres tidak tampil.
+- iOS tidak didukung.
+- APK ini belum menangani "buka file zip langsung dari file manager"; impor tetap lewat tombol di aplikasi.
+
+Pindah data dari PWA: di PWA buka **Pengaturan → Cadangan**, simpan berkas cadangan, lalu impor berkas itu di APK. Data tidak dibagi otomatis karena WebView APK memakai penyimpanan terpisah.
+
 ## Struktur Proyek
 
 ```text
 .
-├── index.html       # Kerangka halaman, navigasi, dan ikon (SVG inline)
-├── app.js           # Seluruh logika aplikasi (ES module)
-├── app.css          # Gaya, termasuk mode gelap otomatis
-├── lang-vocab.js    # Kosakata untuk deteksi bahasa Indonesia/Inggris
-├── sw.js            # Service worker (cache app shell, mode offline)
-├── manifest.json    # Manifest PWA
-├── vercel.json      # Konfigurasi deploy dan header keamanan
-└── worker.js        # Opsional: proxy CORS Cloudflare Worker (di-deploy terpisah)
+├── index.html        # Kerangka halaman, navigasi, dan ikon (SVG inline)
+├── app.js            # Seluruh logika aplikasi (ES module)
+├── app.css           # Gaya, termasuk mode gelap otomatis
+├── lang-vocab.js     # Kosakata untuk deteksi bahasa Indonesia/Inggris
+├── native.js         # Jembatan Capacitor (no-op di web)
+├── import-worker.js  # Worker impor agar UI tidak membeku
+├── sw.js             # Service worker (cache app shell, mode offline)
+├── manifest.json     # Manifest PWA
+├── vercel.json       # Konfigurasi deploy dan header keamanan
+├── capacitor.config.json
+├── scripts/          # copy-web.mjs (salin aset ke www/)
+├── android/          # Proyek Android hasil `npx cap add android`
+├── test/             # Uji worker (Node) dan self-check browser
+└── worker.js         # Opsional: proxy CORS Cloudflare Worker (di-deploy terpisah)
 ```
 
 Bagian utama `app.js`:

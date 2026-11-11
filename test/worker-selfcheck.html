@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Worker import self-check</title>
+<pre id="out">menjalankan…</pre>
+<script type="module">
+globalThis.__RPGTL_TEST__ = true;
+const out = document.getElementById('out');
+const mk = (path, body) => ({ file: new File([JSON.stringify(body)], path.split('/').pop(), { type: 'application/json' }), path });
+const files = [
+  mk('data/System.json', { gameTitle: 'テストゲーム', terms: { basic: ['経験値', 'レベル'] } }),
+  mk('data/Map001.json', { events: [null, { pages: [{ list: [{ code: 401, indent: 0, parameters: ['こんにちは、世界'] }] }] }] }),
+];
+const run = () => new Promise((res, rej) => {
+  const w = new Worker(new URL('../import-worker.js', import.meta.url), { type: 'module' });
+  w.onmessage = (e) => {
+    const m = e.data || {};
+    if (m.type === 'progress') { out.textContent = `progres: ${m.text}`; return; }
+    w.terminate();
+    m.type === 'done' ? res(m.project) : rej(new Error(m.message || 'gagal'));
+  };
+  w.onerror = (e) => { w.terminate(); rej(new Error(e.error?.message || e.message || 'worker error')); };
+  w.postMessage({ test: true, kind: 'project', files, src: 'ja', allow: '' });
+});
+try {
+  const p = await run();
+  const app = await import('../app.js');
+  const ents = await app.dbQuery('entries', 'projectId', p.id);
+  const ok = p.total > 0 && ents.length === p.total && p.files === 2 && ents.some((e) => e.original.includes('こんにちは'));
+  await app.deleteProject(p.id);
+  out.textContent = `${ok ? 'PASS' : 'FAIL'} total=${p.total} files=${p.files} db=${ents.length}`;
+} catch (e) {
+  out.textContent = 'FAIL ' + (e?.message || e);
+}
+</script>

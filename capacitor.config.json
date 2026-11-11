@@ -1,0 +1,8 @@
+{
+  "appId": "id.rpgtranslator.app",
+  "appName": "RPG Translator",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  }
+}

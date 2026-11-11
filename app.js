@@ -1,4 +1,5 @@
 import { ID_W, ID_X, EN_W, EN_SKIP, ID_AMBIG, FOREIGN_W } from './lang-vocab.js';
+import { native, KeepAlive } from './native.js';
 // ===== 1. CONFIG & STRING UI =====
 // Mode tes memakai DB terpisah agar data asli di origin yang sama tidak ikut terhapus.
 export const DB_NAME = globalThis.__RPGTL_TEST__ ? 'rpgtl-db-test' : 'rpgtl-db';
@@ -732,11 +733,12 @@ async function rebuildRgss3a(file, repl) {
   return { blob: new Blob([head, tbl, ...parts], { type: 'application/octet-stream' }), replaced: used.size, missing };
 }
 async function collectSources(files) {
-  const list = [];
-  for (const f of files) if (/\.rgss3a$/i.test(f.name)) list.push(...await readRgss3a(f));
-  files = files.filter((f) => !/\.rgss3a$/i.test(f.name));
-  if (files.length === 1 && /\.zip$/i.test(files[0].name)) {
-    const z = await readZip(files[0]);
+  const list = [], items = files.map((x) => (x && (x.file || x.url || x.read) ? x : { file: x, path: x.webkitRelativePath || x.name }));
+  const nameOf = (it) => (it.file ? it.file.name : it.path);
+  for (const it of items) if (it.file && /\.rgss3a$/i.test(it.file.name)) list.push(...await readRgss3a(it.file));
+  files = items.filter((it) => !/\.rgss3a$/i.test(nameOf(it)));
+  if (files.length === 1 && /\.zip$/i.test(nameOf(files[0]))) {
+    const z = await readZip(files[0].file || new Blob([await files[0].readBin()]));
     for (const e of z.entries) {
       if (/\.rgss3a$/i.test(e.name)) { // Game.rgss3a di dalam zip: ekstrak ke memori lalu baca seperti arsip biasa
         let bin; try { bin = await z.read(e); } catch (x) { if (x instanceof RangeError) throw new Error('Game.rgss3a di dalam zip terlalu besar untuk dibaca di memori. Ekstrak dulu zip-nya, lalu pilih Game.rgss3a langsung'); throw x; }
@@ -745,7 +747,11 @@ async function collectSources(files) {
       }
       list.push({ path: e.name, read: async () => new TextDecoder().decode(await z.read(e)), readBin: () => z.read(e) });
     }
-  } else for (const f of files) list.push({ path: f.webkitRelativePath || f.name, read: () => f.text(), readBin: async () => new Uint8Array(await f.arrayBuffer()) });
+  } else for (const it of files) {
+    if (it.read) list.push(it);
+    else if (it.url) list.push({ path: it.path, read: async () => (await fetch(it.url)).text(), readBin: async () => new Uint8Array(await (await fetch(it.url)).arrayBuffer()) });
+    else list.push({ path: it.path, read: () => it.file.text(), readBin: async () => new Uint8Array(await it.file.arrayBuffer()) });
+  }
   const has = (re) => list.some((i) => re.test(i.path));
   const data = new Map();
   for (const i of list) { const k = normalizeDataPath(i.path); if (k) data.set(k, i); }
@@ -2638,18 +2644,34 @@ async function viewProyek() {
   let src = ['auto', 'all', 'ja', 'en'].includes(uiGet('src', 'auto')) ? uiGet('src', 'auto') : 'auto', busy = false;
   if (importNote) { msg.className = importNote.bad ? 'err' : 'mut'; msg.textContent = importNote.text; importNote = null; }
   const lock = (on) => { busy = on; box.classList.toggle('busy', on); bar.hidden = !on; };
+  // Impor di worker: baca/parse/hash/tulis IndexedDB tidak lagi di main thread.
+  const runWorkerImport = (kind, files, allow, onProg) => new Promise((res, rej) => {
+    const w = new Worker(new URL('./import-worker.js', import.meta.url), { type: 'module' });
+    w.onmessage = (ev) => {
+      const m = ev.data || {};
+      if (m.type === 'progress') return onProg(m);
+      w.terminate();
+      m.type === 'done' ? res(m.project) : rej(new Error(m.message || 'Impor gagal'));
+    };
+    w.onerror = (ev) => { w.terminate(); rej(new Error(ev.error?.message || ev.message || 'Worker impor gagal dimuat')); };
+    w.postMessage({ kind, files, src, allow, test: !!globalThis.__RPGTL_TEST__ });
+  });
+  const finish = async (p) => {
+    storageStatus(true).catch(() => {});
+    importNote = p.total
+      ? { text: `Impor selesai. ${p.total} teks dari ${p.files} file${p.broken.length ? `, ${p.broken.length} file rusak dilewati` : ''}. Lanjut ke tab Translate` }
+      : { bad: true, text: UI.emptyImp };
+    await render();
+  };
+  const progressTo = (txtEl, barEl) => (m) => { txtEl.textContent = m.text; if (m.total) { barEl.max = m.total; barEl.value = m.done; } else barEl.removeAttribute('value'); };
   const run = async (ev) => {
     const files = [...ev.target.files]; ev.target.value = '';
     if (!files.length || busy) return;
     lock(true); bar.removeAttribute('value'); msg.className = 'mut'; msg.textContent = `Mengimpor ${files.length} file…`;
     await new Promise((r) => setTimeout(r, 50)); // beri waktu layar menampilkan pesan sebelum kerja berat
     try {
-      const p = await importProject(files, src, (t, d, n) => { msg.textContent = t; if (n) { bar.max = n; bar.value = d; } else bar.removeAttribute('value'); }, { allow: (await loadConfig()).pluginAllow });
-      storageStatus(true).catch(() => {});
-      importNote = p.total
-        ? { text: `Impor selesai. ${p.total} teks dari ${p.files} file${p.broken.length ? `, ${p.broken.length} file rusak dilewati` : ''}. Lanjut ke tab Translate` }
-        : { bad: true, text: UI.emptyImp };
-      await render();
+      const p = await runWorkerImport('project', files.map((f) => ({ file: f, path: f.webkitRelativePath || f.name })), (await loadConfig()).pluginAllow, progressTo(msg, bar));
+      await finish(p);
     } catch (e) { lock(false); msg.className = 'err'; msg.textContent = e.message; }
   };
   const sel = h('select', { onchange: (e) => { src = e.target.value; uiSet('src', src); } },
@@ -2657,9 +2679,20 @@ async function viewProyek() {
   sel.value = src;
   const pick = (title, hint, attrs, onopen) => pickRow(title, hint, attrs, run, onopen);
   const folderWait = () => { msg.className = 'mut'; msg.textContent = 'Browser sedang membaca daftar file folder. Pada game besar (ribuan file) ini bisa lama dan progres belum muncul. Bila terlalu lama, pakai zip game atau folder kecil berisi data dan js/plugins.js.'; };
+  const runNativeFolder = async () => {
+    if (busy) return;
+    let files;
+    try { files = await KeepAlive.pickFolder(); } catch (e) { msg.className = 'err'; msg.textContent = e.message; return; }
+    if (!files.length) { msg.className = 'err'; msg.textContent = 'Tidak ada file data, .rvdata2, atau plugins.js di folder itu'; return; }
+    lock(true); bar.removeAttribute('value'); msg.className = 'mut'; msg.textContent = `Mengimpor ${files.length} file…`;
+    try { await finish(await runWorkerImport('project', files, (await loadConfig()).pluginAllow, progressTo(msg, bar))); }
+    catch (e) { lock(false); msg.className = 'err'; msg.textContent = e.message; }
+  };
   box.append(h('label', {}, 'Bahasa sumber'), sel,
     h('div', { class: 'picks' },
-      pick('Folder data', 'Hasil ekstrak MV, MZ, atau VX Ace', { webkitdirectory: '', multiple: '' }, folderWait),
+      native
+        ? h('div', { class: 'row' }, h('span', {}, h('b', {}, 'Folder data'), h('small', {}, 'Pilih folder game (Android)')), h('button', { onclick: runNativeFolder }, 'Pilih folder'))
+        : pick('Folder data', 'Hasil ekstrak MV, MZ, atau VX Ace', { webkitdirectory: '', multiple: '' }, folderWait),
       pick('File zip game', 'Zip yang berisi folder data', { accept: '.zip' }),
       pick('Game.rgss3a', 'Arsip terenkripsi VX Ace', {})), bar, msg);
   const lmsg = h('p', { class: 'mut' }), lbar = h('progress', { value: '0', max: '1', hidden: '' });
@@ -2668,7 +2701,7 @@ async function viewProyek() {
     if (!files.length || busy) return;
     busy = true; lbar.hidden = false; lbar.removeAttribute('value'); lmsg.className = 'mut'; lmsg.textContent = 'Mengimpor…';
     try {
-      const p = await importLangFiles(files, src, (t, d, n) => { lmsg.textContent = t; if (n) { lbar.max = n; lbar.value = d; } else lbar.removeAttribute('value'); });
+      const p = await runWorkerImport('lang', files, '', (m) => { lmsg.textContent = m.text; if (m.total) { lbar.max = m.total; lbar.value = m.done; } else lbar.removeAttribute('value'); });
       storageStatus(true).catch(() => {});
       importNote = p.total
         ? { text: `Impor selesai. ${p.total} teks dari ${p.files} file bahasa${p.keySkipped ? `, ${p.keySkipped} entri hanya-kunci dilewati` : ''}${p.broken.length ? `, ${p.broken.length} file rusak dilewati` : ''}. Lanjut ke tab Translate` }
@@ -2795,18 +2828,20 @@ async function startJob(opts = {}) {
   if (cats && !cats.length) { job.err = true; job.text = 'Pilih minimal satu kategori dulu'; return paintJob(); }
   const before = await dbQuery('entries', 'projectId', p.id), base = ids ? 0 : before.filter((e) => e.status === 'done' || e.status === 'edited').length;
   job.running = true; job.ctl = new AbortController(); job.value = 0; job.max = before.filter((e) => TODO.has(e.status) && (!cats || cats.includes(e.category)) && (!ids || ids.has(e.id))).length || 1; job.text = 'Memulai…'; paintJob();
-  let lock = null, hiddenAt = 0; job.warn = navigator.wakeLock ? '' : 'Browser ini tidak punya penjaga layar. Matikan kunci layar otomatis di HP dan biarkan app tetap di depan.';
-  const getLock = async () => { try { lock = await navigator.wakeLock?.request('screen'); } catch { /* layar tetap boleh mati */ } };
+  let lock = null, hiddenAt = 0;
+  job.warn = native ? '' : (navigator.wakeLock ? '' : 'Browser ini tidak punya penjaga layar. Matikan kunci layar otomatis di HP dan biarkan app tetap di depan.');
+  const getLock = async () => { if (native) return; try { lock = await navigator.wakeLock?.request('screen'); } catch { /* layar tetap boleh mati */ } };
   await getLock();
+  if (native) { KeepAlive.requestNotifications(); KeepAlive.start({ title: 'Menerjemahkan', body: 'Memulai…', progress: 0 }); }
   const onVis = async () => {
     if (document.hidden) { hiddenAt = Date.now(); return; }
-    if (hiddenAt) { const sec = Math.round((Date.now() - hiddenAt) / 1000); hiddenAt = 0; if (sec >= 5) job.warn = `App sempat di latar belakang ${sec} detik. Request yang tertunda bisa gagal dan diulang otomatis. Biarkan layar menyala dan app tetap di depan.`; }
+    if (hiddenAt && !native) { const sec = Math.round((Date.now() - hiddenAt) / 1000); hiddenAt = 0; if (sec >= 5) job.warn = `App sempat di latar belakang ${sec} detik. Request yang tertunda bisa gagal dan diulang otomatis. Biarkan layar menyala dan app tetap di depan.`; }
     await getLock(); paintJob();
   };
   const onLeave = (e) => { e.preventDefault(); e.returnValue = ''; };
   document.addEventListener('visibilitychange', onVis); addEventListener('beforeunload', onLeave);
   try {
-    let t0 = Date.now(), d0 = null; const smp = [];
+    let t0 = Date.now(), d0 = null, notifyAt = 0; const smp = [];
     const r = await runTranslation(p, cfg, { signal: job.ctl.signal, base, cats, ids, onProgress: (d, t, txt) => {
       if (d0 === null) { d0 = d; t0 = Date.now(); }
       // ETA dari kecepatan penyelesaian batch (jendela 5 menit terakhir), bukan dari awal proses.
@@ -2819,6 +2854,7 @@ async function startJob(opts = {}) {
         else if (d > d0) eta = ' · menghitung sisa waktu…';
       }
       job.value = d - base; job.max = (t - base) || 1; job.text = txt + eta; paintJob();
+      if (native && Date.now() - notifyAt > 5000) { notifyAt = Date.now(); KeepAlive.update({ title: 'Menerjemahkan', body: `${job.value} dari ${job.max} teks`, progress: Math.min(100, Math.floor((job.value * 100) / job.max)) }); }
     } });
     job.text = !r.done && !r.error && !r.stopped ? UI.nothing
       : `${r.stopped ? 'Dihentikan' : 'Selesai'}. ${r.done} berhasil (${r.cached} dari cache), ${r.error} error${r.error ? '. Lihat di tab Review, filter Error' : ''}`;
@@ -2826,6 +2862,7 @@ async function startJob(opts = {}) {
   document.removeEventListener('visibilitychange', onVis); removeEventListener('beforeunload', onLeave);
   try { await lock?.release(); } catch { /* abaikan */ }
   job.running = false; paintJob();
+  if (native) { KeepAlive.update({ title: 'Terjemahan', body: job.text, progress: 100 }); setTimeout(() => KeepAlive.stop(), 4000); }
   if (/^#\/translate/.test(location.hash)) render();
 }
 async function viewTranslate() {
@@ -3003,6 +3040,7 @@ async function viewSettings() {
       h('label', { class: 'chk' }, fast, 'Matikan mode berpikir model (khusus OpenRouter, lebih cepat)'),
       h('label', {}, 'Daftar aman plugin (opsional)'),
       h('p', { class: 'mut' }, 'Kosong = perintah dan parameter plugin tidak disentuh. Tulis "param auto" agar parameter plugin berupa label/pesan terdeteksi otomatis, termasuk teks berkunci label (name, text, title, help, dst.) di dalam parameter JSON bersarang (nama file, switch, script, symbol, dan kunci pengenal dilewati); kecualikan satu parameter dengan "param !Plugin.kunci". Isi entri manual hanya yang kamu yakin berisi teks tampil. Berlaku saat impor, jadi impor ulang proyek setelah mengubahnya.'), allowTa),
+    native ? card(h('h2', {}, 'Android'), h('p', { class: 'mut' }, 'Terjemahan tetap berjalan saat app di latar belakang dan layar mati. Izinkan pengecualian optimasi baterai supaya sistem tidak menghentikannya; di merek tertentu (Xiaomi/Oppo/Samsung) aktifkan juga autostart.'), h('button', { onclick: async (e) => { const b = e.currentTarget; b.disabled = true; await KeepAlive.requestBattery(); b.disabled = false; b.textContent = 'Pengaturan baterai dibuka'; } }, 'Izinkan jalan di latar belakang')) : '',
     card(h('h2', {}, 'Penyimpanan data'), h('p', { class: 'mut' }, 'Lihat isi IndexedDB dan localStorage seperti file manager: ukuran tiap bagian, isi item, dan hapus cache atau proyek.'), h('a', { class: 'file', href: '#/penyimpanan' }, 'Buka penjelajah penyimpanan')),
     h('div', { class: 'card danger-card' }, h('h2', {}, 'Hapus semua data'), h('p', { class: 'mut' }, 'Menghapus semua proyek, terjemahan, cache, dan pengaturan aplikasi ini. Data lain di situs ini tidak disentuh. Ketik HAPUS untuk lanjut.'), wipe, wipeBtn),
     actionBar(msg, h('div', { class: 'row' }, h('button', { class: 'pri', onclick: save }, 'Simpan'), h('button', { onclick: test }, 'Tes koneksi')))];
@@ -3724,7 +3762,16 @@ async function paintProject() {
   const el = document.getElementById('proj'); if (!el) return;
   try { const p = await currentProject(); el.textContent = p ? `${p.engine}, ${p.total.toLocaleString('id-ID')} teks` : 'Belum ada proyek'; } catch { el.textContent = ''; }
 }
-if (!globalThis.__RPGTL_TEST__) {
+if (!globalThis.__RPGTL_TEST__ && typeof document !== 'undefined') {
+  if (native) {
+    KeepAlive.onStop(() => { if (job.running) job.ctl?.abort(); });
+    globalThis.__rpgBack = () => {
+      const name = (location.hash.match(/^#\/(\w+)/) || [, 'proyek'])[1];
+      if (name === 'proyek') return false;
+      location.hash = '#/proyek';
+      return true;
+    };
+  }
   addEventListener('hashchange', render);
   render();
   // Keyboard layar terbuka: sembunyikan nav dan bar aksi supaya tidak melayang di atas kolom isian.
