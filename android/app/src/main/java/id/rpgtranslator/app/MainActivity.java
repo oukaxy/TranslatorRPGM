@@ -12,7 +12,7 @@ public class MainActivity extends BridgeActivity {
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
-                bridge.evaluateJavascript("globalThis.__rpgBack ? globalThis.__rpgBack() : false", value -> {
+                bridge.eval("globalThis.__rpgBack ? globalThis.__rpgBack() : false", value -> {
                     if (!"true".equals(value)) finish();
                 });
             }
