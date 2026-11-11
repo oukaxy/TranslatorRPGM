@@ -2167,7 +2167,7 @@ const numVals = (x, kanji = false) => {
   let t0 = String(x || '').replace(/⟦\d+⟧/g, ' ').replace(ESC, ' ');
   if (kanji) t0 = t0.replace(/([一二三四五六七八九十]{1,3})(?=万|萬|億|千|百|割)/g, (m) => { const v = kanjiNum(m); return v == null ? m : String(v); });
   const t = t0.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
-    .replace(/(\d)[.,](?=\d{3}(?!\d))/g, '$1').replace(/(\d+)万(\d{1,4})(?!\d)/g, (m, a, b) => String(Number(a) * 1e4 + Number(b)));
+    .replace(/(\d)[.,](?=\d{3}(?!\d))/g, '$1').replace(/(\d),(\d{1,2})(?!\d)/g, '$1.$2').replace(/(\d+)万(\d{1,4})(?!\d)/g, (m, a, b) => String(Number(a) * 1e4 + Number(b)));
   return [...t.matchAll(NUM_RE)].map((m) => String(Math.round(Number(m[1]) * (m[2] ? NUM_UNIT[m[2]] : m[3] ? NUM_UNIT[m[3].toLowerCase()] : 1) * 1000) / 1000));
 };
 export function numDiff(orig, t) {
