@@ -50,6 +50,8 @@ export const KeepAlive = {
   stop: () => (plugin ? plugin.stop().catch(() => {}) : Promise.resolve()),
   onStop: (cb) => { stopCb = cb; },
   requestNotifications: () => (plugin ? plugin.requestNotifications().catch(() => ({})) : Promise.resolve({})),
+  lastError: () => (plugin ? plugin.lastError().catch(() => ({ error: lastError, at: 0 })) : Promise.resolve({ error: lastError, at: 0 })),
+  clearError: () => (plugin ? plugin.clearError().catch(() => {}) : Promise.resolve()),
   requestBattery: () => plugin?.requestIgnoreBatteryOptimizations().catch(() => {}),
   pickFolder: async () => {
     if (!plugin) return [];

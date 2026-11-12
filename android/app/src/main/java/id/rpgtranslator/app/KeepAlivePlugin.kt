@@ -64,15 +64,35 @@ class KeepAlivePlugin : Plugin() {
 
     @PluginMethod
     fun start(call: PluginCall) {
-        val intent = Intent(context, KeepAliveService::class.java).apply {
-            action = KeepAliveService.ACTION_START
-            putExtra("title", call.getString("title") ?: "Menerjemahkan")
-            putExtra("body", call.getString("body") ?: "Proses berjalan")
-            putExtra("progress", call.getInt("progress") ?: -1)
+        try {
+            val intent = Intent(context, KeepAliveService::class.java).apply {
+                action = KeepAliveService.ACTION_START
+                putExtra("title", call.getString("title") ?: "Menerjemahkan")
+                putExtra("body", call.getString("body") ?: "Proses berjalan")
+                putExtra("progress", call.getInt("progress") ?: -1)
+            }
+            ContextCompat.startForegroundService(context, intent)
+            serviceOn = true
+            bridge.getWebView().resumeTimers()
+            call.resolve()
+        } catch (e: Throwable) {
+            KeepAliveService.saveError(context, e)
+            call.reject(e.message ?: "Gagal memulai layanan latar belakang")
         }
-        ContextCompat.startForegroundService(context, intent)
-        serviceOn = true
-        bridge.getWebView().resumeTimers()
+    }
+
+    @PluginMethod
+    fun lastError(call: PluginCall) {
+        val p = context.getSharedPreferences(KeepAliveService.PREFS, Context.MODE_PRIVATE)
+        val o = JSObject()
+        o.put("error", p.getString(KeepAliveService.KEY_ERROR, "") ?: "")
+        o.put("at", p.getLong(KeepAliveService.KEY_AT, 0L))
+        call.resolve(o)
+    }
+
+    @PluginMethod
+    fun clearError(call: PluginCall) {
+        context.getSharedPreferences(KeepAliveService.PREFS, Context.MODE_PRIVATE).edit().clear().apply()
         call.resolve()
     }
 
