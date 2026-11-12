@@ -47,13 +47,9 @@ class KeepAlivePlugin : Plugin() {
         )
     }
 
-    override fun handleOnPause() {
-        if (serviceOn) bridge.getWebView().resumeTimers()
-    }
+    override fun handleOnPause() {}
 
-    override fun handleOnResume() {
-        if (serviceOn) bridge.getWebView().resumeTimers()
-    }
+    override fun handleOnResume() {}
 
     override fun handleOnDestroy() {
         receiver?.let { runCatching { context.unregisterReceiver(it) } }
@@ -73,7 +69,6 @@ class KeepAlivePlugin : Plugin() {
             }
             ContextCompat.startForegroundService(context, intent)
             serviceOn = true
-            bridge.getWebView().resumeTimers()
             call.resolve()
         } catch (e: Throwable) {
             KeepAliveService.saveError(context, e)
