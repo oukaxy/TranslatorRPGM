@@ -23,6 +23,7 @@ import com.getcapacitor.annotation.ActivityCallback
 import com.getcapacitor.annotation.CapacitorPlugin
 import com.getcapacitor.annotation.Permission
 import com.getcapacitor.annotation.PermissionCallback
+import java.io.File
 import java.io.OutputStream
 import java.util.UUID
 
@@ -163,9 +164,13 @@ class KeepAlivePlugin : Plugin() {
         runCatching {
             context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
+        val base = File(context.cacheDir, "import")
         val out = ArrayList<JSObject>()
         try {
-            walk(uri, DocumentsContract.getTreeDocumentId(uri), "", out)
+            // Salin file data ke cache aplikasi: sekali baca SAF, lalu JS membacanya seperti file biasa.
+            base.deleteRecursively()
+            base.mkdirs()
+            walk(uri, DocumentsContract.getTreeDocumentId(uri), 0, "", base, out)
         } catch (e: Exception) {
             return call.reject(e.message ?: "Folder tidak bisa dibaca")
         }
@@ -174,7 +179,9 @@ class KeepAlivePlugin : Plugin() {
         val res = JSObject(); res.put("files", arr); call.resolve(res)
     }
 
-    private fun walk(tree: Uri, docId: String, prefix: String, out: MutableList<JSObject>) {
+    private fun safeName(s: String) = s.replace(Regex("[\\\\/:*?\"<>|#%\\s]"), "_")
+
+    private fun walk(tree: Uri, docId: String, depth: Int, rel: String, base: File, out: MutableList<JSObject>) {
         val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId)
         context.contentResolver.query(
             children,
@@ -190,17 +197,31 @@ class KeepAlivePlugin : Plugin() {
                 val name = c.getString(1) ?: continue
                 val mime = c.getString(2) ?: ""
                 if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                    if (prefix.isEmpty() || name.equals("data", true) || name.equals("js", true) || name.equals("www", true)) {
-                        walk(tree, id, "$prefix$name/", out)
+                    val lower = name.lowercase()
+                    // Hanya telusuri folder yang relevan; img/audio/font bisa berisi ribuan file.
+                    if (depth == 0 || lower == "data" || lower == "js" || lower == "www") {
+                        walk(tree, id, depth + 1, rel + safeName(name) + "/", base, out)
                     }
-                } else if (
-                    name.endsWith(".json", true) || name.endsWith(".rvdata2", true) || name.equals("plugins.js", true)
-                ) {
-                    val o = JSObject()
-                    o.put("path", "$prefix$name")
-                    o.put("uri", DocumentsContract.buildDocumentUriUsingTree(tree, id).toString())
-                    out.add(o)
+                    continue
                 }
+                val path = when {
+                    name.equals("plugins.js", true) -> if (rel.isEmpty()) "js/plugins.js" else rel + safeName(name)
+                    name.endsWith(".json", true) || name.endsWith(".rvdata2", true) ->
+                        if (rel.isEmpty()) "data/" + safeName(name) else rel + safeName(name)
+                    else -> continue
+                }
+                val dest = File(base, path)
+                val src = DocumentsContract.buildDocumentUriUsingTree(tree, id)
+                try {
+                    dest.parentFile?.mkdirs()
+                    context.contentResolver.openInputStream(src)?.use { input ->
+                        dest.outputStream().use { output -> input.copyTo(output, 64 * 1024) }
+                    }
+                    val e = JSObject()
+                    e.put("path", path)
+                    e.put("url", Uri.fromFile(dest).toString())
+                    out.add(e)
+                } catch (ignored: Exception) { }
             }
         }
     }

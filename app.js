@@ -2682,6 +2682,7 @@ async function viewProyek() {
   const runNativeFolder = async () => {
     if (busy) return;
     let files;
+    msg.className = 'mut'; msg.textContent = 'Pilih folder. Setelah dipilih, file data disalin dulu ke aplikasi (bisa beberapa detik)…';
     try { files = await KeepAlive.pickFolder(); } catch (e) { msg.className = 'err'; msg.textContent = e.message; return; }
     if (!files.length) { msg.className = 'err'; msg.textContent = 'Tidak ada file data, .rvdata2, atau plugins.js di folder itu'; return; }
     lock(true); bar.removeAttribute('value'); msg.className = 'mut'; msg.textContent = `Mengimpor ${files.length} file…`;
@@ -2691,7 +2692,7 @@ async function viewProyek() {
   box.append(h('label', {}, 'Bahasa sumber'), sel,
     h('div', { class: 'picks' },
       native
-        ? h('div', { class: 'row' }, h('span', {}, h('b', {}, 'Folder data'), h('small', {}, 'Pilih folder game (Android)')), h('button', { onclick: runNativeFolder }, 'Pilih folder'))
+        ? h('div', { class: 'row' }, h('span', {}, h('b', {}, 'Folder data'), h('small', {}, 'Pilih folder game, folder data/Data, atau folder www (Android)')), h('button', { onclick: runNativeFolder }, 'Pilih folder'))
         : pick('Folder data', 'Hasil ekstrak MV, MZ, atau VX Ace', { webkitdirectory: '', multiple: '' }, folderWait),
       pick('File zip game', 'Zip yang berisi folder data', { accept: '.zip' }),
       pick('Game.rgss3a', 'Arsip terenkripsi VX Ace', {})), bar, msg);
