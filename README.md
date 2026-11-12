@@ -308,7 +308,7 @@ npx cap sync android      # salin www/ ke proyek Android
 cd android && ./gradlew assembleDebug
 ```
 
-APK ada di `android/app/build/outputs/apk/debug/app-debug.apk`, lalu pasang manual (sideload). Naikkan `versionCode`/`versionName` di `android/app/build.gradle` untuk rilis berikutnya.
+APK ada di `android/app/build/outputs/apk/debug/app-debug.apk`, lalu pasang manual (sideload). Naikkan `versionCode`/`versionName` di `android/app/build.gradle` untuk rilis berikutnya. Build debug memakai kunci tetap `android/app/rpgtl-debug.p12` (alias `rpgtl`), jadi APK baru bisa dipasang menimpa versi lama tanpa uninstall.
 
 Yang berubah di APK:
 

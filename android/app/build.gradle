@@ -17,7 +17,21 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        // Kunci tetap di repo supaya setiap build punya tanda tangan yang sama dan APK baru
+        // bisa dipasang menimpa versi lama tanpa uninstall.
+        stable {
+            storeFile file('rpgtl-debug.p12')
+            storePassword 'rpgtl-debug'
+            keyAlias 'rpgtl'
+            keyPassword 'rpgtl-debug'
+            storeType 'PKCS12'
+        }
+    }
     buildTypes {
+        debug {
+            signingConfig signingConfigs.stable
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'

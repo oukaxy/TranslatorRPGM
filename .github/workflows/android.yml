@@ -37,12 +37,6 @@ jobs:
           yes | "$SM" --licenses > /dev/null || true
           "$SM" --install "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 
-      - name: Cache debug keystore
-        uses: actions/cache@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: debug-keystore-v1
-
       - run: npm run sync:android
 
       - run: chmod +x android/gradlew
@@ -50,6 +44,10 @@ jobs:
       - name: Build debug APK
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon
+
+      - name: Verify APK signing certificate
+        run: |
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs android/app/build/outputs/apk/debug/app-debug.apk | grep -i "SHA-256"
 
       - uses: actions/upload-artifact@v4
         with:
