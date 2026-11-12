@@ -2833,7 +2833,7 @@ async function startJob(opts = {}) {
   const getLock = async () => { if (native) return; try { lock = await navigator.wakeLock?.request('screen'); } catch { /* layar tetap boleh mati */ } };
   await getLock();
   if (native) {
-    KeepAlive.requestNotifications();
+    KeepAlive.requestNotifications().then((r) => { if (r && r.granted === false) { job.warn = 'Izin notifikasi belum diberikan; notifikasi progres tidak akan tampil.'; paintJob(); } }).catch(() => {});
     KeepAlive.start({ title: 'Menerjemahkan', body: 'Memulai…', progress: 0 }).catch((e) => { job.warn = 'Latar belakang gagal: ' + (e?.message || e); paintJob(); });
   }
   const onVis = async () => {

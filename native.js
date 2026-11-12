@@ -1,11 +1,14 @@
 // Jembatan Android (Capacitor). Di web semua fungsi di sini menjadi no-op.
 const Cap = globalThis.Capacitor;
-const plugin = Cap && typeof Cap.isNativePlatform === 'function' && Cap.isNativePlatform() && Cap.registerPlugin ? Cap.registerPlugin('KeepAlive') : null;
+// Capacitor menyuntikkan Capacitor.Plugins.<Nama> ke halaman. registerPlugin hanya ada bila
+// @capacitor/core di-bundle, dan app ini tidak memakai build step.
+const plugin = Cap && ((Cap.Plugins && Cap.Plugins.KeepAlive) || (typeof Cap.registerPlugin === 'function' ? Cap.registerPlugin('KeepAlive') : null));
 export const native = !!plugin;
 
 let stopCb = null, lastError = '';
 const fail = (e) => { lastError = String(e?.message || e); throw e; };
-if (plugin) plugin.addListener('stopClicked', () => stopCb?.()).catch(() => {});
+// addListener di bridge native mengembalikan { remove }, bukan Promise.
+if (plugin) { try { plugin.addListener('stopClicked', () => stopCb?.()); } catch (e) { lastError = String(e?.message || e); } }
 
 /** Status jembatan native untuk ditampilkan di Pengaturan (diagnosa). */
 export function nativeDiag() {
@@ -46,7 +49,7 @@ export const KeepAlive = {
   update: (o) => (plugin ? plugin.update(o).catch((e) => { lastError = String(e?.message || e); }) : Promise.resolve()),
   stop: () => (plugin ? plugin.stop().catch(() => {}) : Promise.resolve()),
   onStop: (cb) => { stopCb = cb; },
-  requestNotifications: () => plugin?.requestNotifications().catch(() => {}),
+  requestNotifications: () => (plugin ? plugin.requestNotifications().catch(() => ({})) : Promise.resolve({})),
   requestBattery: () => plugin?.requestIgnoreBatteryOptimizations().catch(() => {}),
   pickFolder: async () => {
     if (!plugin) return [];
