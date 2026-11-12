@@ -37,6 +37,12 @@ jobs:
           yes | "$SM" --licenses > /dev/null || true
           "$SM" --install "platforms;android-36" "build-tools;36.0.0" "platform-tools"
 
+      - name: Cache debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: debug-keystore-v1
+
       - run: npm run sync:android
 
       - run: chmod +x android/gradlew
