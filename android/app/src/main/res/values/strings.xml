@@ -1,7 +1,0 @@
-<?xml version='1.0' encoding='utf-8'?>
-<resources>
-    <string name="app_name">RPG Translator</string>
-    <string name="title_activity_main">RPG Translator</string>
-    <string name="package_name">id.rpgtranslator.app</string>
-    <string name="custom_url_scheme">id.rpgtranslator.app</string>
-</resources>
