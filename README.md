@@ -23,7 +23,6 @@ Antarmukanya berbahasa Indonesia dan dirancang mobile-first, jadi nyaman dipakai
 - [Proxy CORS Opsional (Cloudflare Worker)](#proxy-cors-opsional-cloudflare-worker)
 - [Menjalankan Secara Lokal](#menjalankan-secara-lokal)
 - [Deploy ke Vercel](#deploy-ke-vercel)
-- [Versi Android (APK)](#versi-android-apk)
 - [Struktur Proyek](#struktur-proyek)
 - [Catatan Teknis](#catatan-teknis)
 - [Lisensi](#lisensi)
@@ -229,11 +228,25 @@ Ukuran per item adalah **perkiraan** dari hasil serialisasi JSON, karena Indexed
 
 Tidak punya API key? Buka tab **Ekspor** lalu bagian **Terjemah lewat chat AI**:
 
-1. Pilih kategori dan ukuran bagian, lalu tekan **Siapkan bagian**.
-2. Salin atau unduh satu bagian (sudah berisi instruksi, gaya, catatan karakter, dan glosarium), lalu kirim ke aplikasi AI favoritmu.
+1. Pilih kategori dan ukuran bagian, lalu tekan **Siapkan bagian**. Teks yang padanannya sudah ada di glosarium (persis) atau di cache diisi otomatis dan tidak ikut dikirim.
+2. Salin atau unduh satu bagian, lalu kirim ke aplikasi AI favoritmu.
 3. Tempel balasannya (atau unggah sebagai `.txt`) dan tekan **Impor tempelan**.
+4. Bila ada baris yang ditolak, tekan **Siapkan bagian perbaikan** dan kirim bagian itu ke AI.
 
-Balasan harus berformat `[id] terjemahan`, satu baris per teks. Baris yang kodenya rusak atau hilang otomatis ditolak dan dilaporkan.
+Isi tiap bagian sama dengan yang dikirim mode API: instruksi, gaya, catatan karakter, dan glosarium, ditambah:
+
+- **Batas panjang** per baris: `[12|Rose|maks 38 kar/baris, 4 baris]` untuk dialog dan deskripsi, `[7|maks 12 kar]` untuk label, nama, dan pilihan (mengikuti pengaturan lebar kotak dan `labelMax`). Bagian setelah `|` hanya konteks dan tidak perlu ditulis di balasan.
+- **Konteks**: tiga baris sebelum bagian itu, hanya sebagai referensi.
+- **Acuan teks mirip**: teks pendek yang mirip dan sudah diterjemahkan, supaya pilihan katanya sama.
+- Aturan untuk tidak menyensor kata kasar atau dewasa, bahasa keluaran tunggal, dan angka yang harus sama.
+
+Balasan harus berformat `[id] terjemahan`, satu baris per teks. Pemeriksaan saat impor disamakan dengan mode API:
+
+- **Ditolak** (tetap belum selesai): kode game rusak atau hilang, kode buatan AI, huruf Jepang atau kata Portugis/Spanyol tersisa, **angka berbeda dari sumber**, dan **panjang tidak wajar**. Kana yang tersisa (mis. erangan) diubah ke romaji seperti di mode API.
+- **Diterima tetapi dilaporkan**: istilah glosarium yang tidak terpakai dan kata Inggris yang tersisa. Cek lewat filter di Review.
+- **Disimpan ke cache** dengan kunci yang sama seperti mode API, sehingga teks yang sama persis tidak perlu dikirim lagi, termasuk bila nanti dipakai lewat tab Translate.
+
+**Bagian perbaikan** hanya berisi baris yang ditolak, disertai alasan per baris (mis. angka tidak sama, token hilang), sehingga AI tahu apa yang harus dibetulkan. Baris yang belum dibalas (misalnya balasan AI terpotong) cukup disiapkan lagi lewat **Siapkan bagian**, karena bagian selalu dihitung dari teks yang belum selesai.
 
 ## Keamanan Hasil Terjemahan
 
@@ -295,57 +308,18 @@ Proyek ini siap dideploy sebagai situs statis. Tidak perlu framework preset, bui
 
 Bila kamu memakai hosting lain, terapkan header yang setara.
 
-## Versi Android (APK)
-
-Versi web tetap menjadi inti. APK hanyalah pembungkus Capacitor agar terjemahan bisa terus berjalan saat aplikasi pindah ke latar belakang atau layar mati.
-
-Build di mesin yang punya JDK 21 dan Android SDK (bukan di lingkungan tanpa SDK):
-
-```bash
-npm install
-npm run copy:web          # salin aset web ke www/
-npx cap sync android      # salin www/ ke proyek Android
-cd android && ./gradlew assembleDebug
-```
-
-APK ada di `android/app/build/outputs/apk/debug/app-debug.apk`, lalu pasang manual (sideload). Naikkan `versionCode`/`versionName` di `android/app/build.gradle` untuk rilis berikutnya. Build debug memakai kunci tetap `android/app/rpgtl-debug.p12` (alias `rpgtl`), jadi APK baru bisa dipasang menimpa versi lama tanpa uninstall.
-
-Yang berubah di APK:
-
-- **Impor di latar belakang.** Impor berjalan di Web Worker, jadi layar tidak membeku. Saat penerjemahan dimulai, notifikasi progres muncul dengan tombol **Stop**.
-- **Tetap hidup.** Foreground service `dataSync` plus `PARTIAL_WAKE_LOCK` menjaga proses saat layar mati. Buka **Pengaturan → Android → Izinkan jalan di latar belakang** untuk membuka dialog pengecualian optimasi baterai. Di Xiaomi/Oppo/Samsung, aktifkan juga autostart/izin latar belakang di pengaturan sistem.
-- **Pemilih folder.** Tombol impor folder memakai pemilih folder Android (SAF), bukan `webkitdirectory`.
-- **Simpan berkas.** Ekspor/cadangan memakai dialog "Simpan sebagai" Android, bukan folder Unduhan otomatis.
-- **Tombol back** kembali ke tab Proyek sebelum keluar aplikasi.
-
-Batasan:
-
-- Menutup aplikasi dari daftar recent apps (swipe-away) atau Force stop tetap menghentikan proses. Hasil batch terakhir sudah tersimpan; buka lagi dan tekan Lanjutkan.
-- Android 15 membatasi tipe `dataSync` sekitar 6 jam per 24 jam. Bila batas tercapai, service dihentikan sistem dan terjemahan berhenti.
-- Izin notifikasi (Android 13+) diminta saat penerjemahan pertama. Tanpa izin, service tetap berjalan tetapi notifikasi progres tidak tampil.
-- iOS tidak didukung.
-- APK ini belum menangani "buka file zip langsung dari file manager"; impor tetap lewat tombol di aplikasi.
-
-Pindah data dari PWA: di PWA buka **Pengaturan → Cadangan**, simpan berkas cadangan, lalu impor berkas itu di APK. Data tidak dibagi otomatis karena WebView APK memakai penyimpanan terpisah.
-
 ## Struktur Proyek
 
 ```text
 .
-├── index.html        # Kerangka halaman, navigasi, dan ikon (SVG inline)
-├── app.js            # Seluruh logika aplikasi (ES module)
-├── app.css           # Gaya, termasuk mode gelap otomatis
-├── lang-vocab.js     # Kosakata untuk deteksi bahasa Indonesia/Inggris
-├── native.js         # Jembatan Capacitor (no-op di web)
-├── import-worker.js  # Worker impor agar UI tidak membeku
-├── sw.js             # Service worker (cache app shell, mode offline)
-├── manifest.json     # Manifest PWA
-├── vercel.json       # Konfigurasi deploy dan header keamanan
-├── capacitor.config.json
-├── scripts/          # copy-web.mjs (salin aset ke www/)
-├── android/          # Proyek Android hasil `npx cap add android`
-├── test/             # Uji worker (Node) dan self-check browser
-└── worker.js         # Opsional: proxy CORS Cloudflare Worker (di-deploy terpisah)
+├── index.html       # Kerangka halaman, navigasi, dan ikon (SVG inline)
+├── app.js           # Seluruh logika aplikasi (ES module)
+├── app.css          # Gaya, termasuk mode gelap otomatis
+├── lang-vocab.js    # Kosakata untuk deteksi bahasa Indonesia/Inggris
+├── sw.js            # Service worker (cache app shell, mode offline)
+├── manifest.json    # Manifest PWA
+├── vercel.json      # Konfigurasi deploy dan header keamanan
+└── worker.js        # Opsional: proxy CORS Cloudflare Worker (di-deploy terpisah)
 ```
 
 Bagian utama `app.js`:

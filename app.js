@@ -1856,23 +1856,55 @@ const cacheKey = (project, cfg, original, terms = [], notes = []) => sha256(`${p
 // ===== 4c. TERJEMAH LEWAT CHAT AI =====
 const NL = '⏎', LANG_NAME = { all: 'bahasa apa pun (tiap baris bisa Jepang, Inggris, Indonesia, Korea, dll; baris yang sudah bersih berbahasa Indonesia salin apa adanya; bila bercampur bahasa lain atau salah ketik, perbaiki jadi bahasa Indonesia yang bersih)', ja: 'Jepang', en: 'Inggris', id: 'Indonesia', auto: 'Jepang atau Inggris (tiap baris bisa salah satunya; baris yang sudah bersih berbahasa Indonesia salin apa adanya; bila bercampur bahasa lain atau salah ketik, perbaiki jadi bahasa Indonesia yang bersih)' };
 const plainName = (t) => String(t || '').replace(ESC, '').replace(/[\[\]|\n]/g, ' ').trim();
+const oneLine = (t) => String(t || '').replace(/\r?\n/g, NL);
+/** Penanda batas panjang di kurung id, mis. "maks 38 kar/baris, 4 baris" (dialog/deskripsi) atau "maks 12 kar" (label). */
+const limitTag = (u) => [u.limit ? `maks ${u.limit.line} kar/baris, ${u.limit.lines} baris` : '', u.maxChars ? `maks ${u.maxChars} kar` : ''].filter(Boolean).join(', ');
+/** Alasan penolakan yang ditulis untuk AI (dipakai di bagian perbaikan). */
+const CHAT_WHY = {
+  empty: 'Terjemahan kosong.',
+  token: 'Token kode ⟦n⟧ hilang, berubah, atau berlebih. Salin semua token persis seperti di sumber, tiap token tepat satu kali.',
+  stray: 'Masih ada huruf Jepang atau aksara asing. Terjemahkan semuanya ke bahasa target.',
+  num: 'Angka di hasil tidak sama dengan sumber. Pakai angka yang persis sama.',
+  len: 'Panjang hasil tidak wajar dibanding sumber (terlalu pendek atau panjang). Terjemahkan isi baris ini saja, lengkap.',
+};
+/** Cache layak dipakai ulang bila lolos pemeriksaan yang sama dengan hasil baru. */
+const cacheOk = (c, original, tgt) => !!c && !stray(c.text) && !foreignWords(c.text, original).length && !lenOff(c.text, original) && !numDiff(original, c.text) && !englishLeft(c.text, tgt, original).length;
 /**
  * Pecah teks yang belum selesai menjadi bagian-bagian untuk ditempel ke aplikasi AI.
- * Satu baris per teks unik: "[id] teks" (kode game dimasker, baris baru ditulis ⏎), diawali instruksi, gaya, catatan karakter, dan glosarium.
+ * Satu baris per teks unik: "[id|pembicara|batas] teks" (kode game dimasker, baris baru ditulis ⏎), diawali instruksi, gaya, catatan karakter, glosarium,
+ * konteks (3 baris sebelum bagian), acuan teks mirip yang sudah selesai, dan batas panjang, sama seperti yang dikirim mode API.
+ * opts: {all: semua entri proyek (untuk konteks dan acuan; bawaan = entries), only: Set id (bagian perbaikan), hints: Map id -> alasan, repair: bool}
  */
-export function buildChatParts(project, entries, cfg, perPart = 150, maxChars = 6000) {
+export function buildChatParts(project, entries, cfg, perPart = 150, maxChars = 6000, opts = {}) {
+  const all = (opts.all || entries).slice().sort((a, b) => a.id - b.id), pos = new Map(all.map((e, i) => [e.id, i]));
+  const hints = opts.hints || new Map(), effc = effCfg(project, cfg);
+  const onlyOrig = opts.only ? new Set(entries.filter((e) => opts.only.has(e.id)).map((e) => e.original)) : null;
   const groups = new Map();
-  for (const e of entries.filter((x) => TODO.has(x.status)).sort((a, b) => a.id - b.id)) { if (!groups.has(e.original)) groups.set(e.original, e); }
+  for (const e of entries.filter((x) => TODO.has(x.status) && (!onlyOrig || onlyOrig.has(x.original))).sort((a, b) => a.id - b.id)) { if (!groups.has(e.original)) groups.set(e.original, []); groups.get(e.original).push(e); }
   const gl = parseGlossary(cfg.glossary), cn = parseNotes(cfg.charNotes);
-  const units = [...groups].map(([original, e0]) => ({ id: e0.id, original, speaker: e0.meta?.speaker || '', text: maskText(original).text.replace(/\r?\n/g, NL) }));
-  const batches = makeBatches(units, Math.max(10, perPart), maxChars);
+  // Memori terjemahan: teks pendek yang mirip (beda angka/huruf besar) dan sudah selesai dipakai sebagai acuan pilihan kata.
+  const tm = new Map(), plain = (x) => maskText(x).tokens.length === 0;
+  for (const e of all) if (e.original.length <= 120 && e.translation?.trim() && (e.status === 'done' || e.status === 'edited')) { const k = simNorm(e.original); if (!tm.has(k)) tm.set(k, e); }
+  const units = [...groups].map(([original, es]) => {
+    const e0 = es[0], p = pos.get(e0.id), r0 = original.length <= 120 ? tm.get(simNorm(original)) : null;
+    const lims = es.map((x) => limitFor(x, effc)).filter(Boolean), labs = es.map((x) => labelLimit(x, cfg)).filter(Boolean);
+    return {
+      id: e0.id, original, speaker: e0.meta?.speaker || '', text: oneLine(maskText(original).text),
+      limit: lims.reduce((a, b) => (a ? { line: Math.min(a.line, b.line), lines: Math.min(a.lines, b.lines) } : b), null),
+      maxChars: labs.length ? Math.min(...labs) : 0,
+      ref: r0 && r0.original !== original && plain(r0.original) && plain(r0.translation) ? { from: oneLine(r0.original.slice(0, 160)), to: oneLine(r0.translation.slice(0, 160)) } : null,
+      ctx: p == null ? [] : all.slice(Math.max(0, p - 3), p).filter((x) => x.file === e0.file).map((x) => oneLine(maskText(x.original).text.slice(0, 200))),
+    };
+  });
+  const batches = makeBatches(units, Math.max(10, perPart), maxChars), tgtName = LANG_NAME[project.tgt] || project.tgt;
   return batches.map((us, i) => {
     const terms = new Map(), notes = new Map();
     us.forEach((u) => { termsFor(gl, `${u.original}\n${u.speaker}`).forEach(([a, b]) => terms.set(a, b)); notesFor(cn, u.speaker).forEach(([a, b]) => notes.set(a, b)); });
-    const lines = us.map((u) => { const sp = plainName(u.speaker); return `[${u.id}${sp ? '|' + sp : ''}] ${u.text}`; });
+    const lines = us.map((u) => { const meta = [plainName(u.speaker), limitTag(u)].filter(Boolean).join('|'); return `[${u.id}${meta ? '|' + meta : ''}] ${u.text}`; });
+    const refs = us.filter((u) => u.ref), ctx = us[0].ctx, fixes = us.filter((u) => hints.has(u.id)), limited = us.some((u) => limitTag(u));
     const head = [
       `# TUGAS`,
-      `Terjemahkan teks game RPG dari bahasa ${LANG_NAME[project.src] || project.src} ke bahasa ${LANG_NAME[project.tgt] || project.tgt}. Ini bagian ${i + 1} dari ${batches.length}, berisi ${us.length} baris.`,
+      `Terjemahkan teks game RPG dari bahasa ${LANG_NAME[project.src] || project.src} ke bahasa ${tgtName}. ${opts.repair ? `Ini bagian perbaikan (${i + 1} dari ${batches.length}), berisi ${us.length} baris. Balasan sebelumnya untuk baris-baris ini ditolak; baca bagian CATATAN PERBAIKAN dan terjemahkan ulang dengan benar.` : `Ini bagian ${i + 1} dari ${batches.length}, berisi ${us.length} baris.`}`,
       ``, `# ATURAN FORMAT (WAJIB)`,
       `1. Balas HANYA dengan baris terjemahan, satu baris untuk tiap baris sumber, dengan format: [id] terjemahan`,
       `2. Salin nomor id persis. Jangan melewatkan, menggabung, mengurutkan ulang, atau menambah baris. Jumlah baris balasan harus ${us.length}.`,
@@ -1882,16 +1914,23 @@ export function buildChatParts(project, entries, cfg, perPart = 150, maxChars = 
       `3d. Jangan menulis kode game sendiri: tidak ada kode \\C[2], \\V[1], \\N[1], tag <...>, atau %1 kecuali yang sudah berupa token ⟦n⟧ di sumber. Kalau sumber tidak punya kode, terjemahan juga tidak.`,
       `3e. Baris yang isinya cuma kode, angka, nama variabel/file/switch, atau pasangan key=value: salin persis. Jangan "memperbaiki", merapikan, atau mengubah tanda kurung, operator, angka, dan besar kecil huruf pada kode. Identifier seperti CamelCase, snake_case, atau HURUF_BESAR tidak diterjemahkan.`,
       `4. Tanda ${NL} berarti pindah baris di dalam satu teks. Pertahankan tanda itu (jangan diganti baris baru sungguhan) dan taruh di tempat yang wajar.`,
-      `5. Bagian "|nama" setelah id hanyalah konteks pembicara. Jangan ikut ditulis di balasan dan jangan diterjemahkan sebagai teks.`,
+      `5. Bagian setelah "|" di dalam kurung id hanyalah konteks: nama pembicara dan/atau batas panjang (diawali "maks"). Jangan ikut ditulis di balasan dan jangan diterjemahkan sebagai teks.`,
       `6. Tanpa komentar, pembuka, penutup, atau blok kode.`,
       `7. Teks sumber bisa sudah setengah terjemah, salah ketik, atau berisi kata bahasa lain (mis. Portugis "mesmo", "você", Spanyol "gracias"). Perbaiki semuanya: hasil harus bersih, ejaan benar, tanpa sisa kata asing.`,
+      `8. Terjemahkan juga kata kasar, slang, dan istilah dewasa dengan padanan alami. Ini dialog fiksi dalam game: jangan disensor, diperhalus, dilewati, atau diringkas, dan jangan menolak menerjemahkan.`,
+      `9. Bahasa keluaran hanya ${tgtName}. Jangan menjawab dalam bahasa lain (Prancis, Spanyol, Portugis, dll), termasuk untuk baris pendek, kutipan, atau baris yang tampak sudah diterjemahkan.`,
+      `10. Angka (digit) di terjemahan harus sama persis dengan sumber: jangan diubah, ditambah, atau dihapus. Istilah UI yang pendek tetap pendek.`,
+      ...(limited ? [`11. Bila sebuah baris punya batas "maks N kar/baris, M baris", terjemahan harus muat: pindah baris dengan ${NL}, jangan melebihi N karakter per baris (token ⟦n⟧ tidak dihitung) atau M baris. Bila batasnya "maks N kar" (label, nama, atau pilihan), tulis satu baris saja tanpa ${NL}, paling banyak N karakter; pilih sinonim atau singkatan yang lebih pendek. Bahasa Indonesia biasanya lebih panjang dari Jepang, jadi persingkat kata-katanya tanpa menghilangkan arti.`] : []),
       ...((cfg.style || '').trim() ? [``, `# GAYA BAHASA`, cfg.style.trim().replace(/\s+/g, ' ')] : []),
       ...(notes.size ? [``, `# CATATAN KARAKTER (nama pembicara: gaya bicara)`, ...[...notes].map(([a, b]) => `${a}: ${b}`)] : []),
       ...(terms.size ? [``, `# GLOSARIUM (pakai terjemahan ini persis)`, ...[...terms].map(([a, b]) => `${a} = ${b}`)] : []),
+      ...(ctx.length ? [``, `# KONTEKS (baris sebelum bagian ini, hanya referensi: jangan diterjemahkan atau dibalas)`, ...ctx] : []),
+      ...(refs.length ? [``, `# ACUAN TEKS MIRIP (sudah diterjemahkan: pakai pilihan kata yang sama, tapi angka dan nama ikut teks sumber)`, ...refs.map((u) => `[${u.id}] ${u.ref.from} => ${u.ref.to}`)] : []),
+      ...(fixes.length ? [``, `# CATATAN PERBAIKAN (alasan penolakan balasan sebelumnya)`, ...fixes.map((u) => `[${u.id}] ${hints.get(u.id)}`)] : []),
       ``, `# TEKS`,
     ];
     const foot = [``, `# AKHIR. Balas sekarang dengan ${us.length} baris berformat [id] terjemahan, tanpa teks lain.`];
-    return { index: i + 1, total: batches.length, count: us.length, ids: us.map((u) => u.id), text: [...head, ...lines, ...foot].join('\n') + '\n' };
+    return { index: i + 1, total: batches.length, count: us.length, ids: us.map((u) => u.id), repair: !!opts.repair, text: [...head, ...lines, ...foot].join('\n') + '\n' };
   });
 }
 /** Baca balasan AI. Baris tanpa nomor di antara dua baris bernomor dianggap lanjutan baris sebelumnya; yang di awal atau akhir dibuang. */
@@ -1910,24 +1949,62 @@ export function parseChatReply(text, ids = null) {
   ignored += pending.length;
   return { rows, ignored };
 }
-/** Terapkan balasan ke entry. Satu terjemahan berlaku untuk semua entry dengan teks asli yang sama. Entry hasil edit manual tidak ditimpa. */
-export function applyChatRows(entries, rows) {
-  const byId = new Map(entries.map((e) => [e.id, e])), byOrig = new Map();
+/**
+ * Terapkan balasan ke entry. Satu terjemahan berlaku untuk semua entry dengan teks asli yang sama. Entry hasil edit manual tidak ditimpa.
+ * Tanpa opts, pemeriksaannya seperti semula (token, kode, huruf asing, kata Portugis/Spanyol).
+ * Dengan opts {tgt, glossary}, pemeriksaannya disamakan dengan mode API: kana sisa diubah ke romaji (fixKana), angka berbeda dan panjang tidak wajar ditolak,
+ * sedangkan istilah glosarium terlewat dan kata Inggris tersisa diterima tetapi dilaporkan (warnGloss, warnLang), dan hasil bersih dikembalikan di `cache`.
+ * `reasons` memuat alasan penolakan per id (untuk bagian perbaikan).
+ */
+export function applyChatRows(entries, rows, opts = {}) {
+  const byId = new Map(entries.map((e) => [e.id, e])), byOrig = new Map(), strict = !!opts.tgt, gl = opts.glossary || [];
   for (const e of entries) { if (!byOrig.has(e.original)) byOrig.set(e.original, []); byOrig.get(e.original).push(e); }
-  const out = { updates: [], texts: 0, empty: [], badToken: [], foreign: [], unknown: [], dup: 0 }, seen = new Set();
+  const out = { updates: [], texts: 0, empty: [], badToken: [], foreign: [], unknown: [], dup: 0, badNum: [], badLen: [], warnGloss: [], warnLang: [], cache: [], reasons: new Map() }, seen = new Set();
   for (const r of rows) {
     const e0 = byId.get(r.id); if (!e0) { out.unknown.push(r.id); continue; }
     if (seen.has(e0.original)) { out.dup++; continue; }
-    const t = String(r.text).replace(new RegExp(`\\s*${NL}\\s*`, 'g'), '\n').trim();
+    let t = String(r.text).replace(new RegExp(`\\s*${NL}\\s*`, 'g'), '\n').trim();
+    if (strict) t = fixKana(t);
     const lead = (e0.original.match(/^\s*/) || [''])[0].replace(/\r/g, ''), trail = (e0.original.match(/\s*$/) || [''])[0].replace(/\r/g, '');
-    if (!t) { out.empty.push(r.id); continue; }
-    const mk = maskText(e0.original), u = unmaskText(t, mk.tokens);
-    if (!u.ok || codeProblem(mk.text.replace(/\r?\n/g, '\n'), t)) { out.badToken.push(r.id); continue; }
-    if (stray(t) || foreignWords(t, e0.original).length) { out.foreign.push(r.id); continue; }
+    if (!t) { out.empty.push(r.id); out.reasons.set(r.id, CHAT_WHY.empty); continue; }
+    const mk = maskText(e0.original), u = unmaskText(t, mk.tokens), cp = u.ok ? codeProblem(mk.text.replace(/\r?\n/g, '\n'), t) : '';
+    if (!u.ok || cp) { out.badToken.push(r.id); out.reasons.set(r.id, u.ok ? cp : CHAT_WHY.token); continue; }
+    if (stray(t)) { out.foreign.push(r.id); out.reasons.set(r.id, CHAT_WHY.stray); continue; }
+    if (foreignWords(t, e0.original).length) { out.foreign.push(r.id); out.reasons.set(r.id, foreignMsg(t, e0.original)); continue; }
+    if (strict && numDiff(mk.text, t)) { out.badNum.push(r.id); out.reasons.set(r.id, CHAT_WHY.num); continue; }
+    if (strict && lenOff(t, mk.text)) { out.badLen.push(r.id); out.reasons.set(r.id, CHAT_WHY.len); continue; }
     seen.add(e0.original); out.texts++;
+    if (strict) {
+      const gm = gl.length && glossMissing(gl, e0.original, u.text).length, lm = englishLeft(t, opts.tgt, mk.text).length || garbled(t, mk.text).length;
+      if (gm) out.warnGloss.push(r.id);
+      if (lm) out.warnLang.push(r.id);
+      if (!gm && !lm) out.cache.push({ original: e0.original, speaker: e0.meta?.speaker || '', text: u.text });
+    }
     for (const e of byOrig.get(e0.original)) if (TODO.has(e.status)) out.updates.push({ ...e, translation: lead + u.text + trail, status: 'done', error: '' });
   }
   return out;
+}
+/** Isi otomatis teks yang tidak perlu dikirim ke AI: padanan persis di glosarium, atau hasil di cache yang masih lolos pemeriksaan. Mengubah `entries` di tempat. */
+export async function chatPrefill(project, entries, cfg, cats = null) {
+  const gl = parseGlossary(cfg.glossary), cn = parseNotes(cfg.charNotes), groups = new Map(), hits = []; let texts = 0;
+  for (const e of entries) if (TODO.has(e.status) && (!cats || cats.has(e.category))) { if (!groups.has(e.original)) groups.set(e.original, []); groups.get(e.original).push(e); }
+  for (const [original, es] of groups) {
+    const exact = gl.find(([a]) => a.toLowerCase() === original.trim().toLowerCase()), sp = es[0].meta?.speaker || '';
+    let text = exact ? exact[1] : '';
+    if (!text) { const c = await dbGet('cache', await cacheKey(project, cfg, original, termsFor(gl, `${original}\n${sp}`), notesFor(cn, sp))); if (cacheOk(c, original, project.tgt)) text = c.text; }
+    if (!text) continue;
+    texts++; es.forEach((e) => { e.translation = text; e.status = 'done'; e.error = ''; hits.push(e); });
+  }
+  if (hits.length) await dbPutMany('entries', hits);
+  return { texts, entries: hits.length };
+}
+/** Simpan hasil bersih dari balasan AI (applyChatRows(...).cache) ke cache terjemahan, dengan kunci yang sama seperti mode API. */
+export async function saveChatCache(project, cfg, items) {
+  if (!items?.length) return 0;
+  const gl = parseGlossary(cfg.glossary), cn = parseNotes(cfg.charNotes), at = Date.now(), rows = [];
+  for (const it of items) rows.push({ key: await cacheKey(project, cfg, it.original, termsFor(gl, `${it.original}\n${it.speaker}`), notesFor(cn, it.speaker)), text: it.text, at });
+  await dbPutMany('cache', rows);
+  return rows.length;
 }
 
 // ===== 5. TRANSLATE (batch, cache, retry, resume, klien LLM, biaya) =====
@@ -2348,7 +2425,7 @@ export async function runTranslation(project, cfg, o = {}) {
     const terms = termsFor(gl, `${original}\n${entries[0].meta?.speaker || ''}`);
     const notes = notesFor(cn, entries[0].meta?.speaker || '');
     const key = await cacheKey(project, cfg, original, terms, notes), c = await dbGet('cache', key);
-    if (c && !stray(c.text) && !foreignWords(c.text, original).length && !lenOff(c.text, original) && !numDiff(original, c.text) && !englishLeft(c.text, project.tgt, original).length) { entries.forEach((e) => hits.push({ ...e, translation: c.text, status: 'done', error: '' })); continue; }
+    if (cacheOk(c, original, project.tgt)) { entries.forEach((e) => hits.push({ ...e, translation: c.text, status: 'done', error: '' })); continue; }
     const m = maskText(original), e0 = entries[0], p = pos.get(e0.id);
     units.push({
       id: uid++, key, text: m.text, tokens: m.tokens, speaker: e0.meta?.speaker || '', entries, terms, notes, must: termsFor(gl, original),
@@ -3488,44 +3565,70 @@ async function viewEkspor() {
     } catch (e) { out.replaceChildren(card(h('p', { class: 'err' }, e.message))); }
     btn.disabled = false;
   } }, 'Buat patch');
-  let chatUrls = [];
-  const chatOut = h('div'), chatMsg = h('p', { class: 'mut' }), perPart = h('input', { type: 'number', value: '150', min: '10', max: '100000' }), perChars = h('input', { type: 'number', value: '6000', min: '1000', max: '1000000' });
+  const chatUrls = [], fixUrls = [], chatReasons = new Map();
+  const chatOut = h('div'), fixOut = h('div'), fixBox = h('div'), chatMsg = h('p', { class: 'mut' }), perPart = h('input', { type: 'number', value: '150', min: '10', max: '100000' }), perChars = h('input', { type: 'number', value: '6000', min: '1000', max: '1000000' });
   const paste = h('textarea', { rows: '5', spellcheck: 'false', placeholder: 'Tempel balasan AI di sini…' });
   const fmtIds = (a) => (a.length ? ` (id ${a.slice(0, 8).join(', ')}${a.length > 8 ? ', …' : ''})` : '');
+  const renderParts = (parts, into, urls, tag) => {
+    urls.forEach((u) => URL.revokeObjectURL(u)); urls.length = 0;
+    into.replaceChildren(...parts.map((pt) => {
+      const url = URL.createObjectURL(new Blob([pt.text], { type: 'text/plain;charset=utf-8' })); urls.push(url);
+      const label = `${pt.repair ? 'Perbaikan' : 'Bagian'} ${pt.index}`;
+      return h('div', { class: 'row' }, h('span', {}, `${label} dari ${pt.total} · ${pt.count} teks`),
+        h('button', { onclick: async () => { try { await navigator.clipboard.writeText(pt.text); chatMsg.className = 'mut'; chatMsg.textContent = `${label} disalin`; } catch { chatMsg.className = 'err'; chatMsg.textContent = 'Gagal menyalin. Pakai Unduh'; } } }, 'Salin'),
+        h('a', { class: 'file', href: url, download: `rpgtl-${p.id}-${tag}-${pt.index}.txt` }, 'Unduh'));
+    }));
+  };
   const prepare = async () => {
-    chatUrls.forEach((u) => URL.revokeObjectURL(u)); chatUrls = [];
+    fixOut.replaceChildren();
+    const cfg2 = await loadConfig();
     // Pakai pilihan kategori dari tab Translate (kalau sudah dibuka); teks yang sudah selesai tidak terpengaruh.
     const allEntries = await dbQuery('entries', 'projectId', p.id); await skipKeyOnly(allEntries);
     const sel = catSel.pid === p.id && catSel.set ? catSel.set : null;
-    const parts = buildChatParts(p, sel ? allEntries.filter((e) => !TODO.has(e.status) || sel.has(e.category)) : allEntries, await loadConfig(), Number(perPart.value) || 150, Number(perChars.value) || 6000);
-    chatMsg.className = 'mut'; chatMsg.textContent = '';
+    // Teks yang padanannya sudah ada di glosarium (persis) atau cache diisi langsung, tidak perlu dikirim ke AI.
+    let pre = { texts: 0 }; try { pre = await chatPrefill(p, allEntries, cfg2, sel); } catch { /* lanjut tanpa pengisian otomatis */ }
+    const parts = buildChatParts(p, sel ? allEntries.filter((e) => !TODO.has(e.status) || sel.has(e.category)) : allEntries, cfg2, Number(perPart.value) || 150, Number(perChars.value) || 6000, { all: allEntries });
+    chatMsg.className = 'mut'; chatMsg.textContent = pre.texts ? `${pre.texts} teks diisi otomatis dari glosarium atau cache, tidak perlu dikirim ke AI` : '';
     if (!parts.length) { chatOut.replaceChildren(h('p', { class: 'mut' }, todoBy.size && !catSel.set.size ? 'Pilih minimal satu kategori dulu.' : 'Tidak ada teks yang belum selesai.')); return; }
-    chatOut.replaceChildren(...parts.map((pt) => {
-      const url = URL.createObjectURL(new Blob([pt.text], { type: 'text/plain;charset=utf-8' })); chatUrls.push(url);
-      return h('div', { class: 'row' }, h('span', {}, `Bagian ${pt.index} dari ${pt.total} · ${pt.count} teks`),
-        h('button', { onclick: async () => { try { await navigator.clipboard.writeText(pt.text); chatMsg.className = 'mut'; chatMsg.textContent = `Bagian ${pt.index} disalin`; } catch { chatMsg.className = 'err'; chatMsg.textContent = 'Gagal menyalin. Pakai Unduh'; } } }, 'Salin'),
-        h('a', { class: 'file', href: url, download: `rpgtl-${p.id}-bagian-${pt.index}.txt` }, 'Unduh'));
-    }));
+    renderParts(parts, chatOut, chatUrls, 'bagian');
+  };
+  // Bagian perbaikan: hanya baris yang ditolak pada impor, disertai alasannya supaya AI tahu apa yang harus dibetulkan.
+  const prepareFix = async () => {
+    const es = await dbQuery('entries', 'projectId', p.id), cfg2 = await loadConfig();
+    const byId = new Map(es.map((e) => [e.id, e])), todo = new Set(es.filter((e) => TODO.has(e.status)).map((e) => e.original));
+    const hints = new Map([...chatReasons].filter(([id]) => todo.has(byId.get(id)?.original)));
+    if (!hints.size) { fixOut.replaceChildren(h('p', { class: 'mut' }, 'Tidak ada baris ditolak yang masih menunggu perbaikan.')); return; }
+    renderParts(buildChatParts(p, es, cfg2, Number(perPart.value) || 150, Number(perChars.value) || 6000, { all: es, only: new Set(hints.keys()), hints, repair: true }), fixOut, fixUrls, 'perbaikan');
   };
   const doImport = async (txt) => {
     chatMsg.className = 'mut'; chatMsg.textContent = 'Membaca…';
     try {
+      const cfg2 = await loadConfig();
       const es = await dbQuery('entries', 'projectId', p.id), { rows, ignored } = parseChatReply(txt, new Set(es.map((e) => e.id)));
       if (!rows.length) { chatMsg.className = 'err'; chatMsg.textContent = 'Tidak ada baris berformat [id] terjemahan'; return false; }
-      const r = applyChatRows(es, rows);
+      const r = applyChatRows(es, rows, { tgt: p.tgt, glossary: parseGlossary(cfg2.glossary) });
       if (r.updates.length) await dbPutMany('entries', r.updates);
-      const upd = new Set(r.updates.map((u) => u.id)), left = new Set(es.filter((e) => TODO.has(e.status) && !upd.has(e.id)).map((e) => e.original)).size;
+      let saved = 0; try { saved = await saveChatCache(p, cfg2, r.cache); } catch { /* cache gagal tidak menggagalkan impor */ }
+      const byId = new Map(es.map((e) => [e.id, e])), upd = new Set(r.updates.map((u) => u.id)), updOrig = new Set(r.updates.map((u) => u.original));
+      for (const id of [...chatReasons.keys()]) if (updOrig.has(byId.get(id)?.original)) chatReasons.delete(id);
+      r.reasons.forEach((why, id) => chatReasons.set(id, why));
+      const left = new Set(es.filter((e) => TODO.has(e.status) && !upd.has(e.id)).map((e) => e.original)).size;
       chatMsg.textContent = [`Baris terbaca: ${rows.length}`, `Teks diterjemahkan: ${r.texts} (${r.updates.length} entri)`, `Sisa belum diterjemahkan: ${left} teks`, `Kode game rusak atau hilang (ditolak): ${r.badToken.length}${fmtIds(r.badToken)}`,
-        `Masih ada kata Portugis/Spanyol (ditolak): ${r.foreign.length}${fmtIds(r.foreign)}`, `Terjemahan kosong: ${r.empty.length}${fmtIds(r.empty)}`, `id tidak dikenal: ${r.unknown.length}${fmtIds(r.unknown)}`, `Duplikat diabaikan: ${r.dup}`, `Baris tanpa nomor di awal atau akhir diabaikan: ${ignored}`].join('\n');
+        `Masih ada kata Portugis/Spanyol atau huruf asing (ditolak): ${r.foreign.length}${fmtIds(r.foreign)}`, `Angka tidak sama dengan sumber (ditolak): ${r.badNum.length}${fmtIds(r.badNum)}`, `Panjang tidak wajar (ditolak): ${r.badLen.length}${fmtIds(r.badLen)}`,
+        `Terjemahan kosong: ${r.empty.length}${fmtIds(r.empty)}`, `id tidak dikenal: ${r.unknown.length}${fmtIds(r.unknown)}`, `Duplikat diabaikan: ${r.dup}`, `Baris tanpa nomor di awal atau akhir diabaikan: ${ignored}`,
+        ...(r.warnGloss.length ? [`Diterima, tapi istilah glosarium tidak terpakai: ${r.warnGloss.length}${fmtIds(r.warnGloss)} (cek di Review, filter Glosarium tidak dipakai)`] : []),
+        ...(r.warnLang.length ? [`Diterima, tapi masih ada kata Inggris: ${r.warnLang.length}${fmtIds(r.warnLang)} (cek di Review, filter bahasa terjemahan)`] : []),
+        ...(saved ? [`Disimpan ke cache: ${saved} teks`] : [])].join('\n');
+      fixBox.replaceChildren(chatReasons.size ? h('button', { onclick: prepareFix }, `Siapkan bagian perbaikan (${chatReasons.size} teks ditolak)`) : '');
       return r.updates.length > 0;
     } catch (e) { chatMsg.className = 'err'; chatMsg.textContent = e.message; return false; }
   };
   return [card(h('h2', {}, 'Ekspor'), h('p', { class: 'mut' }, `Siap diekspor: ${ready}\nBelum diterjemahkan (tetap asli): ${pend}\nError (tetap asli): ${err}`), btn), out,
-    fold('Terjemah lewat chat AI', h('p', { class: 'mut' }, 'Untuk menerjemahkan di aplikasi AI lain tanpa API. Teks yang belum selesai dipecah jadi bagian-bagian berisi instruksi, gaya, dan glosarium. Kirim satu bagian ke AI (tempel atau unggah file), lalu tempel balasannya di bawah. Pilih kategori yang mau dikirim di bawah (sama dengan pilihan di tab Translate). Bagian dihitung ulang dari teks yang belum selesai tiap kali kamu menyiapkannya.'),
+    fold('Terjemah lewat chat AI', h('p', { class: 'mut' }, 'Untuk menerjemahkan di aplikasi AI lain tanpa API. Teks yang belum selesai dipecah jadi bagian-bagian berisi instruksi, gaya, dan glosarium. Kirim satu bagian ke AI (tempel atau unggah file), lalu tempel balasannya di bawah. Pilih kategori yang mau dikirim di bawah (sama dengan pilihan di tab Translate). Bagian dihitung ulang dari teks yang belum selesai tiap kali kamu menyiapkannya. Teks yang sudah ada di glosarium atau cache diisi otomatis, dan tiap balasan diperiksa seperti di mode API (kode, angka, panjang). Baris yang ditolak bisa dikirim ulang lewat bagian perbaikan beserta alasannya.'),
       chatCats, h('label', {}, 'Teks per bagian'), perPart, h('label', {}, 'Maks karakter per bagian'), perChars, h('button', { class: 'pri', onclick: prepare }, 'Siapkan bagian'), chatOut,
       h('label', {}, 'Balasan AI'), paste,
       h('div', { class: 'row' }, h('button', { class: 'pri', onclick: async () => { if (await doImport(paste.value)) paste.value = ''; } }, 'Impor tempelan'),
-        h('label', { class: 'file' }, 'Impor file (.txt)', h('input', { type: 'file', accept: '.txt,text/plain', multiple: '', onchange: async (ev) => { const fs = [...ev.target.files]; ev.target.value = ''; if (fs.length) await doImport((await Promise.all(fs.map((f) => f.text()))).join('\n')); } }))), chatMsg)];
+        h('label', { class: 'file' }, 'Impor file (.txt)', h('input', { type: 'file', accept: '.txt,text/plain', multiple: '', onchange: async (ev) => { const fs = [...ev.target.files]; ev.target.value = ''; if (fs.length) await doImport((await Promise.all(fs.map((f) => f.text()))).join('\n')); } }))), chatMsg, fixBox, fixOut)];
 }
 
 // ===== 6b. PENJELAJAH PENYIMPANAN (tampilan ala file manager untuk IndexedDB dan localStorage) =====
